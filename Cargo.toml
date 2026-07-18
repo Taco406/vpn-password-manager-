@@ -1,0 +1,74 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/core",
+    "crates/nm-host",
+    "crates/cli",
+    "services/api",
+    "apps/desktop/src-tauri",
+]
+# src-tauri is intentionally excluded from default-members: it depends on system
+# webkit2gtk/gtk libraries that are not always present. `cargo test`/`cargo check`
+# with no `-p` therefore never require a desktop GUI toolchain. All real logic
+# lives in `sentinel-core`, which is fully headless and covered by tests.
+default-members = [
+    "crates/core",
+    "crates/nm-host",
+    "crates/cli",
+    "services/api",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.94"
+license = "MIT"
+repository = "https://github.com/taco406/vpn-password-manager-"
+authors = ["SENTINEL"]
+
+[workspace.dependencies]
+# --- crypto ---
+chacha20poly1305 = "0.10"
+hkdf = "0.12"
+sha2 = "0.10"
+sha1 = "0.10"
+hmac = "0.12"
+argon2 = "0.5"
+zeroize = { version = "1.8", features = ["derive"] }
+secrecy = "0.10"
+subtle = "2.6"
+rand = "0.8"
+rand_core = "0.6"
+x25519-dalek = { version = "2", features = ["static_secrets", "getrandom"] }
+p256 = { version = "0.13", features = ["ecdh"] }
+base64 = "0.22"
+zstd = "0.13"
+
+# --- serialization / core ---
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+uuid = { version = "1", features = ["v4", "serde"] }
+time = { version = "0.3", features = ["serde", "formatting", "macros"] }
+minijinja = "2"
+qrcode = "0.14"
+printpdf = "0.7"
+zxcvbn = "3"
+rusqlite = { version = "0.32", features = ["bundled"] }
+url = "2"
+
+# --- async / net ---
+tokio = { version = "1", features = ["full"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
+futures = "0.3"
+
+# --- tracing ---
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# --- internal ---
+sentinel-core = { path = "crates/core" }
+
+[profile.release]
+strip = true
+lto = "thin"

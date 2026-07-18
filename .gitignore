@@ -1,0 +1,49 @@
+# Rust
+/target
+**/target
+Cargo.lock.orig
+
+# Node
+node_modules
+.pnpm-store
+dist
+dist-ssr
+*.local
+.vite
+
+# Playwright
+/apps/**/test-results
+/apps/**/playwright-report
+/apps/**/.playwright
+
+# Env & secrets — NEVER commit
+.env
+.env.*
+!.env.example
+*.pem
+!ci-fixture.pem
+*.key
+!*.pub.key
+secrets/
+.sentinel/
+vault.db
+*.sqlite
+
+# Local Postgres data (dev cluster)
+/.pgdata
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Editor / tooling
+.idea
+.vscode/*
+!.vscode/extensions.json
+*.swp
+.claude/
+
+# Build artifacts / uploads
+/apps/desktop/src-tauri/gen
+/apps/ios-key/build
+*.log

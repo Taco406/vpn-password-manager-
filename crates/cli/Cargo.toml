@@ -1,0 +1,15 @@
+[package]
+name = "sentinel-cli"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "SENTINEL dev/demo CLI: seed data, recovery PDF, mock flows."
+
+[[bin]]
+name = "sentinel"
+path = "src/main.rs"
+
+[dependencies]
+sentinel-core = { workspace = true }
+serde_json = { workspace = true }

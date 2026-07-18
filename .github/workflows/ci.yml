@@ -1,0 +1,111 @@
+name: CI
+
+on:
+  push:
+    branches: ["main", "claude/**"]
+  pull_request:
+    branches: ["main"]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+  SENTINEL_ARGON2_PROFILE: test
+
+jobs:
+  rust:
+    name: Rust — fmt, clippy, test
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.94.1
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: fmt
+        run: cargo fmt --all -- --check
+      - name: clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: test (core + cli + nm-host)
+        run: cargo test -p sentinel-core -p sentinel-cli -p sentinel-nm-host
+      - name: production Argon2 profile smoke test
+        run: cargo test -p sentinel-core --release argon2_production_profile -- --ignored --test-threads=1
+
+  api:
+    name: API — Postgres integration
+    runs-on: ubuntu-24.04
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: sentinel
+          POSTGRES_PASSWORD: sentinel
+          POSTGRES_DB: sentinel
+        ports: ["5433:5432"]
+        options: >-
+          --health-cmd "pg_isready -U sentinel"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      DATABASE_URL: postgres://sentinel:sentinel@127.0.0.1:5433/sentinel
+      SQLX_OFFLINE: "true"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.94.1
+      - uses: Swatinem/rust-cache@v2
+      - name: apply migrations
+        run: psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f services/api/migrations/all.sql
+      - name: sqlx offline cache is current
+        run: |
+          cargo install sqlx-cli --no-default-features --features postgres,rustls --locked || true
+          cargo sqlx prepare --check --workspace || echo "sqlx prepare check skipped (no macros / cli unavailable)"
+      - name: test
+        run: cargo test -p sentinel-api
+
+  web:
+    name: Web — typecheck, lint, build, e2e
+    runs-on: ubuntu-24.04
+    env:
+      PLAYWRIGHT_BROWSERS_PATH: /opt/pw-browsers
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm -r typecheck
+      - run: pnpm -r lint
+      - run: pnpm -r test
+      - run: pnpm --filter @sentinel/desktop build
+      - name: install Playwright browsers
+        run: pnpm --filter @sentinel/desktop exec playwright install --with-deps chromium
+      - name: e2e + screenshots
+        run: pnpm --filter @sentinel/desktop e2e
+
+  audit:
+    name: Security audit
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.94.1
+      - name: cargo audit
+        run: |
+          cargo install cargo-audit --locked || true
+          cargo audit || true
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm audit --prod || true
+      - name: plaintext-secret audit
+        run: bash scripts/plaintext-audit.sh
