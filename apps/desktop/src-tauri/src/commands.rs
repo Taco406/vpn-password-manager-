@@ -154,7 +154,60 @@ fn reunlock(state: &State<AppState>) -> R<()> {
 
 #[tauri::command]
 pub fn unlock_platform(state: State<AppState>) -> R<()> {
+    let dir = { state.inner.lock().unwrap().data_dir.clone() };
+    if crate::state::require_hello(&dir)
+        && !crate::hello::verify("Unlock SENTINEL").map_err(|m| err("hello", m))?
+    {
+        return Err(err("hello", "Windows Hello verification did not pass"));
+    }
     reunlock(&state)
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HelloStatus {
+    available: bool,
+    enabled: bool,
+}
+
+#[tauri::command]
+pub fn hello_status(state: State<AppState>) -> HelloStatus {
+    let dir = { state.inner.lock().unwrap().data_dir.clone() };
+    HelloStatus {
+        available: crate::hello::available(),
+        enabled: crate::state::require_hello(&dir),
+    }
+}
+
+/// Turn the Windows Hello unlock gate on/off. Enabling verifies Hello once first, then
+/// persists the choice to settings.json (takes effect next launch/lock).
+#[tauri::command]
+pub fn hello_set(state: State<AppState>, enabled: bool) -> R<()> {
+    if enabled {
+        if !crate::hello::available() {
+            return Err(err("hello", "Windows Hello isn't set up on this device"));
+        }
+        if !crate::hello::verify("Confirm Windows Hello for SENTINEL")
+            .map_err(|m| err("hello", m))?
+        {
+            return Err(err("hello", "Windows Hello verification cancelled"));
+        }
+    }
+    let dir = { state.inner.lock().unwrap().data_dir.clone() };
+    let path = dir.join("settings.json");
+    let mut cur = std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
+        .unwrap_or_else(default_settings);
+    if let Some(obj) = cur.as_object_mut() {
+        obj.insert("requireHello".into(), serde_json::Value::Bool(enabled));
+    }
+    std::fs::write(
+        &path,
+        serde_json::to_string_pretty(&cur).unwrap_or_default(),
+    )
+    .map_err(|e| err("io", e.to_string()))?;
+    Ok(())
 }
 
 #[tauri::command]

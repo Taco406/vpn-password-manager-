@@ -6,6 +6,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod commands;
+mod hello;
 mod nmhost;
 mod state;
 mod sync;
@@ -47,6 +48,8 @@ fn main() {
             commands::keyring_status,
             commands::lock,
             commands::unlock_platform,
+            commands::hello_status,
+            commands::hello_set,
             commands::unlock_recovery,
             commands::unlock_phone_begin,
             commands::unlock_phone_await,
