@@ -4,10 +4,13 @@
 use crate::config::JwtKeys;
 use crate::error::{ApiError, ApiResult};
 use hmac::{Mac, SimpleHmac};
-use jsonwebtoken::{Algorithm, Header, Validation};
+use jsonwebtoken::{Algorithm, DecodingKey, Header, Validation};
 use serde::{Deserialize, Serialize};
 use sha1::Sha1;
 use sha2::{Digest, Sha256};
+use std::collections::HashMap;
+use std::time::{Duration, Instant};
+use tokio::sync::RwLock;
 use uuid::Uuid;
 
 const ACCESS_TTL_SECS: i64 = 600; // 10 minutes
@@ -198,6 +201,170 @@ impl GoogleVerifier for MockGoogleVerifier {
     }
 }
 
+// --- real Google id_token verifier (RS256 against Google's JWKS) -----------
+
+/// Where Google publishes the RSA public keys that sign id_tokens.
+const GOOGLE_JWKS_URL: &str = "https://www.googleapis.com/oauth2/v3/certs";
+/// The two `iss` values Google uses for id_tokens.
+const GOOGLE_ISSUERS: [&str; 2] = ["https://accounts.google.com", "accounts.google.com"];
+/// How long a fetched JWKS is trusted before a routine refetch. An unknown `kid`
+/// forces a refetch regardless of age (Google rotates keys and publishes the new
+/// one before signing with it).
+const JWKS_TTL: Duration = Duration::from_secs(3600);
+/// Clock skew tolerated on `exp` (and `nbf`, if present), in seconds.
+const CLOCK_LEEWAY_SECS: u64 = 60;
+
+/// One entry of Google's JWKS (an RSA verifying key).
+#[derive(Deserialize)]
+struct Jwk {
+    kid: String,
+    n: String, // base64url-encoded modulus
+    e: String, // base64url-encoded exponent
+    #[serde(default)]
+    kty: String,
+    #[serde(default)]
+    alg: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct JwkSet {
+    keys: Vec<Jwk>,
+}
+
+/// The in-memory JWKS cache: decoded keys by `kid`, plus when they were fetched.
+struct JwksCache {
+    keys: HashMap<String, DecodingKey>,
+    fetched_at: Instant,
+}
+
+/// The subset of id_token claims we read after signature/`aud`/`iss`/`exp` have
+/// already been validated by `jsonwebtoken::decode`.
+#[derive(Deserialize)]
+struct GoogleIdClaims {
+    sub: String,
+    #[serde(default)]
+    email: Option<String>,
+}
+
+/// Production verifier: checks the id_token's RS256 signature against Google's JWKS
+/// and validates `aud` (== the configured OAuth client id), `iss`, and `exp`.
+pub struct GoogleIdTokenVerifier {
+    client_id: String,
+    http: reqwest::Client,
+    cache: RwLock<Option<JwksCache>>,
+}
+
+impl GoogleIdTokenVerifier {
+    /// Build a verifier bound to a specific Google OAuth client id (the expected `aud`).
+    pub fn new(client_id: String) -> Self {
+        let http = reqwest::Client::builder()
+            .timeout(Duration::from_secs(10))
+            .build()
+            .unwrap_or_default();
+        Self {
+            client_id,
+            http,
+            cache: RwLock::new(None),
+        }
+    }
+
+    /// Resolve the RSA verifying key for `kid`, refetching the JWKS if the cache is
+    /// empty, stale, or does not contain the key (rotation).
+    async fn key_for(&self, kid: &str) -> ApiResult<DecodingKey> {
+        {
+            let guard = self.cache.read().await;
+            if let Some(cache) = guard.as_ref() {
+                if cache.fetched_at.elapsed() < JWKS_TTL {
+                    if let Some(key) = cache.keys.get(kid) {
+                        return Ok(key.clone());
+                    }
+                }
+            }
+        }
+        // Cache missing, stale, or unknown kid → refetch once, then look up.
+        self.refresh().await?;
+        let guard = self.cache.read().await;
+        guard
+            .as_ref()
+            .and_then(|c| c.keys.get(kid).cloned())
+            .ok_or(ApiError::Unauthorized)
+    }
+
+    /// Fetch and decode Google's JWKS into the cache. A network/parse failure is a
+    /// server-side condition (`Internal`), not a rejected token.
+    async fn refresh(&self) -> ApiResult<()> {
+        let set: JwkSet = self
+            .http
+            .get(GOOGLE_JWKS_URL)
+            .send()
+            .await
+            .and_then(|r| r.error_for_status())
+            .map_err(|e| {
+                tracing::error!(error = %e, "google JWKS fetch failed");
+                ApiError::Internal
+            })?
+            .json()
+            .await
+            .map_err(|e| {
+                tracing::error!(error = %e, "google JWKS parse failed");
+                ApiError::Internal
+            })?;
+
+        let mut keys = HashMap::new();
+        for jwk in set.keys {
+            if !jwk.kty.is_empty() && jwk.kty != "RSA" {
+                continue;
+            }
+            if let Some(alg) = &jwk.alg {
+                if alg != "RS256" {
+                    continue;
+                }
+            }
+            match DecodingKey::from_rsa_components(&jwk.n, &jwk.e) {
+                Ok(key) => {
+                    keys.insert(jwk.kid, key);
+                }
+                Err(e) => tracing::warn!(error = %e, "skipping malformed JWK"),
+            }
+        }
+
+        let mut guard = self.cache.write().await;
+        *guard = Some(JwksCache {
+            keys,
+            fetched_at: Instant::now(),
+        });
+        Ok(())
+    }
+}
+
+#[async_trait::async_trait]
+impl GoogleVerifier for GoogleIdTokenVerifier {
+    async fn verify(&self, id_token: &str) -> ApiResult<GoogleClaims> {
+        let header = jsonwebtoken::decode_header(id_token).map_err(|_| ApiError::Unauthorized)?;
+        if header.alg != Algorithm::RS256 {
+            return Err(ApiError::Unauthorized);
+        }
+        let kid = header.kid.ok_or(ApiError::Unauthorized)?;
+        let key = self.key_for(&kid).await?;
+
+        let mut validation = Validation::new(Algorithm::RS256);
+        validation.set_audience(&[&self.client_id]);
+        validation.set_issuer(&GOOGLE_ISSUERS);
+        validation.set_required_spec_claims(&["exp", "aud", "iss", "sub"]);
+        validation.leeway = CLOCK_LEEWAY_SECS;
+        // validate_exp is true by default.
+
+        let data = jsonwebtoken::decode::<GoogleIdClaims>(id_token, &key, &validation)
+            .map_err(|_| ApiError::Unauthorized)?;
+
+        let email = data.claims.email.ok_or(ApiError::Unauthorized)?;
+        Ok(GoogleClaims {
+            sub: data.claims.sub,
+            email,
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -244,5 +411,28 @@ mod tests {
         let uri = otpauth_uri(b"secretbytes", "user@example.com", "SENTINEL");
         assert!(uri.starts_with("otpauth://totp/SENTINEL:user@example.com?secret="));
         assert!(uri.contains("algorithm=SHA1"));
+    }
+
+    // The real verifier rejects malformed and wrong-algorithm tokens *before* any
+    // network call, so these run offline (no JWKS fetch is reached).
+    #[tokio::test]
+    async fn real_verifier_rejects_garbage() {
+        let v = GoogleIdTokenVerifier::new("client-abc".into());
+        assert!(v.verify("not-a-jwt").await.is_err());
+        assert!(v.verify("").await.is_err());
+    }
+
+    #[tokio::test]
+    async fn real_verifier_rejects_non_rs256() {
+        // An HS256 token: valid JWT shape, but the wrong signing algorithm. The
+        // alg check fires before the JWKS is ever consulted.
+        let hs = jsonwebtoken::encode(
+            &Header::new(Algorithm::HS256),
+            &serde_json::json!({ "sub": "x", "aud": "client-abc", "exp": 9_999_999_999i64 }),
+            &jsonwebtoken::EncodingKey::from_secret(b"secret"),
+        )
+        .unwrap();
+        let v = GoogleIdTokenVerifier::new("client-abc".into());
+        assert!(matches!(v.verify(&hs).await, Err(ApiError::Unauthorized)));
     }
 }

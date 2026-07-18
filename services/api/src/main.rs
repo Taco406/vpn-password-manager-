@@ -1,6 +1,6 @@
 //! sentinel-api server entry point.
 
-use sentinel_api::auth::{GoogleVerifier, MockGoogleVerifier};
+use sentinel_api::auth::{GoogleIdTokenVerifier, GoogleVerifier, MockGoogleVerifier};
 use sentinel_api::config::{Config, JwtKeys};
 use std::sync::Arc;
 
@@ -27,9 +27,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let pool = sentinel_api::connect(&config.database_url).await?;
 
-    // The real Google id_token verifier (JWKS) would be selected here in production;
-    // the mock is used until that transport is wired.
-    let google: Arc<dyn GoogleVerifier> = Arc::new(MockGoogleVerifier);
+    // Use the real JWKS-backed verifier when a Google OAuth client id is configured;
+    // fall back to the fixture-accepting mock otherwise (dev/test/CI without a client
+    // id). The mock never activates once GOOGLE_OAUTH_CLIENT_ID is set.
+    let google: Arc<dyn GoogleVerifier> = match config.google_client_id.clone() {
+        Some(client_id) => {
+            tracing::info!("google id_token verification: real (JWKS)");
+            Arc::new(GoogleIdTokenVerifier::new(client_id))
+        }
+        None => {
+            tracing::warn!(
+                "GOOGLE_OAUTH_CLIENT_ID unset — using MockGoogleVerifier (dev/test only)"
+            );
+            Arc::new(MockGoogleVerifier)
+        }
+    };
 
     let bind = config.bind.clone();
     let app = sentinel_api::build_app(pool, keys, config, google);

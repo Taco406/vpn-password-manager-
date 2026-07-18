@@ -1,0 +1,73 @@
+# SENTINEL sync API — one-command self-host stack.
+#
+#   cp .env.example .env      # then edit it (see docs/self-hosting.md)
+#   docker compose up -d      # builds the api, starts Postgres, runs migrations
+#
+# Secrets live ONLY in .env (git-ignored) and ./secrets/ — never in this file.
+name: sentinel
+
+services:
+  # --- Postgres 16 --------------------------------------------------------
+  db:
+    image: postgres:16
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-sentinel}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-sentinel}
+      POSTGRES_DB: ${POSTGRES_DB:-sentinel}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-sentinel} -d ${POSTGRES_DB:-sentinel}"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  # --- migrations (one-shot) ---------------------------------------------
+  # Applies services/api/migrations/*.sql in order, then exits 0. `api` waits
+  # for this to complete successfully. Uses the postgres image only for `psql`.
+  migrate:
+    image: postgres:16
+    depends_on:
+      db:
+        condition: service_healthy
+    env_file: .env
+    volumes:
+      - ./services/api/migrations:/migrations:ro
+    entrypoint: ["bash", "-c"]
+    command:
+      - |
+        set -euo pipefail
+        for f in /migrations/[0-9]*.sql; do
+          echo "applying $$(basename "$$f")"
+          psql "$$DATABASE_URL" -v ON_ERROR_STOP=1 -q -f "$$f"
+        done
+        echo "migrations applied"
+    restart: "no"
+
+  # --- sync API -----------------------------------------------------------
+  api:
+    build:
+      context: .
+      dockerfile: services/api/Dockerfile
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    env_file: .env
+    environment:
+      # Must bind all interfaces inside the container so the published port works.
+      SENTINEL_API_BIND: 0.0.0.0:8787
+    ports:
+      # Publish to the host. Behind a TLS reverse proxy (see docs) you can bind
+      # this to loopback only, e.g. "127.0.0.1:8787:8787".
+      - "${SENTINEL_API_PORT:-8787}:8787"
+    volumes:
+      # Optional: mount the ES256 signing key so tokens survive restarts. If the
+      # file is absent the server logs a warning and uses an ephemeral key.
+      - ./secrets:/run/secrets/sentinel:ro
+
+volumes:
+  pgdata:
