@@ -1,10 +1,13 @@
 import { useEffect, useState } from "react";
-import { Moon, Sun, Monitor, Globe, Cloud, LogIn, Download, RefreshCw, Trash2, Upload } from "lucide-react";
+import { Moon, Sun, Monitor, Globe, Cloud, LogIn, Download, RefreshCw, Trash2, Upload, Puzzle } from "lucide-react";
 import type { Settings as SettingsT } from "@sentinel/shared";
 import {
   bridge,
   vpnSetToken,
   vpnRealEnabled,
+  autofillStatus,
+  autofillInstall,
+  autofillUninstall,
   syncStatus,
   syncSetConfig,
   authGoogleSignin,
@@ -83,6 +86,7 @@ export function Settings() {
       </Card>
 
       <RealVpn />
+      <BrowserAutofill />
       <AccountSync />
       <Updates />
     </div>
@@ -526,6 +530,70 @@ function RealVpn() {
   );
 }
 
+function BrowserAutofill() {
+  const [installed, setInstalled] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [status, setStatus] = useState("");
+
+  useEffect(() => {
+    void autofillStatus()
+      .then((s) => setInstalled(s.installed))
+      .catch(() => {});
+  }, []);
+
+  const toggle = async () => {
+    setBusy(true);
+    setStatus("");
+    try {
+      if (installed) {
+        await autofillUninstall();
+      } else {
+        await autofillInstall();
+      }
+      const s = await autofillStatus();
+      setInstalled(s.installed);
+      setStatus(
+        s.installed
+          ? "Enabled. Load the unpacked extension (below) if you haven't, then use the fill menu in Chrome or Edge."
+          : "Disabled. Chrome and Edge will no longer talk to SENTINEL.",
+      );
+    } catch (e) {
+      setStatus(`Couldn't ${installed ? "disable" : "enable"}: ${errMsg(e)}`);
+    }
+    setBusy(false);
+  };
+
+  return (
+    <Card className="mb-4">
+      <div className="mb-2 flex items-center justify-between text-sm font-medium">
+        <span className="flex items-center gap-2">
+          <Puzzle size={15} /> Browser autofill
+        </span>
+        <Badge tone={installed ? "ok" : "accent"}>{installed ? "On · Chrome + Edge" : "Off"}</Badge>
+      </div>
+      <p className="mb-3 text-xs text-[var(--text-secondary)]">
+        Experimental (Windows-first). Fill logins straight into Chrome and Edge. SENTINEL acts as
+        the browser's native-messaging host itself — no extra program to install. A site only ever
+        receives its own credentials, and nothing is available while the vault is locked.
+      </p>
+      <ol className="mb-3 list-decimal space-y-1 pl-5 text-xs text-[var(--text-secondary)]">
+        <li>
+          Load the extension: Chrome/Edge → Extensions → enable{" "}
+          <span className="mono">Developer mode</span> → <span className="mono">Load unpacked</span>{" "}
+          → select the app's <span className="mono">apps/extension/dist</span> folder.
+        </li>
+        <li>Click Enable here to register SENTINEL as the browser host.</li>
+      </ol>
+      <div className="flex items-center gap-3">
+        <button onClick={toggle} disabled={busy} className={btnCls}>
+          {busy ? "Working…" : installed ? "Disable" : "Enable"}
+        </button>
+        {status && <span className="text-xs text-[var(--text-muted)]">{status}</span>}
+      </div>
+    </Card>
+  );
+}
+
 function Updates() {
   const [status, setStatus] = useState<string>("");
   const [busy, setBusy] = useState(false);
@@ -554,7 +622,7 @@ function Updates() {
   return (
     <Card>
       <div className="mb-2 flex items-center justify-between text-sm font-medium">
-        Updates <Badge tone="accent">v0.1.4</Badge>
+        Updates <Badge tone="accent">v0.1.5</Badge>
       </div>
       <p className="mb-3 text-xs text-[var(--text-secondary)]">
         SENTINEL checks for signed updates on launch and installs them automatically. You can also check now.

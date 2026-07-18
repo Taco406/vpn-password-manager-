@@ -4146,6 +4146,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
+ "dirs",
  "keyring",
  "reqwest 0.12.28",
  "sentinel-core",
@@ -4158,6 +4159,7 @@ dependencies = [
  "time",
  "tokio",
  "uuid",
+ "winreg",
 ]
 
 [[package]]

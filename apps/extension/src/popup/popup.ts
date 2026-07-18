@@ -4,6 +4,8 @@
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 const runtime = (globalThis as any).chrome?.runtime;
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+const tabs = (globalThis as any).chrome?.tabs;
 
 interface SearchItem {
   id: string;
@@ -24,7 +26,7 @@ function bg(cmd: string, payload?: unknown): Promise<{ ok?: boolean; payload?: u
 
 async function currentOrigin(): Promise<string> {
   try {
-    const [tab] = await runtime.sendMessage ? [{ url: "" }] : [{ url: "" }];
+    const [tab] = await tabs.query({ active: true, currentWindow: true });
     return tab?.url ? new URL(tab.url).origin : "";
   } catch {
     return "";

@@ -39,6 +39,14 @@ tauri-plugin-process = "2"
 keyring = { version = "3", default-features = false, features = ["windows-native", "apple-native", "sync-secret-service"] }
 base64 = "0.22"
 uuid = "1"
+# Resolve <app_data_dir> in native-messaging host mode without a Tauri handle
+# (dirs::data_dir().join("com.sentinel.desktop") mirrors Tauri's app_data_dir()).
+# Pinned to the version already resolved in the workspace lockfile.
+dirs = "6"
+
+# Windows native-messaging host registration lives in HKCU (Chrome + Edge).
+[target.'cfg(windows)'.dependencies]
+winreg = "0.55"
 
 [features]
 # Enabled by `tauri build` / the Tauri CLI.
