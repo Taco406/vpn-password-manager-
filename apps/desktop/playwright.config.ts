@@ -1,9 +1,10 @@
 import { defineConfig, devices } from "@playwright/test";
 
-// Drive the built app via `vite preview`. The Chromium that ships in this environment
-// lives at /opt/pw-browsers/chromium; point executablePath at it so no download is
-// attempted.
-const CHROMIUM = process.env.SENTINEL_CHROMIUM || "/opt/pw-browsers/chromium";
+// Drive the built app via `vite preview`. If SENTINEL_CHROMIUM points at a prebuilt
+// Chromium (as in the dev container at /opt/pw-browsers/chromium) we use it directly;
+// otherwise we let Playwright resolve its own installed browser (as on CI runners,
+// where `playwright install chromium` provides it).
+const CHROMIUM = process.env.SENTINEL_CHROMIUM;
 
 export default defineConfig({
   testDir: "./e2e",
@@ -19,7 +20,7 @@ export default defineConfig({
   use: {
     baseURL: "http://localhost:4173",
     viewport: { width: 1440, height: 900 },
-    launchOptions: { executablePath: CHROMIUM },
+    ...(CHROMIUM ? { launchOptions: { executablePath: CHROMIUM } } : {}),
   },
   projects: [
     { name: "dark", use: { ...devices["Desktop Chrome"], colorScheme: "dark" } },

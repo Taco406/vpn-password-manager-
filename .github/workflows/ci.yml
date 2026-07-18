@@ -69,13 +69,9 @@ jobs:
   web:
     name: Web — typecheck, lint, build, e2e
     runs-on: ubuntu-24.04
-    env:
-      PLAYWRIGHT_BROWSERS_PATH: /opt/pw-browsers
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
-        with:
-          version: 10
       - uses: actions/setup-node@v4
         with:
           node-version: 22
@@ -101,8 +97,6 @@ jobs:
           cargo install cargo-audit --locked || true
           cargo audit || true
       - uses: pnpm/action-setup@v4
-        with:
-          version: 10
       - uses: actions/setup-node@v4
         with:
           node-version: 22

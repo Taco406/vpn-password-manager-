@@ -110,6 +110,10 @@ dev-web:
 seed-json:
     cargo run -q -p sentinel-cli -- seed --json > packages/shared/src/seed.json
 
+# Local runs use the dev container's prebuilt Chromium; CI installs its own and
+# leaves SENTINEL_CHROMIUM unset so Playwright resolves it.
+export SENTINEL_CHROMIUM := env_var_or_default("SENTINEL_CHROMIUM", "/opt/pw-browsers/chromium")
+
 screenshots:
     pnpm --filter @sentinel/desktop build
     pnpm --filter @sentinel/desktop screenshots
