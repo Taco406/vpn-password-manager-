@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Moon, Sun, Monitor, Globe, Cloud, LogIn, Download, RefreshCw, Trash2 } from "lucide-react";
+import { Moon, Sun, Monitor, Globe, Cloud, LogIn, Download, RefreshCw, Trash2, Upload } from "lucide-react";
 import type { Settings as SettingsT } from "@sentinel/shared";
 import {
   bridge,
@@ -70,6 +70,8 @@ export function Settings() {
         <Slider label="Clipboard auto-clear" value={s.clipboardClearSeconds} min={5} max={120} unit="s" onChange={(v) => patch({ clipboardClearSeconds: v })} />
         <Toggle label="Kill switch on by default" checked={s.killSwitchDefault} onChange={(v) => patch({ killSwitchDefault: v })} />
       </Card>
+
+      <ImportPasswords />
 
       <Card className="mb-4">
         <div className="mb-2 flex items-center justify-between text-sm font-medium">
@@ -552,7 +554,7 @@ function Updates() {
   return (
     <Card>
       <div className="mb-2 flex items-center justify-between text-sm font-medium">
-        Updates <Badge tone="accent">v0.1.3</Badge>
+        Updates <Badge tone="accent">v0.1.4</Badge>
       </div>
       <p className="mb-3 text-xs text-[var(--text-secondary)]">
         SENTINEL checks for signed updates on launch and installs them automatically. You can also check now.
@@ -567,6 +569,63 @@ function Updates() {
         </button>
         {status && <span className="text-xs text-[var(--text-muted)]">{status}</span>}
       </div>
+    </Card>
+  );
+}
+
+function ImportPasswords() {
+  const [kind, setKind] = useState<"chrome_csv" | "bitwarden_csv" | "bitwarden_json">("chrome_csv");
+  const [status, setStatus] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  const onFile = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    e.target.value = "";
+    if (!file) return;
+    setBusy(true);
+    setStatus("");
+    try {
+      const content = await file.text();
+      const r = await bridge.vaultImport(kind, content);
+      setStatus(`Imported ${r.imported} item${r.imported === 1 ? "" : "s"}${r.skipped ? `, skipped ${r.skipped}` : ""}. Open the Vault to see them.`);
+    } catch (err) {
+      setStatus(`Import failed: ${err instanceof Error ? err.message : String(err)}`);
+    }
+    setBusy(false);
+  };
+
+  return (
+    <Card className="mb-4">
+      <div className="mb-2 flex items-center gap-2 text-sm font-medium">
+        <Upload size={15} /> Import passwords
+      </div>
+      <p className="mb-3 text-xs text-[var(--text-secondary)]">
+        Bring in your existing logins. Export from your current manager, then pick the format and
+        choose the file. (1Password: export to a Chrome/Bitwarden CSV. Everything is encrypted
+        locally on import.)
+      </p>
+      <div className="flex items-center gap-2">
+        <select
+          value={kind}
+          onChange={(e) => setKind(e.target.value as typeof kind)}
+          className="rounded-[10px] border border-[var(--border-subtle)] bg-[var(--bg-inset)] px-3 py-2 text-sm outline-none focus:border-[var(--accent)]/50"
+        >
+          <option value="chrome_csv">Chrome / Edge (CSV)</option>
+          <option value="bitwarden_csv">Bitwarden (CSV)</option>
+          <option value="bitwarden_json">Bitwarden (JSON)</option>
+        </select>
+        <label className="cursor-pointer rounded-[10px] border border-[var(--border-strong)] px-3 py-2 text-sm hover:border-[var(--accent)]/50">
+          {busy ? "Importing…" : "Choose file…"}
+          <input
+            type="file"
+            accept=".csv,.json,text/csv,application/json"
+            onChange={onFile}
+            disabled={busy}
+            className="hidden"
+          />
+        </label>
+      </div>
+      {status && <p className="mt-2 text-xs text-[var(--text-muted)]">{status}</p>}
     </Card>
   );
 }

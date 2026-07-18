@@ -128,7 +128,8 @@ export function createTauriBridge(): SentinelBridge {
       mockBridge.enrollWrapper(t),
     recoveryKitGenerate: () => mockBridge.recoveryKitGenerate(),
     recoveryKitVerify: (g: { index: number; value: string }[]) => mockBridge.recoveryKitVerify(g),
-    vaultImport: (k: ImportKind, c: string) => mockBridge.vaultImport(k, c),
+    vaultImport: (k: ImportKind, c: string) =>
+      invoke<{ imported: number; skipped: number }>("vault_import", { kind: k, content: c }),
     vaultExport: (k: "encrypted" | "plain_csv", p?: string) => mockBridge.vaultExport(k, p),
     favicon: (d: string) => mockBridge.favicon(d),
     vpnRegions: async (): Promise<Region[]> =>

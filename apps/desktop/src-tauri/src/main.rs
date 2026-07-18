@@ -47,6 +47,7 @@ fn main() {
             commands::vault_save,
             commands::vault_delete,
             commands::vault_totp,
+            commands::vault_import,
             commands::generator_password,
             commands::generator_passphrase,
             commands::health_audit,
