@@ -42,7 +42,7 @@
       "endpoints": [
         "https://github.com/Taco406/vpn-password-manager-/releases/latest/download/latest.json"
       ],
-      "pubkey": "REPLACE_WITH_YOUR_UPDATER_PUBLIC_KEY"
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDcwMEYwRkNBMDQ1QkU3MDIKUldRQzUxc0V5ZzhQY0ZwcVphamFrNGo3U1JKTlNuUnRuTWx5YWI0SVU1L2hzUWRGM1JId1J0VWgK"
     }
   }
 }
