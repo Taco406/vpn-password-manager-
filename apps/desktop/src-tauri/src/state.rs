@@ -42,10 +42,17 @@ impl AppState {
             .to_str()
             .ok_or_else(|| "vault path is not valid UTF-8".to_string())?;
         let vault = LocalVault::open(path_str).map_err(|e| format!("open vault: {e}"))?;
+        // Ensure the key exists (first run creates + stores it). If Windows Hello unlock is
+        // enabled, start locked so the UI requires a Hello prompt before revealing anything.
         let vault_key = load_or_create_key()?;
+        let session = if require_hello(&data_dir) {
+            VaultSession::locked()
+        } else {
+            VaultSession::unlocked(vault_key)
+        };
         Ok(AppState {
             inner: Mutex::new(Inner {
-                session: VaultSession::unlocked(vault_key),
+                session,
                 vault,
                 data_dir,
                 vpn: None,
@@ -66,6 +73,15 @@ impl AppState {
             }),
         }
     }
+}
+
+/// Whether the "require Windows Hello to unlock" setting is on (read from settings.json).
+pub fn require_hello(data_dir: &std::path::Path) -> bool {
+    std::fs::read_to_string(data_dir.join("settings.json"))
+        .ok()
+        .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
+        .and_then(|v| v.get("requireHello").and_then(|b| b.as_bool()))
+        .unwrap_or(false)
 }
 
 /// Read the 256-bit vault key from the OS keychain, generating and storing it on first run.

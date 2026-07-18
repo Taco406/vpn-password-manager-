@@ -44,9 +44,11 @@ uuid = "1"
 # Pinned to the version already resolved in the workspace lockfile.
 dirs = "6"
 
-# Windows native-messaging host registration lives in HKCU (Chrome + Edge).
+# Windows native-messaging host registration lives in HKCU (Chrome + Edge);
+# UserConsentVerifier drives the Windows Hello unlock prompt.
 [target.'cfg(windows)'.dependencies]
 winreg = "0.55"
+windows = { version = "0.58", features = ["Security_Credentials_UI", "Foundation"] }
 
 [features]
 # Enabled by `tauri build` / the Tauri CLI.

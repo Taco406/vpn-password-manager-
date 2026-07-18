@@ -5,6 +5,8 @@ import {
   bridge,
   vpnSetToken,
   vpnRealEnabled,
+  helloStatus,
+  helloSet,
   autofillStatus,
   autofillInstall,
   autofillUninstall,
@@ -72,6 +74,7 @@ export function Settings() {
         <Slider label="Auto-lock after" value={s.autoLockMinutes} min={1} max={60} unit="min" onChange={(v) => patch({ autoLockMinutes: v })} />
         <Slider label="Clipboard auto-clear" value={s.clipboardClearSeconds} min={5} max={120} unit="s" onChange={(v) => patch({ clipboardClearSeconds: v })} />
         <Toggle label="Kill switch on by default" checked={s.killSwitchDefault} onChange={(v) => patch({ killSwitchDefault: v })} />
+        <HelloRow />
       </Card>
 
       <ImportPasswords />
@@ -622,7 +625,7 @@ function Updates() {
   return (
     <Card>
       <div className="mb-2 flex items-center justify-between text-sm font-medium">
-        Updates <Badge tone="accent">v0.1.5</Badge>
+        Updates <Badge tone="accent">v0.1.6</Badge>
       </div>
       <p className="mb-3 text-xs text-[var(--text-secondary)]">
         SENTINEL checks for signed updates on launch and installs them automatically. You can also check now.
@@ -695,6 +698,51 @@ function ImportPasswords() {
       </div>
       {status && <p className="mt-2 text-xs text-[var(--text-muted)]">{status}</p>}
     </Card>
+  );
+}
+
+function HelloRow() {
+  const [st, setSt] = useState<{ available: boolean; enabled: boolean } | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState("");
+
+  useEffect(() => {
+    void helloStatus().then(setSt).catch(() => {});
+  }, []);
+
+  if (!st || !st.available) return null; // hidden unless Windows Hello is set up
+
+  const toggle = async () => {
+    setBusy(true);
+    setMsg("");
+    try {
+      await helloSet(!st.enabled);
+      setSt({ ...st, enabled: !st.enabled });
+      setMsg(
+        !st.enabled
+          ? "On — SENTINEL will ask for Windows Hello to unlock."
+          : "Off — the vault opens with your Windows sign-in.",
+      );
+    } catch (e) {
+      setMsg(e instanceof Error ? e.message : String(e));
+    }
+    setBusy(false);
+  };
+
+  return (
+    <>
+      <div className="mt-3 flex items-center justify-between">
+        <span className="text-sm text-[var(--text-secondary)]">Require Windows Hello to unlock</span>
+        <button
+          onClick={toggle}
+          disabled={busy}
+          className={`relative h-6 w-11 rounded-full transition-colors disabled:opacity-50 ${st.enabled ? "bg-[var(--accent)]" : "bg-[var(--bg-inset)]"}`}
+        >
+          <span className={`absolute top-0.5 h-5 w-5 rounded-full bg-white transition-transform ${st.enabled ? "translate-x-[22px]" : "translate-x-0.5"}`} />
+        </button>
+      </div>
+      {msg && <p className="mt-1 text-xs text-[var(--text-muted)]">{msg}</p>}
+    </>
   );
 }
 

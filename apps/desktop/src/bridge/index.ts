@@ -59,6 +59,20 @@ export async function autofillUninstall(): Promise<void> {
   await core.invoke("autofill_uninstall");
 }
 
+// --- Windows Hello unlock opt-in helpers ------------------------------------
+
+export async function helloStatus(): Promise<{ available: boolean; enabled: boolean }> {
+  if (!inTauri()) return { available: false, enabled: false };
+  const core = await import("@tauri-apps/api/core");
+  return core.invoke("hello_status") as Promise<{ available: boolean; enabled: boolean }>;
+}
+
+export async function helloSet(enabled: boolean): Promise<void> {
+  if (!inTauri()) throw new Error("Windows Hello is only available in the desktop app.");
+  const core = await import("@tauri-apps/api/core");
+  await core.invoke("hello_set", { enabled });
+}
+
 // --- Account & Sync (Stage 3) opt-in helpers --------------------------------
 // Not part of the SentinelBridge contract (they only mean something in the shell). In the
 // browser they no-op / return defaults so Settings renders in both modes.
