@@ -4,14 +4,39 @@
   "private": true,
   "type": "module",
   "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview --port 4173 --strictPort",
     "typecheck": "tsc --noEmit",
     "lint": "tsc --noEmit",
-    "test": "node --test --experimental-strip-types 2>/dev/null || true"
+    "test": "node --test --experimental-strip-types 2>/dev/null || true",
+    "e2e": "playwright test",
+    "screenshots": "playwright test screenshots"
   },
   "dependencies": {
-    "@sentinel/shared": "workspace:*"
+    "@sentinel/shared": "workspace:*",
+    "@tauri-apps/api": "2.1.1",
+    "cmdk": "1.0.4",
+    "d3-geo": "3.1.1",
+    "framer-motion": "11.15.0",
+    "lucide-react": "0.469.0",
+    "react": "18.3.1",
+    "react-dom": "18.3.1",
+    "react-router-dom": "6.28.1",
+    "topojson-client": "3.1.0",
+    "world-atlas": "2.0.2",
+    "zustand": "5.0.2"
   },
   "devDependencies": {
-    "typescript": "5.6.3"
+    "@playwright/test": "1.55.0",
+    "@tailwindcss/vite": "4.1.13",
+    "@types/d3-geo": "3.1.0",
+    "@types/react": "18.3.18",
+    "@types/react-dom": "18.3.5",
+    "@types/topojson-client": "3.1.5",
+    "@vitejs/plugin-react": "4.3.4",
+    "tailwindcss": "4.1.13",
+    "typescript": "5.6.3",
+    "vite": "6.0.7"
   }
 }
