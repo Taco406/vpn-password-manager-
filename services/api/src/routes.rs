@@ -31,6 +31,10 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/devices", get(devices_list))
         .route("/v1/devices/{id}/approve", post(device_approve))
         .route("/v1/devices/{id}", axum::routing::delete(device_revoke))
+        .route("/v1/unlock-requests", post(unlock_create))
+        .route("/v1/unlock-requests/{id}", get(unlock_get))
+        .route("/v1/unlock-requests/{id}/respond", post(unlock_respond))
+        .route("/v1/push/register", post(push_register))
         .with_state(state)
 }
 
@@ -580,6 +584,151 @@ async fn device_revoke(
     .bind(id)
     .execute(&st.pool)
     .await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+// --- unlock relay (E2E-opaque) --------------------------------------------
+
+#[derive(Deserialize)]
+struct UnlockCreateReq {
+    phone_device_id: Uuid,
+    kind: String,
+    request_payload_b64: String,
+}
+
+async fn unlock_create(
+    State(st): State<AppState>,
+    a: Auth,
+    headers: HeaderMap,
+    Json(req): Json<UnlockCreateReq>,
+) -> ApiResult<Json<serde_json::Value>> {
+    require_approved_device(&st, a.device).await?;
+    rate_limit(&st, &headers, &format!("unlock:{}", a.account), 5, 60)?;
+    if req.kind != "unlock" && req.kind != "new_device" {
+        return Err(ApiError::BadRequest("bad kind".into()));
+    }
+    let payload = base64::engine::general_purpose::STANDARD
+        .decode(req.request_payload_b64.as_bytes())
+        .map_err(|_| ApiError::BadRequest("payload not base64".into()))?;
+    if payload.len() > 4096 {
+        return Err(ApiError::BadRequest("payload too large".into()));
+    }
+    let id: Uuid = sqlx::query_scalar(
+        "INSERT INTO unlock_requests (account_id, desktop_device_id, phone_device_id, kind, request_payload)
+         VALUES ($1, $2, $3, $4, $5) RETURNING id",
+    )
+    .bind(a.account)
+    .bind(a.device)
+    .bind(req.phone_device_id)
+    .bind(&req.kind)
+    .bind(&payload)
+    .fetch_one(&st.pool)
+    .await?;
+    // A real deployment fires an APNs push here (trait Pusher, mock default).
+    Ok(Json(json!({ "id": id })))
+}
+
+async fn unlock_get(
+    State(st): State<AppState>,
+    a: Auth,
+    Path(id): Path<Uuid>,
+) -> ApiResult<Json<serde_json::Value>> {
+    // Short long-poll: check a few times for a state transition before returning.
+    for _ in 0..3 {
+        let row: Option<(String, Option<Vec<u8>>, time::OffsetDateTime)> = sqlx::query_as(
+            "SELECT state, response_payload, expires_at FROM unlock_requests
+             WHERE id = $1 AND account_id = $2",
+        )
+        .bind(id)
+        .bind(a.account)
+        .fetch_optional(&st.pool)
+        .await?;
+        let (mut state, resp, expires) = row.ok_or(ApiError::NotFound)?;
+        if state == "pending" && expires < time::OffsetDateTime::now_utc() {
+            sqlx::query("UPDATE unlock_requests SET state = 'expired' WHERE id = $1")
+                .bind(id)
+                .execute(&st.pool)
+                .await?;
+            state = "expired".into();
+        }
+        if state != "pending" {
+            return Ok(Json(json!({
+                "state": state,
+                "response_payload_b64": resp.map(|b| base64::engine::general_purpose::STANDARD.encode(b)),
+            })));
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    Ok(Json(json!({ "state": "pending" })))
+}
+
+#[derive(Deserialize)]
+struct UnlockRespondReq {
+    state: String,
+    response_payload_b64: Option<String>,
+}
+
+async fn unlock_respond(
+    State(st): State<AppState>,
+    a: Auth,
+    Path(id): Path<Uuid>,
+    Json(req): Json<UnlockRespondReq>,
+) -> ApiResult<StatusCode> {
+    require_approved_device(&st, a.device).await?;
+    if req.state != "approved" && req.state != "denied" {
+        return Err(ApiError::BadRequest("state must be approved|denied".into()));
+    }
+    let resp = match &req.response_payload_b64 {
+        Some(b) => Some(
+            base64::engine::general_purpose::STANDARD
+                .decode(b.as_bytes())
+                .map_err(|_| ApiError::BadRequest("payload not base64".into()))?,
+        ),
+        None => None,
+    };
+    if let Some(r) = &resp {
+        if r.len() > 4096 {
+            return Err(ApiError::BadRequest("payload too large".into()));
+        }
+    }
+    // Only the designated phone device may respond, and only while pending.
+    let n = sqlx::query(
+        "UPDATE unlock_requests SET state = $1, response_payload = $2
+         WHERE id = $3 AND account_id = $4 AND phone_device_id = $5 AND state = 'pending'",
+    )
+    .bind(&req.state)
+    .bind(&resp)
+    .bind(id)
+    .bind(a.account)
+    .bind(a.device)
+    .execute(&st.pool)
+    .await?
+    .rows_affected();
+    if n == 0 {
+        return Err(ApiError::Forbidden);
+    }
+    Ok(StatusCode::NO_CONTENT)
+}
+
+#[derive(Deserialize)]
+struct PushRegisterReq {
+    token: String,
+}
+
+async fn push_register(
+    State(st): State<AppState>,
+    a: Auth,
+    Json(req): Json<PushRegisterReq>,
+) -> ApiResult<StatusCode> {
+    if req.token.len() > 512 {
+        return Err(ApiError::BadRequest("token too long".into()));
+    }
+    sqlx::query("UPDATE devices SET push_token = $1 WHERE id = $2 AND account_id = $3")
+        .bind(&req.token)
+        .bind(a.device)
+        .bind(a.account)
+        .execute(&st.pool)
+        .await?;
     Ok(StatusCode::NO_CONTENT)
 }
 

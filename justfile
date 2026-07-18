@@ -122,6 +122,17 @@ audit:
 plaintext-audit:
     bash scripts/plaintext-audit.sh
 
+# Verify the iOS pairing channel shares the exact HKDF info strings with the Rust core
+# (the interop invariant; the app isn't compiled in CI).
+ios-docs-check:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    for s in 'sentinel/v1/pair/chan/desktop->phone' 'sentinel/v1/pair/chan/phone->desktop'; do
+        grep -q "$s" apps/ios-key/SentinelKey/Crypto/Channel.swift
+        grep -q "$s" crates/core/src/crypto/kdf.rs
+    done
+    echo "iOS channel info strings match the Rust core."
+
 # --- aggregate -----------------------------------------------------------
 ci: fmt-check clippy test-rust test-api typecheck lint-web test-web
     @echo "CI recipe complete."

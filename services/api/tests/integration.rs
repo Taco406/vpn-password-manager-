@@ -362,3 +362,88 @@ async fn unapproved_device_cannot_read_vault() {
     .await;
     assert_eq!(s, StatusCode::FORBIDDEN);
 }
+
+async fn devices(app: &Router, token: &str) -> Vec<Value> {
+    let (_, v) = call(
+        app,
+        Request::builder()
+            .uri("/v1/devices")
+            .header("authorization", format!("Bearer {token}"))
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    v["devices"].as_array().cloned().unwrap_or_default()
+}
+
+#[tokio::test]
+async fn unlock_relay_lifecycle_is_opaque() {
+    let (app, _) = setup().await;
+    let sub = format!("user-{}", uuid::Uuid::new_v4());
+    // Two devices on one account: the desktop and the phone.
+    let (desktop, _) = onboard(&app, &sub).await;
+    let (phone, _) = onboard(&app, &sub).await;
+
+    // The phone device is the one that is not "current" from the desktop's view.
+    let list = devices(&app, &desktop).await;
+    let phone_id = list
+        .iter()
+        .find(|d| d["current"] == false)
+        .and_then(|d| d["id"].as_str())
+        .unwrap()
+        .to_string();
+
+    // Desktop creates an unlock request carrying an opaque E2E payload.
+    let req_payload = base64::engine::general_purpose::STANDARD.encode(b"e2e-ciphertext-request");
+    let (s, v) = call(
+        &app,
+        post(
+            "/v1/unlock-requests",
+            Some(&desktop),
+            json!({ "phone_device_id": phone_id, "kind": "unlock", "request_payload_b64": req_payload }),
+        ),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    let req_id = v["id"].as_str().unwrap().to_string();
+
+    // Before the phone responds, the desktop sees it pending.
+    let (s, v) = call(
+        &app,
+        Request::builder()
+            .uri(format!("/v1/unlock-requests/{req_id}"))
+            .header("authorization", format!("Bearer {desktop}"))
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK);
+    assert_eq!(v["state"], "pending");
+
+    // The phone approves with its opaque E2E response.
+    let resp_payload = base64::engine::general_purpose::STANDARD.encode(b"e2e-ciphertext-share");
+    let (s, _) = call(
+        &app,
+        post(
+            &format!("/v1/unlock-requests/{req_id}/respond"),
+            Some(&phone),
+            json!({ "state": "approved", "response_payload_b64": resp_payload }),
+        ),
+    )
+    .await;
+    assert_eq!(s, StatusCode::NO_CONTENT);
+
+    // The desktop now sees approved and gets the opaque response back verbatim.
+    let (s, v) = call(
+        &app,
+        Request::builder()
+            .uri(format!("/v1/unlock-requests/{req_id}"))
+            .header("authorization", format!("Bearer {desktop}"))
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK);
+    assert_eq!(v["state"], "approved");
+    assert_eq!(v["response_payload_b64"], resp_payload);
+}

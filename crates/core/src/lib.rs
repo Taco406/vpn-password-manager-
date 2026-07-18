@@ -18,6 +18,7 @@ pub mod health;
 pub mod import;
 pub mod keyring;
 pub mod nm;
+pub mod pairing;
 pub mod platform;
 pub mod provision;
 pub mod recovery_kit;
