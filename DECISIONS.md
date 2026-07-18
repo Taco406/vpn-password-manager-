@@ -86,6 +86,16 @@ here.** Newest entries at the bottom of each section.
   P-256 keypair at boot. No private key is ever committed (the plaintext-audit gate
   would reject one anyway).
 
+## Vault
+
+- **D19 — Curated passphrase wordlist, entropy from the real list size.** Rather than
+  vendoring the full 7776-word EFF list as a binary asset, the generator ships a
+  curated list of common, easy-to-type words and reports passphrase entropy as
+  `words × log2(list_len)` from the *actual* deduplicated list size — never an inflated
+  constant. The default word count is raised to compensate, and the zxcvbn meter gives
+  the real-world strength on top. Swapping in the full EFF list later only increases
+  entropy and requires no format change.
+
 ## Local-first (user requirement)
 
 - **D16 — The app works fully offline with no account.** Onboarding can skip Google

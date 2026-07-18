@@ -11,12 +11,15 @@ use sentinel_core::keyring::phone::{MockRelay, PhoneShareWrapper};
 use sentinel_core::keyring::recovery::RecoveryWrapper;
 use sentinel_core::keyring::{KeyWrapper, VaultKey, WrappedBlob};
 use sentinel_core::recovery_kit::RecoveryKey;
+use sentinel_core::vault::model::{Item, Login};
+use sentinel_core::vault::{encode_sync_blob, seal_item, VaultDocument};
 use std::sync::Arc;
 
 /// Everything the server holds for an account. By construction, no field is unwrap
 /// material — the server never sees a wrapper secret.
 struct ServerDump {
     wrapped_blobs: Vec<WrappedBlob>,
+    vault_ciphertext: Vec<u8>,
     totp_secret_ciphertext: Vec<u8>,
     google_id_token: Vec<u8>,
     google_access_token: Vec<u8>,
@@ -26,6 +29,7 @@ impl ServerDump {
     /// All server-held byte strings an attacker could try as key material.
     fn candidate_material(&self) -> Vec<Vec<u8>> {
         let mut v = vec![
+            self.vault_ciphertext.clone(),
             self.totp_secret_ciphertext.clone(),
             self.google_id_token.clone(),
             self.google_access_token.clone(),
@@ -52,10 +56,23 @@ async fn full_server_dump_plus_google_cannot_decrypt_vault_key() {
         phone.wrap(&vault_key).await.unwrap(),
     ];
 
-    // The server stores the blobs plus account/2FA state — but NO wrapper secret.
+    // Seal a real vault (a login with a recognizable password) into the sync blob the
+    // server would store.
+    let mut item = Item::new_login("Bank of Example", 1);
+    item.login = Some(Login {
+        username: Some("jackson".into()),
+        password: Some("PLAINTEXT-CANARY-PASSWORD-9931".into()),
+        totp: None,
+    });
+    let doc = VaultDocument::from_envelopes(&[seal_item(&vault_key, &item).unwrap()], vec![]);
+    let vault_ciphertext = encode_sync_blob(&vault_key, &doc, 1).unwrap();
+
+    // The server stores the blobs, the vault ciphertext, and account/2FA state — but
+    // NO wrapper secret and NO vault key.
     let dump = ServerDump {
         wrapped_blobs: blobs,
-        totp_secret_ciphertext: b"aes-gcm(totp-secret-under-server-key)".to_vec(),
+        vault_ciphertext,
+        totp_secret_ciphertext: b"aead(totp-secret-under-server-key)".to_vec(),
         google_id_token: b"eyJ.google.id.token.payload".to_vec(),
         google_access_token: b"ya29.google-access-token".to_vec(),
     };
@@ -66,6 +83,15 @@ async fn full_server_dump_plus_google_cannot_decrypt_vault_key() {
         assert!(
             !field.windows(32).any(|w| w == vk_bytes),
             "vault key leaked into the server dump"
+        );
+    }
+
+    // 1b) The vault plaintext (the item password) never appears in the dump.
+    let canary = b"PLAINTEXT-CANARY-PASSWORD-9931";
+    for field in dump.candidate_material() {
+        assert!(
+            !field.windows(canary.len()).any(|w| w == canary),
+            "vault plaintext leaked into the server dump"
         );
     }
 

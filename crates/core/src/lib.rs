@@ -12,7 +12,13 @@
 pub mod auth;
 pub mod crypto;
 pub mod error;
+pub mod generator;
+pub mod health;
+pub mod import;
 pub mod keyring;
 pub mod recovery_kit;
+pub mod seed;
+pub mod totp;
+pub mod vault;
 
 pub use error::{CoreError, Result};
