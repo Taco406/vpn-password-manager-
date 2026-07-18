@@ -10,15 +10,19 @@
 //! normative parameter table.
 
 pub mod auth;
+pub mod cloud;
 pub mod crypto;
 pub mod error;
 pub mod generator;
 pub mod health;
 pub mod import;
 pub mod keyring;
+pub mod provision;
 pub mod recovery_kit;
 pub mod seed;
 pub mod totp;
 pub mod vault;
+pub mod vpn;
+pub mod wg;
 
 pub use error::{CoreError, Result};
