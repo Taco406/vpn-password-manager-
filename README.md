@@ -21,7 +21,9 @@ fully offline with no account; the server is optional.
   auto-clear, auto-lock, Bitwarden/Chrome import, encrypted export.
 - **VPN** — pick a region, an ephemeral Linode is created on connect and destroyed on
   disconnect (nothing left billing). WireGuard only. Kill switch, connection profiles,
-  live throughput + server-vitals charts, session history, monthly report card.
+  live throughput + server-vitals charts, session history, monthly report card. Real exit
+  nodes are **opt-in** (paste a Linode token in Settings) — see
+  [`docs/real-vpn.md`](docs/real-vpn.md); without a token the VPN runs a built-in simulation.
 - **No master password** — the vault key is wrapped by (A) your device's biometric /
   TPM, (B) your paired iPhone's Secure Enclave, and (C) a one-time printable recovery
   kit. Lose all three and the vault is gone — by design.

@@ -7,6 +7,7 @@
 
 mod commands;
 mod state;
+mod vpn;
 
 use tauri::Manager;
 
@@ -28,6 +29,8 @@ fn main() {
                     app.manage(state::AppState::new_memory_fallback());
                 }
             }
+            // If real VPN is configured, reap any orphaned ephemeral nodes from a prior crash.
+            vpn::sweep_on_launch();
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -48,6 +51,15 @@ fn main() {
             commands::health_audit,
             commands::settings_get,
             commands::settings_set,
+            vpn::vpn_config,
+            vpn::vpn_set_token,
+            vpn::vpn_regions_real,
+            vpn::vpn_instance_types_real,
+            vpn::vpn_connect,
+            vpn::vpn_disconnect,
+            vpn::vpn_state,
+            vpn::vpn_cost_estimate,
+            vpn::vpn_history,
         ])
         .run(tauri::generate_context!())
         .expect("error while running SENTINEL");

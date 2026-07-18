@@ -46,17 +46,51 @@ write_files:
         chain output { type filter hook output priority 0; policy accept; }
       }
 
-  - path: /opt/sentinel/callback.sh
+  - path: /opt/sentinel/callback.py
     permissions: '0755'
     content: |
-      #!/bin/bash
-      # Serve the WG public key once, authenticated by HMAC over (pubkey || ip).
-      PUB=$(cat /etc/wireguard/pub)
-      IP=$(curl -s https://api.ipify.org)
-      MAC=$(printf '%s%s' "$PUB" "$IP" | openssl dgst -sha256 -hmac "{{ callback_hmac_key }}" -binary | xxd -p -c256)
-      BODY="{\"pubkey\":\"$PUB\",\"ip\":\"$IP\",\"mac\":\"$MAC\"}"
-      # single-shot HTTPS responder guarded by the one-time bearer token
-      # (implementation detail: a tiny TLS listener validating {{ callback_token }})
+      #!/usr/bin/env python3
+      # Serve the WG public key, authenticated by HMAC over (pubkey || ip) keyed by the
+      # hex-decoded callback key. Authenticity is the HMAC, not the transport (D11, T6):
+      # the pubkey is public and a tampered value fails the client's constant-time compare.
+      # Guarded by the one-time bearer token so random scanners get nothing.
+      import http.server, hmac, hashlib, json, urllib.request
+      TOKEN = "{{ callback_token }}"
+      KEY = bytes.fromhex("{{ callback_hmac_key }}")
+      def pub():
+          with open("/etc/wireguard/pub") as f:
+              return f.read().strip()
+      def myip():
+          try:
+              return urllib.request.urlopen("https://api.ipify.org", timeout=10).read().decode().strip()
+          except Exception:
+              return ""
+      class H(http.server.BaseHTTPRequestHandler):
+          def do_GET(self):
+              if self.headers.get("Authorization", "") != "Bearer " + TOKEN:
+                  self.send_response(403); self.end_headers(); return
+              p = pub(); i = myip()
+              mac = hmac.new(KEY, (p + i).encode(), hashlib.sha256).hexdigest()
+              body = json.dumps({"pubkey": p, "ip": i, "mac": mac}).encode()
+              self.send_response(200)
+              self.send_header("Content-Type", "application/json")
+              self.send_header("Content-Length", str(len(body)))
+              self.end_headers()
+              self.wfile.write(body)
+          def log_message(self, *a):
+              return
+      http.server.HTTPServer(("0.0.0.0", 443), H).serve_forever()
+
+  - path: /etc/systemd/system/sentinel-callback.service
+    content: |
+      [Unit]
+      Description=SENTINEL pubkey callback
+      After=network-online.target wg-quick@wg0.service
+      [Service]
+      ExecStart=/usr/bin/python3 /opt/sentinel/callback.py
+      Restart=on-failure
+      [Install]
+      WantedBy=multi-user.target
 
   - path: /etc/systemd/system/sentinel-deadman.service
     content: |
@@ -87,6 +121,7 @@ runcmd:
   - systemctl enable wg-quick@wg0
   - systemctl start wg-quick@wg0
   - systemctl daemon-reload
+  - systemctl enable --now sentinel-callback.service
   - systemctl enable --now sentinel-deadman.timer
 "#;
 

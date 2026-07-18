@@ -18,11 +18,16 @@ path = "src/main.rs"
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-sentinel-core = { workspace = true }
+# live-linode compiles the real Linode CloudProvider alongside the default mocks, so the
+# app can do a real ephemeral-node VPN when the user supplies a token (opt-in).
+sentinel-core = { workspace = true, features = ["live-linode"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
 time = { workspace = true }
 tokio = { workspace = true }
+async-trait = { workspace = true }
+# The pubkey-callback fetcher (talks to the freshly-booted exit node).
+reqwest = { workspace = true }
 tauri = { version = "2", features = [] }
 # Self-update: the updater plugin fetches/verifies/installs signed releases; the
 # process plugin relaunches the app after an update is applied.
