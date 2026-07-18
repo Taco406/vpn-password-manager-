@@ -28,6 +28,12 @@ tauri = { version = "2", features = [] }
 # process plugin relaunches the app after an update is applied.
 tauri-plugin-updater = "2"
 tauri-plugin-process = "2"
+# Local persistence: the vault key lives only in the OS keychain (Windows Credential
+# Manager / macOS Keychain / Secret Service), never next to the on-disk vault. The
+# vault ciphertext itself is the SQLite file opened by sentinel-core's LocalVault.
+keyring = { version = "3", default-features = false, features = ["windows-native", "apple-native", "sync-secret-service"] }
+base64 = "0.22"
+uuid = "1"
 
 [features]
 # Enabled by `tauri build` / the Tauri CLI.
