@@ -137,6 +137,40 @@ ios-docs-check:
     done
     echo "iOS channel info strings match the Rust core."
 
+# --- release -------------------------------------------------------------
+# Cut a release: bump the version across the desktop app, commit, tag `vVERSION`,
+# and push the tag. The Release workflow then builds signed installers for all three
+# OSes and publishes a GitHub Release the installed app self-updates from.
+# Usage: just release 0.2.0
+release VERSION:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    v="{{VERSION}}"
+    [[ "$v" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "version must be X.Y.Z"; exit 1; }
+    # tauri.conf.json
+    python3 - "$v" <<'PY'
+    import json, sys
+    p = "apps/desktop/src-tauri/tauri.conf.json"
+    d = json.load(open(p)); d["version"] = sys.argv[1]
+    json.dump(d, open(p, "w"), indent=2); open(p, "a").write("\n")
+    PY
+    # apps/desktop/package.json
+    python3 - "$v" <<'PY'
+    import json, sys
+    p = "apps/desktop/package.json"
+    d = json.load(open(p)); d["version"] = sys.argv[1]
+    json.dump(d, open(p, "w"), indent=2); open(p, "a").write("\n")
+    PY
+    # src-tauri Cargo.toml (pin its own version; matches either the workspace-inherit
+    # form or an already-pinned version line)
+    sed -i "0,/^version[[:space:]]*[.=].*/s//version = \"$v\"/" apps/desktop/src-tauri/Cargo.toml
+    git add apps/desktop/src-tauri/tauri.conf.json apps/desktop/package.json apps/desktop/src-tauri/Cargo.toml
+    git commit -m "release: v$v"
+    git tag "v$v"
+    git push origin HEAD
+    git push origin "v$v"
+    @echo "Tagged v$v — the Release workflow will build and publish installers."
+
 # --- aggregate -----------------------------------------------------------
 ci: fmt-check clippy test-rust test-api typecheck lint-web test-web
     @echo "CI recipe complete."

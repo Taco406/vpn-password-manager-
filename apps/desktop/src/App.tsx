@@ -1,6 +1,7 @@
 import { useEffect } from "react";
 import { HashRouter, Routes, Route, Navigate } from "react-router-dom";
 import { useApp } from "./stores/app";
+import { checkForUpdate } from "./updater";
 import { Layout } from "./components/Layout";
 import { CommandPalette } from "./components/palette/CommandPalette";
 import { Unlock } from "./screens/Unlock";
@@ -18,6 +19,8 @@ export function App() {
   useEffect(() => {
     init();
     void refreshSettings();
+    // Silently check for an app update on launch (no-op outside the Tauri shell).
+    void checkForUpdate();
   }, [init, refreshSettings]);
 
   return (

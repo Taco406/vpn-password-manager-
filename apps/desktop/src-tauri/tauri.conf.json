@@ -28,6 +28,21 @@
   "bundle": {
     "active": true,
     "targets": "all",
-    "icon": ["icons/icon.png"]
+    "createUpdaterArtifacts": true,
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ]
+  },
+  "plugins": {
+    "updater": {
+      "endpoints": [
+        "https://github.com/Taco406/vpn-password-manager-/releases/latest/download/latest.json"
+      ],
+      "pubkey": "REPLACE_WITH_YOUR_UPDATER_PUBLIC_KEY"
+    }
   }
 }
