@@ -9,7 +9,10 @@
 //! See `SECURITY.md` for the threat model and `docs/crypto-spec.md` for the
 //! normative parameter table.
 
+pub mod auth;
 pub mod crypto;
 pub mod error;
+pub mod keyring;
+pub mod recovery_kit;
 
 pub use error::{CoreError, Result};

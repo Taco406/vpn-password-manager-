@@ -73,6 +73,19 @@ here.** Newest entries at the bottom of each section.
   health audit; the JS `@zxcvbn-ts` port drives only the live UI strength meter. They
   can disagree at the margins; the audit result is the source of truth.
 
+## API implementation
+
+- **D17 — sqlx runtime queries, not the `query!` macros.** The API uses
+  `sqlx::query`/`query_as` (checked at run time against the live schema by integration
+  tests) rather than compile-time-checked macros. This removes the need for a live DB
+  at build time and the committed `.sqlx` offline cache, eliminating a whole class of
+  CI friction (stale-cache failures). Coverage comes from integration tests that run
+  every query against a real Postgres 16.
+- **D18 — ES256 JWT keys are generated, never committed.** The server loads its signing
+  key from `SENTINEL_JWT_ES256_PEM`; if unset (dev/test), it generates an ephemeral
+  P-256 keypair at boot. No private key is ever committed (the plaintext-audit gate
+  would reject one anyway).
+
 ## Local-first (user requirement)
 
 - **D16 — The app works fully offline with no account.** Onboarding can skip Google

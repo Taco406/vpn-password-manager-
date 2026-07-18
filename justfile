@@ -64,7 +64,12 @@ db-down:
     else {{pg_bin}}/pg_ctl -D "{{pgdata}}" stop -m fast || true; fi
 
 db-migrate: db-up
-    {{pg_bin}}/psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f services/api/migrations/all.sql
+    #!/usr/bin/env bash
+    set -euo pipefail
+    for f in services/api/migrations/[0-9]*.sql; do
+        echo "applying $f"
+        {{pg_bin}}/psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -q -f "$f"
+    done
 
 db-reset:
     -{{pg_bin}}/psql -h 127.0.0.1 -p {{pg_port}} -U postgres -c "DROP DATABASE IF EXISTS sentinel"
