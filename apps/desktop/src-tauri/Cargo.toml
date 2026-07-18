@@ -1,0 +1,30 @@
+[package]
+name = "sentinel-desktop"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "SENTINEL desktop shell (Tauri glue over sentinel-core)."
+
+# NOTE: excluded from workspace default-members (see root Cargo.toml). Tauri and its
+# webkit2gtk/gtk system requirements are only pulled when this crate is built
+# explicitly (`cargo build -p sentinel-desktop` / `tauri build`), never by `cargo test`.
+
+[[bin]]
+name = "sentinel-desktop"
+path = "src/main.rs"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+sentinel-core = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+time = { workspace = true }
+tokio = { workspace = true }
+tauri = { version = "2", features = [] }
+
+[features]
+# Enabled by `tauri build` / the Tauri CLI.
+custom-protocol = ["tauri/custom-protocol"]

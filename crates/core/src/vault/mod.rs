@@ -1,0 +1,14 @@
+//! The vault: item model, per-item encryption, the sync document, the local encrypted
+//! store, and the unlocked session.
+
+pub mod document;
+pub mod envelope;
+pub mod model;
+pub mod session;
+pub mod store;
+
+pub use document::{decode_sync_blob, encode_sync_blob, VaultDocument};
+pub use envelope::{open_item, seal_item, ItemEnvelope};
+pub use model::{Card, CustomField, Identity, Item, ItemId, ItemType, Login, UrlMatch, UrlMode};
+pub use session::{origin_matches, rank_matches, VaultSession};
+pub use store::{LocalVault, MergeReport};

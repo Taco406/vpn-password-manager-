@@ -1,0 +1,56 @@
+[package]
+name = "sentinel-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "SENTINEL core: crypto, key model, vault, VPN orchestration (headless)."
+
+[features]
+default = ["mock"]
+# Deterministic mocks for every OS/cloud/hardware integration. On by default so
+# tests and the in-browser demo never need real hardware/cloud/credentials.
+mock = []
+# Real cloud + external network paths. Opt-in; never enabled in normal `cargo test`.
+live-linode = []
+live-hibp = []
+# Platform key-wrapper implementations (compile-checked only on their targets).
+platform-windows = []
+platform-macos = []
+
+[dependencies]
+chacha20poly1305 = { workspace = true }
+hkdf = { workspace = true }
+sha2 = { workspace = true }
+sha1 = { workspace = true }
+hmac = { workspace = true }
+argon2 = { workspace = true }
+zeroize = { workspace = true }
+secrecy = { workspace = true }
+subtle = { workspace = true }
+rand = { workspace = true }
+rand_core = { workspace = true }
+x25519-dalek = { workspace = true }
+p256 = { workspace = true }
+base64 = { workspace = true }
+zstd = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+async-trait = { workspace = true }
+uuid = { workspace = true }
+time = { workspace = true }
+minijinja = { workspace = true }
+qrcode = { workspace = true }
+printpdf = { workspace = true }
+zxcvbn = { workspace = true }
+rusqlite = { workspace = true }
+url = { workspace = true }
+tokio = { workspace = true }
+reqwest = { workspace = true }
+futures = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true }
+serde_json = { workspace = true }

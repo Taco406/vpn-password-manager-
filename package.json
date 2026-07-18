@@ -1,0 +1,25 @@
+{
+  "name": "sentinel",
+  "version": "0.1.0",
+  "private": true,
+  "description": "SENTINEL — ephemeral WireGuard VPN + zero-knowledge password manager",
+  "license": "MIT",
+  "packageManager": "pnpm@10.9.0",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "typecheck": "pnpm -r typecheck",
+    "lint": "pnpm -r lint",
+    "test": "pnpm -r test",
+    "build": "pnpm -r build",
+    "dev:web": "pnpm --filter @sentinel/desktop dev",
+    "screenshots": "pnpm --filter @sentinel/desktop screenshots"
+  },
+  "devDependencies": {
+    "typescript": "5.6.3"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": ["esbuild"]
+  }
+}

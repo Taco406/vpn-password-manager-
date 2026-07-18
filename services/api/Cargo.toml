@@ -1,0 +1,48 @@
+[package]
+name = "sentinel-api"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "SENTINEL sync backend: Axum + Postgres, zero-knowledge schema."
+
+[[bin]]
+name = "sentinel-api"
+path = "src/main.rs"
+
+[lib]
+name = "sentinel_api"
+path = "src/lib.rs"
+
+[dependencies]
+sentinel-core = { workspace = true }
+axum = "0.8"
+# Runtime queries only (sqlx::query / query_as) — no compile-time DB, no offline
+# cache. Avoids the sqlx-prepare CI dependency (DECISIONS D17).
+sqlx = { version = "0.8", default-features = false, features = [
+    "runtime-tokio", "tls-rustls", "postgres", "uuid", "time",
+] }
+tower = { version = "0.5", features = ["util"] }
+tower-http = { version = "0.6", features = ["trace", "cors"] }
+jsonwebtoken = "9"
+p256 = { version = "0.13", features = ["ecdsa", "pem", "pkcs8"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+async-trait = { workspace = true }
+time = { workspace = true }
+uuid = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+base64 = { workspace = true }
+sha2 = { workspace = true }
+sha1 = { workspace = true }
+hmac = { workspace = true }
+rand = { workspace = true }
+
+[dev-dependencies]
+reqwest = { workspace = true }
+uuid = { workspace = true }
+time = { workspace = true }
+base64 = { workspace = true }
