@@ -6,6 +6,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod commands;
+mod nmhost;
 mod state;
 mod sync;
 mod vpn;
@@ -13,6 +14,14 @@ mod vpn;
 use tauri::Manager;
 
 fn main() {
+    // When Chrome/Edge launch us as their native-messaging host they pass the extension
+    // origin as an argument. Detect that before building the UI and run the stdio host
+    // loop instead (see nmhost). A normal double-click never takes this path.
+    if nmhost::is_host_mode() {
+        nmhost::run();
+        return;
+    }
+
     tauri::Builder::default()
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
@@ -73,6 +82,9 @@ fn main() {
             sync::sync_restore,
             sync::sync_devices,
             sync::sync_device_revoke,
+            nmhost::autofill_status,
+            nmhost::autofill_install,
+            nmhost::autofill_uninstall,
         ])
         .run(tauri::generate_context!())
         .expect("error while running SENTINEL");

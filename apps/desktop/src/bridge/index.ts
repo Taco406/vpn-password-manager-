@@ -36,6 +36,29 @@ export async function vpnRealEnabled(): Promise<boolean> {
   return !!c?.realEnabled;
 }
 
+// --- Browser autofill (experimental) opt-in helpers -------------------------
+// Register/unregister this app as the Chrome/Edge native-messaging host. Not part of the
+// SentinelBridge contract (they only mean something in the shell); in the browser they
+// no-op / report disabled so Settings renders in both modes.
+
+export async function autofillStatus(): Promise<{ installed: boolean }> {
+  if (!inTauri()) return { installed: false };
+  const core = await import("@tauri-apps/api/core");
+  return core.invoke("autofill_status") as Promise<{ installed: boolean }>;
+}
+
+export async function autofillInstall(): Promise<void> {
+  if (!inTauri()) throw new Error("Browser autofill is only available in the desktop app.");
+  const core = await import("@tauri-apps/api/core");
+  await core.invoke("autofill_install");
+}
+
+export async function autofillUninstall(): Promise<void> {
+  if (!inTauri()) return;
+  const core = await import("@tauri-apps/api/core");
+  await core.invoke("autofill_uninstall");
+}
+
 // --- Account & Sync (Stage 3) opt-in helpers --------------------------------
 // Not part of the SentinelBridge contract (they only mean something in the shell). In the
 // browser they no-op / return defaults so Settings renders in both modes.
