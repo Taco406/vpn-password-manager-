@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Moon, Sun, Monitor, Globe, Cloud, LogIn, Download, RefreshCw, Trash2, Upload, Puzzle } from "lucide-react";
+import { Moon, Sun, Monitor, Globe, Cloud, LogIn, Download, RefreshCw, Trash2, Upload, Puzzle, Wifi, ShieldOff, X } from "lucide-react";
 import type { Settings as SettingsT } from "@sentinel/shared";
 import {
   bridge,
@@ -10,6 +10,9 @@ import {
   autofillStatus,
   autofillInstall,
   autofillUninstall,
+  netStatus,
+  netSet,
+  killswitchClear,
   syncStatus,
   syncSetConfig,
   authGoogleSignin,
@@ -21,6 +24,7 @@ import {
   syncRestore,
   syncDevices,
   syncDeviceRevoke,
+  type NetStatusInfo,
   type SyncStatusInfo,
   type SyncDevice,
 } from "../bridge";
@@ -89,6 +93,7 @@ export function Settings() {
       </Card>
 
       <RealVpn />
+      <NetGuard />
       <BrowserAutofill />
       <AccountSync />
       <Updates />
@@ -533,6 +538,177 @@ function RealVpn() {
   );
 }
 
+function NetGuard() {
+  const [status, setStatus] = useState<NetStatusInfo | null>(null);
+  const [ssids, setSsids] = useState<string[]>([]);
+  const [newSsid, setNewSsid] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState("");
+
+  const refresh = async () => {
+    const [st, settings] = await Promise.all([netStatus(), bridge.settingsGet()]);
+    setStatus(st);
+    setSsids(settings.ssidAllowlist ?? []);
+  };
+
+  useEffect(() => {
+    void refresh().catch(() => {});
+  }, []);
+
+  const persist = async (autoConnect: boolean, list: string[]) => {
+    setBusy(true);
+    setMsg("");
+    try {
+      await netSet(autoConnect, list);
+      await refresh();
+    } catch (e) {
+      setMsg(errMsg(e));
+    }
+    setBusy(false);
+  };
+
+  const auto = status?.autoConnect ?? false;
+
+  const toggleAuto = () => void persist(!auto, ssids);
+
+  const addSsid = (raw?: string) => {
+    const v = (raw ?? newSsid).trim();
+    setNewSsid("");
+    if (!v || ssids.some((s) => s.toLowerCase() === v.toLowerCase())) return;
+    const list = [...ssids, v];
+    setSsids(list);
+    void persist(auto, list);
+  };
+
+  const removeSsid = (s: string) => {
+    const list = ssids.filter((x) => x !== s);
+    setSsids(list);
+    void persist(auto, list);
+  };
+
+  const clearKs = async () => {
+    setBusy(true);
+    setMsg("");
+    try {
+      await killswitchClear();
+      setMsg("Kill-switch firewall rules cleared. If your connection was blocked, it's unblocked now.");
+    } catch (e) {
+      setMsg(errMsg(e));
+    }
+    setBusy(false);
+  };
+
+  const untrustedNow = !!status?.ssid && !status.trusted;
+
+  return (
+    <Card className="mb-4">
+      <div className="mb-2 flex items-center justify-between text-sm font-medium">
+        <span className="flex items-center gap-2">
+          <Wifi size={15} /> Auto-connect &amp; kill switch
+        </span>
+        <Badge tone={auto ? "ok" : "accent"}>{auto ? "On · untrusted Wi-Fi" : "Off"}</Badge>
+      </div>
+      <p className="mb-3 text-xs text-[var(--text-secondary)]">
+        Experimental (Windows-first) and only active in real-VPN (Linode) mode. When on, SENTINEL
+        watches your Wi-Fi and automatically spins up the tunnel to your default region whenever
+        you join a network that isn't on your trusted list — coffee shops, airports, hotels. It
+        never auto-connects on a trusted network, and it waits a few minutes after you manually
+        disconnect so it won't fight you.
+      </p>
+
+      <Toggle label="Auto-connect on untrusted Wi-Fi" checked={auto} onChange={toggleAuto} />
+
+      {/* current network */}
+      <div className="mt-3 flex items-center justify-between rounded-[10px] border border-[var(--border-subtle)] bg-[var(--bg-inset)] px-3 py-2 text-sm">
+        <span className="text-[var(--text-secondary)]">
+          Current network:{" "}
+          {status?.ssid ? (
+            <span className="mono text-[var(--text-primary)]">{status.ssid}</span>
+          ) : (
+            <span className="text-[var(--text-muted)]">not on Wi-Fi</span>
+          )}
+        </span>
+        {status?.ssid &&
+          (status.trusted ? (
+            <Badge tone="ok">Trusted</Badge>
+          ) : (
+            <Badge tone="accent">Untrusted</Badge>
+          ))}
+      </div>
+
+      {/* trusted SSID editor */}
+      <div className="mt-3">
+        <div className="mb-1 text-xs text-[var(--text-muted)]">Trusted networks (no auto-connect)</div>
+        {ssids.length > 0 && (
+          <div className="mb-2 flex flex-wrap gap-1.5">
+            {ssids.map((s) => (
+              <span
+                key={s}
+                className="inline-flex items-center gap-1 rounded-full border border-[var(--border-subtle)] bg-[var(--bg-inset)] px-2.5 py-1 text-xs"
+              >
+                <span className="mono">{s}</span>
+                <button
+                  onClick={() => removeSsid(s)}
+                  disabled={busy}
+                  aria-label={`Remove ${s}`}
+                  className="text-[var(--text-muted)] hover:text-[var(--danger)] disabled:opacity-50"
+                >
+                  <X size={12} />
+                </button>
+              </span>
+            ))}
+          </div>
+        )}
+        <div className="flex items-center gap-2">
+          <input
+            value={newSsid}
+            onChange={(e) => setNewSsid(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") {
+                e.preventDefault();
+                addSsid();
+              }
+            }}
+            placeholder="Wi-Fi name (SSID)"
+            className={`${inputCls} flex-1`}
+          />
+          <button onClick={() => addSsid()} disabled={busy || !newSsid.trim()} className={btnCls}>
+            Add
+          </button>
+          {untrustedNow && (
+            <button
+              onClick={() => addSsid(status?.ssid ?? undefined)}
+              disabled={busy}
+              className={btnCls}
+              title="Trust the network you're on right now"
+            >
+              Trust current
+            </button>
+          )}
+        </div>
+      </div>
+
+      {/* kill-switch panic button */}
+      <div className="mt-4 border-t border-[var(--border-subtle)] pt-4">
+        <div className="mb-1 flex items-center gap-2 text-sm font-medium">
+          <ShieldOff size={15} /> Kill switch
+        </div>
+        <p className="mb-2 text-xs text-[var(--text-secondary)]">
+          When the kill switch is on (Security → &ldquo;Kill switch on by default&rdquo;), connecting
+          adds Windows Firewall rules that block traffic outside the tunnel, so a dropped VPN can't
+          leak. SENTINEL removes them on disconnect, on launch, and on exit. If you ever get stuck
+          without internet, this button force-removes every rule right away.
+        </p>
+        <button onClick={clearKs} disabled={busy} className={btnCls}>
+          {busy ? "Working…" : "Clear kill-switch rules"}
+        </button>
+      </div>
+
+      {msg && <p className="mt-3 text-xs text-[var(--text-muted)]">{msg}</p>}
+    </Card>
+  );
+}
+
 function BrowserAutofill() {
   const [installed, setInstalled] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -625,7 +801,7 @@ function Updates() {
   return (
     <Card>
       <div className="mb-2 flex items-center justify-between text-sm font-medium">
-        Updates <Badge tone="accent">v0.1.6</Badge>
+        Updates <Badge tone="accent">v0.1.7</Badge>
       </div>
       <p className="mb-3 text-xs text-[var(--text-secondary)]">
         SENTINEL checks for signed updates on launch and installs them automatically. You can also check now.

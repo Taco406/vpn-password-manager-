@@ -58,14 +58,54 @@ To go back to the simulation, clear the token (Settings → Real VPN → blank �
   and only reports **Connected** once a real handshake lands.
 - On Disconnect (or on any failure at all), the tunnel comes down and the Linode is deleted.
 
+## VPN depth (experimental): kill switch, auto-connect, live latency
+
+These three extras are **opt-in** and only do anything in real-VPN (Linode) mode. They're
+**Windows-first**; on macOS/Linux they're safe no-ops.
+
+### Kill switch (Windows)
+
+Turn it on with **Settings → Security → "Kill switch on by default"**. When it's on, pressing
+**Connect** adds Windows Firewall rules — all tagged with the name/group `SENTINEL-KillSwitch` —
+that block outbound traffic except the WireGuard tunnel, loopback, and your local subnet. If the
+tunnel drops, traffic is blocked rather than leaking to your normal connection.
+
+**Safety — it can never strand you offline.** The rules are removed on Disconnect, on any connect
+failure, unconditionally on every launch (so a crash while connected self-heals next start), and
+on app exit. There's also a manual panic button: **Settings → Auto-connect & kill switch → "Clear
+kill-switch rules"**.
+
+As a last resort you can remove the rules yourself from an **Administrator** terminal:
+
+```
+netsh advfirewall firewall delete rule name="SENTINEL-KillSwitch"
+```
+
+(Every rule shares that name, so this one command removes them all. Equivalently, from an admin
+PowerShell: `Remove-NetFirewallRule -Group "SENTINEL-KillSwitch"`.)
+
+### Auto-connect on untrusted Wi-Fi
+
+In **Settings → Auto-connect & kill switch**, toggle **Auto-connect on untrusted Wi-Fi** and build
+a **trusted-networks** list (your home/office SSIDs; "Trust current" adds the one you're on). While
+on, SENTINEL checks your Wi-Fi every ~30s and, if you join a network that *isn't* on the trusted
+list and you're not already connected, it spins up the tunnel to your **default region**. It never
+auto-connects on a trusted network, and it waits a few minutes after a manual Disconnect so it
+won't fight you.
+
+### Live region latency
+
+The region picker now measures a best-effort round-trip (a quick TCP connect to a per-region
+Linode speedtest host, ~1s timeout, all regions probed in parallel) and shows it as `latencyMs`.
+If a probe fails it's simply omitted — the list never blocks or hangs on it.
+
 ## Known limitations (this is a first cut)
 
 - **Windows-first.** The controller drives the official WireGuard app; macOS/Linux use `wg-quick`
-  but are less exercised.
-- **Kill switch** (block traffic if the tunnel drops) isn't wired yet — if the tunnel drops,
-  traffic can fall back to your normal connection until you reconnect.
-- **Region latency/speed numbers** aren't live-measured yet; the picker shows the regions and the
-  globe, connection is real.
+  but are less exercised. The kill switch and SSID detection are Windows-only (no-ops elsewhere).
+- The kill switch uses Windows Firewall rules; because it couldn't be exercised against a live
+  Windows machine + Linode from the build environment, treat it as experimental — if you ever lose
+  connectivity while connected, hit **Clear kill-switch rules** (or run the `netsh` command above).
 - Because this couldn't be tested against a live Linode from the build environment, **you are the
   first real-world test** — if a connect fails, the error message on the VPN screen says which
   stage failed; send it over and it's usually a quick fix.

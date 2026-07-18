@@ -23,15 +23,39 @@ use sentinel_core::vpn::{CostTicker, HistoryStore, SessionRecord};
 use sentinel_core::wg::{render_client_conf, ClientConf, WgController, WgCounters};
 use serde::Serialize;
 use serde_json::json;
-use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
-use tauri::{AppHandle, Emitter, State};
+use tauri::{AppHandle, Emitter, Manager, State};
 
 const KC_SERVICE: &str = "com.sentinel.desktop";
 const KC_LINODE: &str = "linode-token";
 const TUNNEL: &str = "sentinel";
+
+// --- kill switch + auto-connect (all opt-in, only meaningful in real-VPN mode) ------------
+/// Shared name+group tag for every kill-switch firewall rule, so the whole set can be torn
+/// down in one command (delete-by-name is the reliable path; group is set too). Changing
+/// this string orphans old rules — keep it stable.
+#[cfg_attr(not(windows), allow(dead_code))]
+const KILLSWITCH_ID: &str = "SENTINEL-KillSwitch";
+/// WireGuard UDP port the exit node listens on (matches the hardened cloud-init firewall).
+#[cfg_attr(not(windows), allow(dead_code))]
+const WG_PORT: &str = "51820";
+/// Cheapest node — what an automatic (untrusted-Wi-Fi) connect provisions by default.
+const DEFAULT_INSTANCE_TYPE: &str = "g6-nanode-1";
+/// How often the untrusted-Wi-Fi poller checks the current SSID.
+const AUTOCONNECT_POLL_SECS: u64 = 30;
+/// After a manual disconnect, suppress auto-connect for this long so we never immediately
+/// fight the user's choice to go off-VPN.
+const AUTOCONNECT_DEBOUNCE_SECS: i64 = 300;
+
+/// Unix time of the last manual `vpn_disconnect` (0 = never), used for the auto-connect
+/// debounce above.
+static LAST_MANUAL_DISCONNECT: AtomicI64 = AtomicI64::new(0);
+/// Guards against two overlapping connect attempts (manual + auto racing), which would
+/// otherwise provision two paid nodes.
+static CONNECTING: AtomicBool = AtomicBool::new(false);
 
 // ---------------------------------------------------------------------------
 // Linode token in the OS keychain
@@ -66,6 +90,9 @@ struct RegionRow {
     country: &'static str,
     lat: f64,
     lon: f64,
+    /// Per-region Linode speedtest mirror, used only for a best-effort TCP-connect latency
+    /// probe (never for the tunnel itself). If it doesn't resolve, latency is simply omitted.
+    speedtest_host: &'static str,
 }
 
 // Linode region ids (valid for `create`) with coordinates for the globe.
@@ -76,6 +103,7 @@ const REGIONS: &[RegionRow] = &[
         country: "US",
         lat: 40.74,
         lon: -74.17,
+        speedtest_host: "speedtest.newark.linode.com",
     },
     RegionRow {
         id: "us-central",
@@ -83,6 +111,7 @@ const REGIONS: &[RegionRow] = &[
         country: "US",
         lat: 32.78,
         lon: -96.80,
+        speedtest_host: "speedtest.dallas.linode.com",
     },
     RegionRow {
         id: "us-west",
@@ -90,6 +119,7 @@ const REGIONS: &[RegionRow] = &[
         country: "US",
         lat: 37.55,
         lon: -121.98,
+        speedtest_host: "speedtest.fremont.linode.com",
     },
     RegionRow {
         id: "us-southeast",
@@ -97,6 +127,7 @@ const REGIONS: &[RegionRow] = &[
         country: "US",
         lat: 33.75,
         lon: -84.39,
+        speedtest_host: "speedtest.atlanta.linode.com",
     },
     RegionRow {
         id: "ca-central",
@@ -104,6 +135,7 @@ const REGIONS: &[RegionRow] = &[
         country: "CA",
         lat: 43.65,
         lon: -79.38,
+        speedtest_host: "speedtest.toronto1.linode.com",
     },
     RegionRow {
         id: "eu-west",
@@ -111,6 +143,7 @@ const REGIONS: &[RegionRow] = &[
         country: "GB",
         lat: 51.51,
         lon: -0.13,
+        speedtest_host: "speedtest.london.linode.com",
     },
     RegionRow {
         id: "eu-central",
@@ -118,6 +151,7 @@ const REGIONS: &[RegionRow] = &[
         country: "DE",
         lat: 50.11,
         lon: 8.68,
+        speedtest_host: "speedtest.frankfurt.linode.com",
     },
     RegionRow {
         id: "ap-south",
@@ -125,6 +159,7 @@ const REGIONS: &[RegionRow] = &[
         country: "SG",
         lat: 1.35,
         lon: 103.82,
+        speedtest_host: "speedtest.singapore.linode.com",
     },
     RegionRow {
         id: "ap-northeast",
@@ -132,6 +167,7 @@ const REGIONS: &[RegionRow] = &[
         country: "JP",
         lat: 35.68,
         lon: 139.69,
+        speedtest_host: "speedtest.tokyo2.linode.com",
     },
     RegionRow {
         id: "ap-southeast",
@@ -139,6 +175,7 @@ const REGIONS: &[RegionRow] = &[
         country: "AU",
         lat: -33.87,
         lon: 151.21,
+        speedtest_host: "speedtest.syd1.linode.com",
     },
 ];
 
@@ -189,6 +226,8 @@ pub struct RegionOut {
     country: String,
     lat: f64,
     lon: f64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    latency_ms: Option<u32>,
 }
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -426,6 +465,358 @@ fn state_json(s: &ConnectState, region: &str, instance_type: &str) -> serde_json
 }
 
 // ---------------------------------------------------------------------------
+// kill switch (Windows-only firewall, opt-in) — SAFETY: never leave traffic blocked
+// ---------------------------------------------------------------------------
+//
+// Every rule shares the same name AND group `SENTINEL-KillSwitch`, so the whole set is
+// removable in one command. The block is fail-closed: if anything goes wrong the traffic is
+// blocked (safe) rather than leaked, and four independent paths guarantee the block is always
+// removed — on disconnect, on any connect failure, on every launch, and on app exit — plus a
+// manual `killswitch_clear` panic button. So a bug can never permanently strand the user
+// offline. It is a no-op on non-Windows (WireGuard there uses `wg-quick`, out of scope here).
+
+/// Run a `netsh` command, hiding the console window on Windows. Returns the trimmed stderr on
+/// failure so the caller can log it. Only compiled on Windows.
+#[cfg(windows)]
+fn netsh(args: &[&str]) -> Result<(), String> {
+    use std::os::windows::process::CommandExt;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    let out = std::process::Command::new("netsh")
+        .args(args)
+        .creation_flags(CREATE_NO_WINDOW)
+        .output()
+        .map_err(|e| format!("spawn netsh: {e}"))?;
+    if out.status.success() {
+        Ok(())
+    } else {
+        Err(format!(
+            "netsh {}: {}",
+            args.join(" "),
+            String::from_utf8_lossy(&out.stderr).trim()
+        ))
+    }
+}
+
+/// Remove ALL kill-switch firewall rules. Idempotent and best-effort: a missing rule set is
+/// not an error. This is THE safety guarantee — after this returns, nothing in our group can
+/// still be blocking traffic. No-op off Windows.
+pub fn killswitch_clear_all() {
+    #[cfg(windows)]
+    {
+        // Reliable path: all our rules share this exact name, so one delete removes them all.
+        let _ = netsh(&[
+            "advfirewall",
+            "firewall",
+            "delete",
+            "rule",
+            &format!("name={KILLSWITCH_ID}"),
+        ]);
+        // Belt-and-suspenders: also try the group form (harmless if unsupported).
+        let _ = netsh(&[
+            "advfirewall",
+            "firewall",
+            "delete",
+            "rule",
+            &format!("group={KILLSWITCH_ID}"),
+        ]);
+    }
+}
+
+/// Engage the kill switch for a freshly-established tunnel whose exit node is `endpoint_ip`.
+/// Adds a block-all-outbound rule plus carve-outs for the tunnel handshake, the WireGuard
+/// service, loopback and the local subnet. Windows only.
+#[cfg(windows)]
+fn killswitch_engage(endpoint_ip: &str) -> Result<(), String> {
+    // Start clean so we never stack stale/duplicate rules.
+    killswitch_clear_all();
+
+    let name = format!("name={KILLSWITCH_ID}");
+    let group = format!("group={KILLSWITCH_ID}");
+
+    // Allow carve-outs first (organisational; precedence is enforced by Windows, not order).
+    // Loopback.
+    netsh(&[
+        "advfirewall",
+        "firewall",
+        "add",
+        "rule",
+        &name,
+        &group,
+        "dir=out",
+        "action=allow",
+        "enable=yes",
+        "profile=any",
+        "remoteip=127.0.0.0/8",
+    ])?;
+    // Local/LAN, DHCP, link-local and multicast so the LAN keeps working under the block.
+    netsh(&[
+        "advfirewall", "firewall", "add", "rule", &name, &group, "dir=out", "action=allow",
+        "enable=yes", "profile=any",
+        "remoteip=LocalSubnet,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,169.254.0.0/16,224.0.0.0/4,255.255.255.255",
+    ])?;
+    // The WireGuard handshake/keepalive to the exit node (so the tunnel itself can connect).
+    if !endpoint_ip.is_empty() {
+        let remoteip = format!("remoteip={endpoint_ip}");
+        let remoteport = format!("remoteport={WG_PORT}");
+        netsh(&[
+            "advfirewall",
+            "firewall",
+            "add",
+            "rule",
+            &name,
+            &group,
+            "dir=out",
+            "action=allow",
+            "enable=yes",
+            "profile=any",
+            "protocol=UDP",
+            &remoteip,
+            &remoteport,
+        ])?;
+    }
+    // The WireGuard tunnel-service adapter, so traffic that egresses via the tunnel is allowed.
+    let _ = netsh(&[
+        "advfirewall",
+        "firewall",
+        "add",
+        "rule",
+        &name,
+        &group,
+        "dir=out",
+        "action=allow",
+        "enable=yes",
+        "profile=any",
+        &format!("service=WireGuardTunnel${TUNNEL}"),
+    ]);
+
+    // The safety net: block everything else outbound. Fail-closed — anything not carved out
+    // above is blocked rather than leaked.
+    netsh(&[
+        "advfirewall",
+        "firewall",
+        "add",
+        "rule",
+        &name,
+        &group,
+        "dir=out",
+        "action=block",
+        "enable=yes",
+        "profile=any",
+        "remoteip=any",
+    ])?;
+    Ok(())
+}
+
+/// Engage the kill switch (Windows) or no-op (elsewhere).
+#[cfg(windows)]
+fn killswitch_engage_for(endpoint_ip: &str) -> Result<(), String> {
+    killswitch_engage(endpoint_ip)
+}
+#[cfg(not(windows))]
+fn killswitch_engage_for(_endpoint_ip: &str) -> Result<(), String> {
+    Ok(())
+}
+
+/// Whether the kill switch should engage on connect. Reuses the existing `killSwitchDefault`
+/// setting (the "Kill switch on by default" toggle). Absent ⇒ off, so we never engage a
+/// traffic-blocking rule unless the user's persisted settings explicitly ask for it.
+fn killswitch_enabled(data_dir: &Path) -> bool {
+    std::fs::read_to_string(data_dir.join("settings.json"))
+        .ok()
+        .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
+        .and_then(|v| v.get("killSwitchDefault").and_then(|b| b.as_bool()))
+        .unwrap_or(false)
+}
+
+/// Manual panic button: tear down every kill-switch rule immediately. Always succeeds.
+#[tauri::command]
+pub fn killswitch_clear() -> Result<(), String> {
+    killswitch_clear_all();
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// auto-connect on untrusted Wi-Fi (opt-in) + SSID detection
+// ---------------------------------------------------------------------------
+
+/// The current Wi-Fi SSID via `netsh wlan show interfaces`, or `None` if not on Wi-Fi / not
+/// Windows. Parses the `SSID` line (guarding against the `BSSID` line).
+#[cfg(windows)]
+fn current_ssid() -> Option<String> {
+    use std::os::windows::process::CommandExt;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    let out = std::process::Command::new("netsh")
+        .args(["wlan", "show", "interfaces"])
+        .creation_flags(CREATE_NO_WINDOW)
+        .output()
+        .ok()?;
+    let text = String::from_utf8_lossy(&out.stdout);
+    for line in text.lines() {
+        let line = line.trim();
+        // Match a line that begins with "SSID" followed by spacing/colon, not "BSSID".
+        if let Some(rest) = line.strip_prefix("SSID") {
+            if !rest.starts_with(|c: char| c.is_whitespace() || c == ':') {
+                continue;
+            }
+            if let Some((_, val)) = rest.split_once(':') {
+                let val = val.trim();
+                if !val.is_empty() {
+                    return Some(val.to_string());
+                }
+            }
+        }
+    }
+    None
+}
+#[cfg(not(windows))]
+fn current_ssid() -> Option<String> {
+    None
+}
+
+struct NetSettings {
+    auto_connect: bool,
+    trusted: Vec<String>,
+    default_region: String,
+}
+
+fn read_net_settings(data_dir: &Path) -> NetSettings {
+    let v = std::fs::read_to_string(data_dir.join("settings.json"))
+        .ok()
+        .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
+        .unwrap_or_else(|| json!({}));
+    NetSettings {
+        auto_connect: v
+            .get("autoConnectUntrusted")
+            .and_then(|b| b.as_bool())
+            .unwrap_or(false),
+        trusted: v
+            .get("ssidAllowlist")
+            .and_then(|a| a.as_array())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|x| x.as_str().map(|s| s.to_string()))
+                    .collect()
+            })
+            .unwrap_or_default(),
+        default_region: v
+            .get("defaultRegion")
+            .and_then(|s| s.as_str())
+            .unwrap_or("us-east")
+            .to_string(),
+    }
+}
+
+fn ssid_is_trusted(ssid: &str, trusted: &[String]) -> bool {
+    trusted.iter().any(|t| t.eq_ignore_ascii_case(ssid))
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NetStatus {
+    /// `null` when not on Wi-Fi (or off Windows); always present so the UI shape is stable.
+    ssid: Option<String>,
+    trusted: bool,
+    auto_connect: bool,
+}
+
+#[tauri::command]
+pub fn net_status(state: State<AppState>) -> NetStatus {
+    let data_dir = { state.inner.lock().unwrap().data_dir.clone() };
+    let cfg = read_net_settings(&data_dir);
+    let ssid = current_ssid();
+    let trusted = ssid
+        .as_ref()
+        .map(|s| ssid_is_trusted(s, &cfg.trusted))
+        .unwrap_or(false);
+    NetStatus {
+        ssid,
+        trusted,
+        auto_connect: cfg.auto_connect,
+    }
+}
+
+/// Persist the auto-connect toggle + trusted-SSID list (read-merge-write, mirroring
+/// `hello_set`, so unrelated settings are preserved). Trusted SSIDs live in `ssidAllowlist`.
+#[tauri::command]
+pub fn net_set(
+    state: State<AppState>,
+    auto_connect: bool,
+    trusted_ssids: Vec<String>,
+) -> Result<(), String> {
+    let data_dir = { state.inner.lock().unwrap().data_dir.clone() };
+    let path = data_dir.join("settings.json");
+    let mut cur = std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
+        .unwrap_or_else(|| json!({}));
+    if let Some(obj) = cur.as_object_mut() {
+        obj.insert(
+            "autoConnectUntrusted".into(),
+            serde_json::Value::Bool(auto_connect),
+        );
+        let cleaned: Vec<serde_json::Value> = trusted_ssids
+            .into_iter()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .map(serde_json::Value::String)
+            .collect();
+        obj.insert("ssidAllowlist".into(), serde_json::Value::Array(cleaned));
+    }
+    std::fs::write(
+        &path,
+        serde_json::to_string_pretty(&cur).unwrap_or_default(),
+    )
+    .map_err(|e| e.to_string())
+}
+
+/// One tick of the untrusted-Wi-Fi poller. Auto-connects only when: the feature is on, real
+/// VPN is configured, we're on Wi-Fi whose SSID is NOT trusted, nothing is already connected,
+/// and we're outside the post-manual-disconnect debounce window.
+async fn autoconnect_tick(app: &AppHandle) {
+    let state = app.state::<AppState>();
+    let data_dir = { state.inner.lock().unwrap().data_dir.clone() };
+    let cfg = read_net_settings(&data_dir);
+    if !cfg.auto_connect {
+        return;
+    }
+    if get_token().is_none() {
+        return; // real VPN not configured — never touch a non-opted-in user
+    }
+    if state.inner.lock().unwrap().vpn.is_some() {
+        return; // already connected
+    }
+    let last = LAST_MANUAL_DISCONNECT.load(Ordering::Relaxed);
+    if last > 0 && now_secs() - last < AUTOCONNECT_DEBOUNCE_SECS {
+        return; // don't fight a recent manual disconnect
+    }
+    let Some(ssid) = current_ssid() else {
+        return; // not on Wi-Fi (wired / no adapter)
+    };
+    if ssid_is_trusted(&ssid, &cfg.trusted) {
+        return; // trusted network — leave it alone
+    }
+    // Untrusted Wi-Fi and idle: connect to the default region on the cheapest node.
+    let _ = connect_real(
+        app.clone(),
+        &state,
+        cfg.default_region,
+        DEFAULT_INSTANCE_TYPE.to_string(),
+    )
+    .await;
+}
+
+/// Spawn the background untrusted-Wi-Fi poller (called once from setup). Cheap and self-gating
+/// — every tick re-reads settings, so toggling the feature takes effect without a restart.
+pub fn spawn_autoconnect_poller(app: AppHandle) {
+    tauri::async_runtime::spawn(async move {
+        loop {
+            tokio::time::sleep(Duration::from_secs(AUTOCONNECT_POLL_SECS)).await;
+            autoconnect_tick(&app).await;
+        }
+    });
+}
+
+// ---------------------------------------------------------------------------
 // commands
 // ---------------------------------------------------------------------------
 
@@ -447,16 +838,50 @@ pub fn vpn_set_token(token: String) -> std::result::Result<(), String> {
     set_token(&token)
 }
 
+/// Best-effort TCP-connect latency to a host with a tight timeout. On any failure (DNS,
+/// refused, timeout) returns `None` so a flaky probe never blocks or poisons the list.
+async fn measure_latency(host: &'static str) -> Option<u32> {
+    let addr = format!("{host}:443");
+    let start = std::time::Instant::now();
+    match tokio::time::timeout(
+        Duration::from_millis(1000),
+        tokio::net::TcpStream::connect(&addr),
+    )
+    .await
+    {
+        Ok(Ok(_stream)) => Some(start.elapsed().as_millis().min(u32::MAX as u128) as u32),
+        _ => None,
+    }
+}
+
 #[tauri::command]
-pub fn vpn_regions_real() -> Vec<RegionOut> {
+pub async fn vpn_regions_real() -> Vec<RegionOut> {
+    // Probe every region concurrently; each is capped at 1s, so the whole call stays ~1s
+    // even when several hosts are unreachable. A failed probe just omits `latencyMs`.
+    let mut set = tokio::task::JoinSet::new();
+    for (i, r) in REGIONS.iter().enumerate() {
+        let host = r.speedtest_host;
+        set.spawn(async move { (i, measure_latency(host).await) });
+    }
+    let mut latencies: Vec<Option<u32>> = vec![None; REGIONS.len()];
+    while let Some(res) = set.join_next().await {
+        if let Ok((i, ms)) = res {
+            if let Some(slot) = latencies.get_mut(i) {
+                *slot = ms;
+            }
+        }
+    }
+
     REGIONS
         .iter()
-        .map(|r| RegionOut {
+        .enumerate()
+        .map(|(i, r)| RegionOut {
             id: r.id.into(),
             label: r.label.into(),
             country: r.country.into(),
             lat: r.lat,
             lon: r.lon,
+            latency_ms: latencies.get(i).copied().flatten(),
         })
         .collect()
 }
@@ -537,6 +962,14 @@ fn history_store(state: &State<AppState>) -> CoreResult<HistoryStore> {
     HistoryStore::open(&path.to_string_lossy())
 }
 
+/// Resets the `CONNECTING` guard on every exit path (including `?`/early return).
+struct ConnectingGuard;
+impl Drop for ConnectingGuard {
+    fn drop(&mut self) {
+        CONNECTING.store(false, Ordering::SeqCst);
+    }
+}
+
 #[tauri::command]
 pub async fn vpn_connect(
     app: AppHandle,
@@ -544,6 +977,24 @@ pub async fn vpn_connect(
     region: String,
     instance_type: String,
 ) -> std::result::Result<(), String> {
+    connect_real(app, &state, region, instance_type).await
+}
+
+/// The shared connect path used by both the manual `vpn_connect` command and the
+/// untrusted-Wi-Fi auto-connect poller. Takes `&AppState` (not the Tauri extractor) so the
+/// poller — which gets its state via `app.state()` — can call it too.
+pub async fn connect_real(
+    app: AppHandle,
+    state: &AppState,
+    region: String,
+    instance_type: String,
+) -> std::result::Result<(), String> {
+    // Never provision two nodes from overlapping attempts (manual + auto racing).
+    if CONNECTING.swap(true, Ordering::SeqCst) {
+        return Err("a connection attempt is already in progress".into());
+    }
+    let _connecting = ConnectingGuard;
+
     if state.inner.lock().unwrap().vpn.is_some() {
         return Err("already connected".into());
     }
@@ -559,9 +1010,28 @@ pub async fn vpn_connect(
         let _ = apph.emit("vpn:state", state_json(&s, &r, &it));
     };
 
-    let conn = core_connect(&deps, &region, &instance_type, &mut emit)
-        .await
-        .map_err(|e| e.to_string())?;
+    let conn = match core_connect(&deps, &region, &instance_type, &mut emit).await {
+        Ok(c) => c,
+        Err(e) => {
+            // On ANY connect failure, guarantee no kill-switch rules are left behind.
+            killswitch_clear_all();
+            return Err(e.to_string());
+        }
+    };
+
+    // Kill switch (opt-in, Windows-only): engage once the tunnel is up so a later drop can't
+    // leak. It's engaged AFTER the tunnel establishes and carves out the exit node's endpoint,
+    // so it never blocks the tunnel from forming. A failure here is logged and cleaned up but
+    // never fails an otherwise-working connection.
+    let data_dir = { state.inner.lock().unwrap().data_dir.clone() };
+    if killswitch_enabled(&data_dir) {
+        if let Some(ip) = conn.instance.ipv4.as_deref() {
+            if let Err(e) = killswitch_engage_for(ip) {
+                eprintln!("SENTINEL: kill switch engage failed ({e}); clearing to stay fail-safe");
+                killswitch_clear_all();
+            }
+        }
+    }
 
     let stop = Arc::new(AtomicBool::new(false));
     let started_at = now_secs();
@@ -612,6 +1082,11 @@ pub async fn vpn_disconnect(
     app: AppHandle,
     state: State<'_, AppState>,
 ) -> std::result::Result<(), String> {
+    // A manual disconnect: mark the time so auto-connect won't immediately re-engage, and tear
+    // down the kill switch unconditionally (idempotent) so traffic is never left blocked.
+    LAST_MANUAL_DISCONNECT.store(now_secs(), Ordering::Relaxed);
+    killswitch_clear_all();
+
     let active = { state.inner.lock().unwrap().vpn.take() };
     let Some(active) = active else {
         return Ok(());
