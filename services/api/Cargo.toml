@@ -25,6 +25,8 @@ sqlx = { version = "0.8", default-features = false, features = [
 tower = { version = "0.5", features = ["util"] }
 tower-http = { version = "0.6", features = ["trace", "cors"] }
 jsonwebtoken = "9"
+# JWKS fetch for real Google id_token verification (rustls, no OpenSSL).
+reqwest = { workspace = true }
 p256 = { version = "0.13", features = ["ecdsa", "pem", "pkcs8"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -42,7 +44,6 @@ hmac = { workspace = true }
 rand = { workspace = true }
 
 [dev-dependencies]
-reqwest = { workspace = true }
 uuid = { workspace = true }
 time = { workspace = true }
 base64 = { workspace = true }

@@ -1,0 +1,33 @@
+# Keep the Docker build context small. The Rust build needs every workspace
+# Cargo manifest plus the Rust sources, so we only prune heavy/irrelevant paths
+# — never the crate manifests.
+.git
+.github
+
+# Rust build output (rebuilt inside the image).
+target
+**/target
+
+# Node / web tooling (not needed to build sentinel-api).
+node_modules
+**/node_modules
+.pnpm-store
+dist
+**/dist
+apps/**/test-results
+apps/**/playwright-report
+apps/**/.playwright
+
+# Local Postgres dev cluster and any secrets — MUST NOT enter the image.
+.pgdata
+secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# Misc.
+*.log
+.DS_Store
+.claude

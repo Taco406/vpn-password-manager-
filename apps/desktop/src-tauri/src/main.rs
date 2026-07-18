@@ -7,6 +7,7 @@
 
 mod commands;
 mod state;
+mod sync;
 mod vpn;
 
 use tauri::Manager;
@@ -60,6 +61,17 @@ fn main() {
             vpn::vpn_state,
             vpn::vpn_cost_estimate,
             vpn::vpn_history,
+            sync::sync_status,
+            sync::sync_set_config,
+            sync::auth_google_signin,
+            sync::auth_totp_enroll,
+            sync::auth_totp_verify,
+            sync::auth_logout,
+            sync::sync_backup,
+            sync::sync_now,
+            sync::sync_restore,
+            sync::sync_devices,
+            sync::sync_device_revoke,
         ])
         .run(tauri::generate_context!())
         .expect("error while running SENTINEL");
