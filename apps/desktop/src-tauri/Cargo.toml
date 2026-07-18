@@ -24,6 +24,10 @@ serde_json = { workspace = true }
 time = { workspace = true }
 tokio = { workspace = true }
 tauri = { version = "2", features = [] }
+# Self-update: the updater plugin fetches/verifies/installs signed releases; the
+# process plugin relaunches the app after an update is applied.
+tauri-plugin-updater = "2"
+tauri-plugin-process = "2"
 
 [features]
 # Enabled by `tauri build` / the Tauri CLI.

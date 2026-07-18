@@ -3,5 +3,9 @@
   "identifier": "default",
   "description": "Default capability set for the SENTINEL main window.",
   "windows": ["main"],
-  "permissions": ["core:default"]
+  "permissions": [
+    "core:default",
+    "updater:default",
+    "process:allow-restart"
+  ]
 }

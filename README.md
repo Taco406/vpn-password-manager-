@@ -77,6 +77,22 @@ click through onboarding, the vault, and the VPN connect sequence with realistic
 data without any cloud account or the Tauri binary. Build the real desktop app with
 `pnpm --filter @sentinel/desktop tauri build` (needs the platform WebView + toolchain).
 
+## Install & auto-update
+
+Installers (Windows `.exe`/`.msi`, macOS `.dmg`, Linux `.deb`/AppImage) are built by CI
+and attached to GitHub Releases. Push a tag and the [`Release`](.github/workflows/release.yml)
+workflow builds all three on their own runners:
+
+```bash
+just release 0.2.0     # bumps version, tags v0.2.0, pushes → CI publishes the Release
+```
+
+Installed apps **update themselves**: SENTINEL uses Tauri's signed updater, so on launch
+it checks the latest Release's `latest.json`, and applies any newer signed version
+(there's also a *Check for updates* button in Settings). One-time setup (generating the
+updater signing key + adding it as a repo secret) is in
+[`docs/releasing.md`](docs/releasing.md).
+
 ## Running the sync server (optional)
 
 The app is local-first; you only need the server for multi-device sync, new-device

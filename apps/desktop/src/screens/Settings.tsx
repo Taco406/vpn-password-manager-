@@ -54,7 +54,7 @@ export function Settings() {
         <Toggle label="Kill switch on by default" checked={s.killSwitchDefault} onChange={(v) => patch({ killSwitchDefault: v })} />
       </Card>
 
-      <Card>
+      <Card className="mb-4">
         <div className="mb-2 flex items-center justify-between text-sm font-medium">
           Telemetry <Badge tone="ok">Off · nothing to send</Badge>
         </div>
@@ -62,7 +62,56 @@ export function Settings() {
           SENTINEL ships with no analytics endpoints. This switch is permanently off — there is nowhere for data to go.
         </p>
       </Card>
+
+      <Updates />
     </div>
+  );
+}
+
+function Updates() {
+  const [status, setStatus] = useState<string>("");
+  const [busy, setBusy] = useState(false);
+
+  const check = async () => {
+    setBusy(true);
+    const { checkForUpdate } = await import("../updater");
+    const r = await checkForUpdate((st) => {
+      const label: Record<string, string> = {
+        idle: "Updates apply to the installed app only.",
+        checking: "Checking…",
+        downloading: `Downloading ${st.version ?? ""}…`,
+        "up-to-date": "You're on the latest version.",
+        ready: `Update ${st.version ?? ""} available.`,
+        error: `Couldn't check: ${st.message ?? ""}`,
+      };
+      setStatus(label[st.state] ?? "");
+    }, false);
+    if (r.state === "ready") {
+      // Found one → install and relaunch.
+      await checkForUpdate(undefined, true);
+    }
+    setBusy(false);
+  };
+
+  return (
+    <Card>
+      <div className="mb-2 flex items-center justify-between text-sm font-medium">
+        Updates <Badge tone="accent">v0.1.0</Badge>
+      </div>
+      <p className="mb-3 text-xs text-[var(--text-secondary)]">
+        SENTINEL checks for signed updates on launch and installs them automatically. You can also check now.
+      </p>
+      <div className="flex items-center gap-3">
+        <button
+          onClick={check}
+          disabled={busy}
+          className="rounded-[10px] border border-[var(--border-strong)] px-3 py-2 text-sm hover:border-[var(--accent)]/50 disabled:opacity-50"
+        >
+          {busy ? "Checking…" : "Check for updates"}
+        </button>
+        {status && <span className="text-xs text-[var(--text-muted)]">{status}</span>}
+      </div>
+    </Card>
   );
 }
 
