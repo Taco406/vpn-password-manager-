@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
-import { Moon, Sun, Monitor } from "lucide-react";
+import { Moon, Sun, Monitor, Globe } from "lucide-react";
 import type { Settings as SettingsT } from "@sentinel/shared";
-import { bridge } from "../bridge";
+import { bridge, vpnSetToken, vpnRealEnabled } from "../bridge";
 import { useApp } from "../stores/app";
 import { Card, SectionTitle, Badge } from "../components/ui";
 
@@ -63,8 +63,74 @@ export function Settings() {
         </p>
       </Card>
 
+      <RealVpn />
       <Updates />
     </div>
+  );
+}
+
+function RealVpn() {
+  const [enabled, setEnabled] = useState(false);
+  const [token, setToken] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [status, setStatus] = useState("");
+
+  useEffect(() => {
+    void vpnRealEnabled().then(setEnabled);
+  }, []);
+
+  const save = async () => {
+    setBusy(true);
+    setStatus("");
+    try {
+      await vpnSetToken(token.trim());
+      const on = await vpnRealEnabled();
+      setEnabled(on);
+      setToken("");
+      setStatus(
+        on
+          ? "Saved. Connect will now spin up a real Linode exit node."
+          : "Token cleared. VPN is back to the built-in simulation.",
+      );
+    } catch (e) {
+      setStatus(`Couldn't save: ${e instanceof Error ? e.message : String(e)}`);
+    }
+    setBusy(false);
+  };
+
+  return (
+    <Card className="mb-4">
+      <div className="mb-2 flex items-center justify-between text-sm font-medium">
+        <span className="flex items-center gap-2">
+          <Globe size={15} /> Real VPN (Linode)
+        </span>
+        <Badge tone={enabled ? "ok" : "accent"}>{enabled ? "On · real exit nodes" : "Simulation"}</Badge>
+      </div>
+      <p className="mb-3 text-xs text-[var(--text-secondary)]">
+        Experimental. Paste a Linode API token to make Connect spin up a real, ephemeral WireGuard
+        exit node (billed ~$0.01/hr while connected, destroyed on Disconnect). Requires{" "}
+        <span className="mono">WireGuard for Windows</span> installed, and SENTINEL run as
+        administrator. Leave blank and Save to clear the token and return to the simulation. The
+        token is stored only in Windows Credential Manager.
+      </p>
+      <div className="flex items-center gap-2">
+        <input
+          type="password"
+          value={token}
+          onChange={(e) => setToken(e.target.value)}
+          placeholder={enabled ? "•••••••• (token saved)" : "Linode API token"}
+          className="mono flex-1 rounded-[10px] border border-[var(--border-subtle)] bg-[var(--bg-inset)] px-3 py-2 text-sm outline-none focus:border-[var(--accent)]/50"
+        />
+        <button
+          onClick={save}
+          disabled={busy}
+          className="rounded-[10px] border border-[var(--border-strong)] px-3 py-2 text-sm hover:border-[var(--accent)]/50 disabled:opacity-50"
+        >
+          {busy ? "Saving…" : "Save"}
+        </button>
+      </div>
+      {status && <p className="mt-2 text-xs text-[var(--text-muted)]">{status}</p>}
+    </Card>
   );
 }
 
@@ -96,7 +162,7 @@ function Updates() {
   return (
     <Card>
       <div className="mb-2 flex items-center justify-between text-sm font-medium">
-        Updates <Badge tone="accent">v0.1.0</Badge>
+        Updates <Badge tone="accent">v0.1.2</Badge>
       </div>
       <p className="mb-3 text-xs text-[var(--text-secondary)]">
         SENTINEL checks for signed updates on launch and installs them automatically. You can also check now.

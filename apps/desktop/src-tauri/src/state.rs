@@ -28,6 +28,8 @@ pub struct Inner {
     pub session: VaultSession,
     pub vault: LocalVault,
     pub data_dir: PathBuf,
+    /// The live VPN session, if connected (real ephemeral-node mode). None = disconnected.
+    pub vpn: Option<crate::vpn::VpnActive>,
 }
 
 impl AppState {
@@ -46,6 +48,7 @@ impl AppState {
                 session: VaultSession::unlocked(vault_key),
                 vault,
                 data_dir,
+                vpn: None,
             }),
         })
     }
@@ -59,6 +62,7 @@ impl AppState {
                 session: VaultSession::unlocked(VaultKey::generate()),
                 vault,
                 data_dir: std::env::temp_dir(),
+                vpn: None,
             }),
         }
     }

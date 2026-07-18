@@ -18,3 +18,20 @@ export const bridge: SentinelBridge = inTauri() ? createTauriBridge() : mockBrid
 export function getBridge(): SentinelBridge {
   return bridge;
 }
+
+// --- Real-VPN (Linode) opt-in helpers ---------------------------------------
+// Not part of the SentinelBridge contract (they only mean something in the shell). In the
+// browser they no-op / report disabled, so Settings works in both modes.
+
+export async function vpnSetToken(token: string): Promise<void> {
+  if (!inTauri()) return;
+  const core = await import("@tauri-apps/api/core");
+  await core.invoke("vpn_set_token", { token });
+}
+
+export async function vpnRealEnabled(): Promise<boolean> {
+  if (!inTauri()) return false;
+  const core = await import("@tauri-apps/api/core");
+  const c = (await core.invoke("vpn_config")) as { realEnabled?: boolean };
+  return !!c?.realEnabled;
+}

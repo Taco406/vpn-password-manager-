@@ -25,6 +25,7 @@ import type {
   SessionRow,
   Settings,
   Unsubscribe,
+  VpnMetrics,
   WrapperEnrollResult,
 } from "@sentinel/shared";
 import { mockBridge } from "./mock";
@@ -53,6 +54,18 @@ export function createTauriBridge(): SentinelBridge {
   // Frontend-generated events (clipboard auto-clear countdown) are pushed to these.
   const localListeners = new Set<(e: BridgeEvent) => void>();
   const emitLocal = (e: BridgeEvent) => localListeners.forEach((l) => l(e));
+
+  // Real VPN is used only when a Linode token is configured; otherwise the VPN methods
+  // fall back to the in-browser simulation. Memoized so we check the backend once.
+  let realVpnP: Promise<boolean> | null = null;
+  const realVpn = (): Promise<boolean> => {
+    if (!realVpnP) {
+      realVpnP = invoke<{ realEnabled: boolean }>("vpn_config")
+        .then((c) => !!c?.realEnabled)
+        .catch(() => false);
+    }
+    return realVpnP;
+  };
 
   return {
     // --- keyring / unlock (real) ---
@@ -118,14 +131,25 @@ export function createTauriBridge(): SentinelBridge {
     vaultImport: (k: ImportKind, c: string) => mockBridge.vaultImport(k, c),
     vaultExport: (k: "encrypted" | "plain_csv", p?: string) => mockBridge.vaultExport(k, p),
     favicon: (d: string) => mockBridge.favicon(d),
-    vpnRegions: (): Promise<Region[]> => mockBridge.vpnRegions(),
-    vpnInstanceTypes: (): Promise<InstanceType[]> => mockBridge.vpnInstanceTypes(),
-    vpnConnect: (r: string, i: string, p?: string) => mockBridge.vpnConnect(r, i, p),
-    vpnDisconnect: () => mockBridge.vpnDisconnect(),
-    vpnState: (): Promise<ConnectState> => mockBridge.vpnState(),
+    vpnRegions: async (): Promise<Region[]> =>
+      (await realVpn()) ? invoke<Region[]>("vpn_regions_real") : mockBridge.vpnRegions(),
+    vpnInstanceTypes: async (): Promise<InstanceType[]> =>
+      (await realVpn()) ? invoke<InstanceType[]>("vpn_instance_types_real") : mockBridge.vpnInstanceTypes(),
+    vpnConnect: async (r: string, i: string, p?: string) =>
+      (await realVpn())
+        ? invoke<void>("vpn_connect", { region: r, instanceType: i })
+        : mockBridge.vpnConnect(r, i, p),
+    vpnDisconnect: async () =>
+      (await realVpn()) ? invoke<void>("vpn_disconnect") : mockBridge.vpnDisconnect(),
+    vpnState: async (): Promise<ConnectState> =>
+      (await realVpn()) ? invoke<ConnectState>("vpn_state") : mockBridge.vpnState(),
     vpnSpeedtest: () => mockBridge.vpnSpeedtest(),
-    vpnHistory: (r: "week" | "month" | "all"): Promise<SessionRow[]> => mockBridge.vpnHistory(r),
-    vpnCostEstimate: () => mockBridge.vpnCostEstimate(),
+    vpnHistory: async (r: "week" | "month" | "all"): Promise<SessionRow[]> =>
+      (await realVpn()) ? invoke<SessionRow[]>("vpn_history", { range: r }) : mockBridge.vpnHistory(r),
+    vpnCostEstimate: async () =>
+      (await realVpn())
+        ? invoke<{ hourlyUsd: number; accruedUsd: number }>("vpn_cost_estimate")
+        : mockBridge.vpnCostEstimate(),
     vpnProfiles: (): Promise<ConnectionProfile[]> => mockBridge.vpnProfiles(),
     vpnProfileSave: (p: ConnectionProfile) => mockBridge.vpnProfileSave(p),
     reportMonth: (y: number, m: number): Promise<ReportData> => mockBridge.reportMonth(y, m),
@@ -150,9 +174,16 @@ export function createTauriBridge(): SentinelBridge {
       const tauriUnsubs: Array<() => void> = [];
       void (async () => {
         const { listen } = await api();
-        tauriUnsubs.push(
-          await listen("vault:locked", () => handler({ type: "vault:locked" })),
-        );
+        // Backend events. In real-VPN mode vpn:state/vpn:metrics come from Rust; in sim mode
+        // they arrive via the mock subscription above (only one source is active at a time).
+        const wrap: Record<string, (p: unknown) => BridgeEvent> = {
+          "vault:locked": () => ({ type: "vault:locked" }),
+          "vpn:state": (p) => ({ type: "vpn:state", state: p as ConnectState }),
+          "vpn:metrics": (p) => ({ type: "vpn:metrics", metrics: p as VpnMetrics }),
+        };
+        for (const [ev, w] of Object.entries(wrap)) {
+          tauriUnsubs.push(await listen(ev, (payload) => handler(w(payload))));
+        }
       })();
       return () => {
         localListeners.delete(handler);
