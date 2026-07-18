@@ -5,7 +5,7 @@
 
 use crate::state::{load_or_create_key, AppState};
 use sentinel_core::generator::{self, PassphraseSpec, PasswordSpec};
-use sentinel_core::health::{run_audit, MockHibp};
+use sentinel_core::health::{run_audit, RealHibp};
 use sentinel_core::totp::TotpSecret;
 use sentinel_core::vault::model::{Card, Identity, Item, ItemType, Login, UrlMatch, UrlMode};
 use sentinel_core::vault::VaultSession;
@@ -704,7 +704,9 @@ pub async fn health_audit(state: State<'_, AppState>) -> R<AuditOut> {
             .filter_map(|e| inner.session.open(e).ok())
             .collect::<Vec<_>>()
     };
-    let report = run_audit(&items, now(), &MockHibp).await;
+    // Real Have-I-Been-Pwned breach check (k-anonymity; only a 5-char SHA-1 prefix leaves
+    // the device). Offline, breach_count errors are swallowed by run_audit → 0 breaches.
+    let report = run_audit(&items, now(), &RealHibp::default()).await;
     Ok(AuditOut {
         reused: report
             .reused
@@ -741,6 +743,44 @@ pub async fn health_audit(state: State<'_, AppState>) -> R<AuditOut> {
             .collect(),
         score: report.score,
     })
+}
+
+// ---------------------------------------------------------------------------
+// import (Bitwarden JSON/CSV, Chrome CSV) — parsed by core, sealed + stored here
+// ---------------------------------------------------------------------------
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportOut {
+    imported: usize,
+    skipped: usize,
+}
+
+#[tauri::command]
+pub fn vault_import(state: State<AppState>, kind: String, content: String) -> R<ImportOut> {
+    let ts = now();
+    let items = match kind.as_str() {
+        "bitwarden_json" => sentinel_core::import::parse_bitwarden_json(&content, ts),
+        "bitwarden_csv" => sentinel_core::import::parse_bitwarden_csv(&content, ts),
+        "chrome_csv" => sentinel_core::import::parse_chrome_csv(&content, ts),
+        _ => return Err(err("bad_kind", "unsupported import format")),
+    }
+    .map_err(ApiError::from)?;
+
+    let inner = state.inner.lock().unwrap();
+    let mut imported = 0usize;
+    let mut skipped = 0usize;
+    for it in items {
+        match inner
+            .session
+            .seal(&it)
+            .and_then(|env| inner.vault.upsert(&env))
+        {
+            Ok(()) => imported += 1,
+            Err(_) => skipped += 1,
+        }
+    }
+    Ok(ImportOut { imported, skipped })
 }
 
 // ---------------------------------------------------------------------------
