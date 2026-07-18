@@ -7,6 +7,7 @@ import { CommandPalette } from "./components/palette/CommandPalette";
 import { Unlock } from "./screens/Unlock";
 import { Onboarding } from "./screens/Onboarding";
 import { Vault } from "./screens/Vault";
+import { ItemEditor } from "./screens/ItemEditor";
 import { Vpn } from "./screens/Vpn";
 import { Health } from "./screens/Health";
 import { Devices } from "./screens/Devices";
@@ -32,6 +33,8 @@ export function App() {
         <Route element={<Gate />}>
           <Route element={<Layout />}>
             <Route path="/vault" element={<Vault />} />
+            <Route path="/vault/new" element={<ItemEditor />} />
+            <Route path="/vault/:id/edit" element={<ItemEditor />} />
             <Route path="/vault/:id" element={<Vault />} />
             <Route path="/vpn" element={<Vpn />} />
             <Route path="/health" element={<Health />} />

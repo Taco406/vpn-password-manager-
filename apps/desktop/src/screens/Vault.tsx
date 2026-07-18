@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { useParams, useNavigate } from "react-router-dom";
-import { Search, Plus, Eye, EyeOff, Copy, Globe, StickyNote, CreditCard, User, Command as CmdIcon, ShieldCheck } from "lucide-react";
+import { Search, Plus, Eye, EyeOff, Copy, Globe, StickyNote, CreditCard, User, Command as CmdIcon, ShieldCheck, Pencil } from "lucide-react";
 import type { ItemDetail, ItemSummary } from "@sentinel/shared";
 import { bridge } from "../bridge";
 import { Favicon, Badge, Button } from "../components/ui";
@@ -27,7 +27,7 @@ export function Vault() {
     [items, query],
   );
 
-  const selectedId = id && id !== "new" ? id : filtered[0]?.id;
+  const selectedId = id ?? filtered[0]?.id;
 
   return (
     <div className="flex h-full">
@@ -74,7 +74,7 @@ export function Vault() {
       </div>
 
       <div className="flex-1 overflow-y-auto">
-        {id === "new" ? <NewItemHint /> : selectedId ? <ItemDetailPane id={selectedId} /> : <EmptyDetail />}
+        {selectedId ? <ItemDetailPane id={selectedId} /> : <EmptyDetail />}
       </div>
     </div>
   );
@@ -85,6 +85,7 @@ function ItemDetailPane({ id }: { id: string }) {
   const [revealed, setRevealed] = useState(false);
   const [password, setPassword] = useState<string>("");
   const [totp, setTotp] = useState<{ code: string; remainingMs: number } | null>(null);
+  const navigate = useNavigate();
 
   useEffect(() => {
     setRevealed(false);
@@ -113,6 +114,9 @@ function ItemDetailPane({ id }: { id: string }) {
             ))}
           </div>
         </div>
+        <Button variant="ghost" onClick={() => navigate(`/vault/${id}/edit`)} className="!px-3 !py-1.5">
+          <Pencil size={14} /> Edit
+        </Button>
       </div>
 
       <div className="surface divide-y divide-[var(--border-subtle)] p-0">
@@ -172,16 +176,3 @@ function EmptyDetail() {
   );
 }
 
-function NewItemHint() {
-  return (
-    <div className="mx-auto max-w-md px-8 py-16 text-center">
-      <div className="mb-4 inline-flex h-14 w-14 items-center justify-center rounded-2xl bg-[var(--accent)]/12">
-        <Plus className="text-accent" size={26} />
-      </div>
-      <h2 className="text-lg font-semibold">New login</h2>
-      <p className="mt-2 text-sm text-[var(--text-secondary)]">
-        Item editing is wired to <span className="mono">vaultSave</span>. Generate a strong password from the Health screen or the command palette.
-      </p>
-    </div>
-  );
-}
