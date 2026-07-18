@@ -16,6 +16,11 @@ on:
   push:
     tags: ["v*.*.*"]
   workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag (e.g. v0.1.0). Leave blank to use the app version from tauri.conf.json."
+        required: false
+        default: ""
 
 permissions:
   contents: write
@@ -60,6 +65,24 @@ jobs:
 
       - run: pnpm install --frozen-lockfile
 
+      # Resolve the release tag once, so a tag push, a manual run with an explicit
+      # tag, and a plain manual run (derive `v<version>` from the app config) all
+      # produce a clean semver release name. node is on PATH after setup-node.
+      - name: Compute release tag
+        id: rel
+        shell: bash
+        run: |
+          if [ "${{ github.ref_type }}" = "tag" ]; then
+            tag="${{ github.ref_name }}"
+          elif [ -n "${{ github.event.inputs.tag }}" ]; then
+            tag="${{ github.event.inputs.tag }}"
+          else
+            v=$(node -p "require('./apps/desktop/src-tauri/tauri.conf.json').version")
+            tag="v$v"
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "Resolved release tag: $tag"
+
       - name: Build + publish release
         uses: tauri-apps/tauri-action@v0
         env:
@@ -68,8 +91,8 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
           projectPath: apps/desktop
-          tagName: ${{ github.ref_type == 'tag' && github.ref_name || format('v{0}', github.run_number) }}
-          releaseName: "SENTINEL ${{ github.ref_type == 'tag' && github.ref_name || format('build {0}', github.run_number) }}"
+          tagName: ${{ steps.rel.outputs.tag }}
+          releaseName: "SENTINEL ${{ steps.rel.outputs.tag }}"
           releaseBody: "Download the installer for your platform below. Installed apps update themselves from this release."
           releaseDraft: false
           prerelease: false
