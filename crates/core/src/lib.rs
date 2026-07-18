@@ -17,6 +17,7 @@ pub mod generator;
 pub mod health;
 pub mod import;
 pub mod keyring;
+pub mod platform;
 pub mod provision;
 pub mod recovery_kit;
 pub mod seed;
