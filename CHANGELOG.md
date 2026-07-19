@@ -8,6 +8,27 @@ The format follows [Keep a Changelog](https://keepachangelog.com/). Versions are
 [semantic](https://semver.org/). **Add a new `## [x.y.z]` section at the top in the same PR
 that bumps the app version** — that's how "the changelog updates on every merge."
 
+## [0.1.14] — 2026-07-19
+
+### Added
+- **WireGuard monitor (Settings → WireGuard).** A live check of the two things the real VPN needs
+  on your PC: whether **WireGuard is installed** (with the detected path) and, on Windows, whether
+  **SENTINEL is running as administrator**. If WireGuard is missing, a **Download WireGuard** button
+  opens the install page; a **Re-check** button re-runs the check after you install or relaunch.
+
+### Fixed
+- **Connect checks your PC *before* spending money.** SENTINEL now verifies WireGuard is installed
+  (and, on Windows, that it's running as administrator) **before** creating a Linode — so a missing
+  prerequisite fails instantly with a clear message instead of spinning up a paid server that then
+  dies at the tunnel step.
+- **"Access is denied" is now explained.** When the tunnel can't be installed because SENTINEL
+  isn't elevated, the error now says exactly that — *"run as administrator, then Connect again"* —
+  instead of a raw `wireguard.exe … Access is denied`.
+- **Key exchange no longer times out on a slow provision.** The new server installs faster (it now
+  pulls `wireguard-tools`, using the WireGuard module already in Linode's kernel instead of
+  compiling one), and the app waits longer (~3 min) for the new node to finish setup before giving
+  up — fixing *"provisioning failed at callback: server pubkey not retrieved"* on a cold start.
+
 ## [0.1.13] — 2026-07-19
 
 ### Added
@@ -169,6 +190,7 @@ is the next phase. Windows-first and experimental — the live Linode path can't
   Releases). Local-first vault UI, command palette, generator, and health audit. VPN screen
   runs a built-in simulation until a Linode token is added.
 
+[0.1.14]: https://github.com/Taco406/vpn-password-manager-/releases/tag/v0.1.14
 [0.1.13]: https://github.com/Taco406/vpn-password-manager-/releases/tag/v0.1.13
 [0.1.12]: https://github.com/Taco406/vpn-password-manager-/releases/tag/v0.1.12
 [0.1.11]: https://github.com/Taco406/vpn-password-manager-/releases/tag/v0.1.11

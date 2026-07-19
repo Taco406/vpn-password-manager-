@@ -91,6 +91,8 @@ fn main() {
             vpn::vpn_cost_summary,
             vpn::vpn_node_action,
             vpn::vpn_nodes_destroy_all,
+            vpn::wg_status,
+            vpn::open_url,
             sync::sync_status,
             sync::sync_set_config,
             sync::auth_google_signin,

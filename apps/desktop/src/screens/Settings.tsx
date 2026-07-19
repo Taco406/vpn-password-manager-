@@ -1,5 +1,5 @@
-import { useEffect, useState, type ReactElement } from "react";
-import { Moon, Sun, Monitor, Globe, Cloud, LogIn, Download, RefreshCw, Trash2, Upload, Puzzle, Wifi, ShieldOff, X } from "lucide-react";
+import { useEffect, useState, type ReactElement, type ReactNode } from "react";
+import { Moon, Sun, Monitor, Globe, Cloud, LogIn, Download, RefreshCw, Trash2, Upload, Puzzle, Wifi, ShieldOff, Shield, X } from "lucide-react";
 import type { Settings as SettingsT } from "@sentinel/shared";
 import changelogRaw from "../../../../CHANGELOG.md?raw";
 import {
@@ -21,11 +21,14 @@ import {
   vpnNodeAction,
   vpnNodesDestroyAll,
   vpnConnectMultihop,
+  wgStatus,
+  openUrl,
   logTail,
   logClear,
   logDirPath,
   type VpnNode,
   type VpnCostSummary,
+  type WgStatusInfo,
   syncStatus,
   syncSetConfig,
   authGoogleSignin,
@@ -117,6 +120,7 @@ export function Settings() {
       </Card>
 
       <RealVpn />
+      <WireGuardMonitor />
       <NetGuard />
       <VpnNodes />
       <MultiHop />
@@ -496,6 +500,83 @@ function AccountSync() {
       )}
 
       {msg && <p className="mt-3 text-xs text-[var(--text-muted)]">{msg}</p>}
+    </Card>
+  );
+}
+
+function WireGuardMonitor() {
+  const [st, setSt] = useState<WgStatusInfo | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  const refresh = async () => {
+    setBusy(true);
+    try {
+      setSt(await wgStatus());
+    } catch {
+      /* ignore */
+    }
+    setBusy(false);
+  };
+
+  useEffect(() => {
+    void refresh();
+  }, []);
+
+  // Ready = tooling present AND (elevation isn't required here OR we're elevated).
+  const ready = !!st && st.installed && (!st.elevationMatters || st.elevated);
+  const tone = !st ? "neutral" : !st.installed ? "danger" : ready ? "ok" : "warn";
+  const label = !st ? "…" : !st.installed ? "Not installed" : ready ? "Ready" : "Needs admin";
+
+  const Row = ({ ok, children }: { ok: boolean; children: ReactNode }) => (
+    <div className="flex items-center gap-2 text-xs">
+      <span className={ok ? "text-[var(--ok,#16a34a)]" : "text-[var(--danger)]"}>{ok ? "✓" : "✗"}</span>
+      <span className="text-[var(--text-secondary)]">{children}</span>
+    </div>
+  );
+
+  return (
+    <Card className="mb-4">
+      <div className="mb-2 flex items-center justify-between text-sm font-medium">
+        <span className="flex items-center gap-2">
+          <Shield size={15} /> WireGuard
+        </span>
+        <Badge tone={tone as "neutral" | "danger" | "ok" | "warn"}>{label}</Badge>
+      </div>
+      <p className="mb-3 text-xs text-[var(--text-secondary)]">
+        The real VPN needs the WireGuard tunnel driver installed, and (on Windows) SENTINEL running
+        as administrator. This monitor shows both so a Connect doesn't fail after a node is created.
+      </p>
+
+      <div className="space-y-1.5">
+        <Row ok={!!st?.installed}>
+          {st?.installed ? (
+            <>
+              Installed{st.path ? <span className="mono text-[var(--text-muted)]"> · {st.path}</span> : null}
+            </>
+          ) : (
+            "WireGuard not detected on this PC"
+          )}
+        </Row>
+        {st?.elevationMatters && (
+          <Row ok={!!st?.elevated}>
+            {st?.elevated ? "Running as administrator" : "Not elevated — relaunch SENTINEL as administrator"}
+          </Row>
+        )}
+      </div>
+
+      <div className="mt-3 flex items-center gap-3 text-xs">
+        {st && !st.installed && (
+          <button
+            onClick={() => void openUrl(st.downloadUrl)}
+            className="rounded-[10px] border border-[var(--border-strong)] px-3 py-1.5 hover:border-[var(--accent)]/50"
+          >
+            Download WireGuard
+          </button>
+        )}
+        <button onClick={() => void refresh()} disabled={busy} className="text-[var(--accent)] hover:underline">
+          {busy ? "Checking…" : "Re-check"}
+        </button>
+      </div>
     </Card>
   );
 }
@@ -1217,7 +1298,7 @@ function Updates() {
   return (
     <Card>
       <div className="mb-2 flex items-center justify-between text-sm font-medium">
-        Updates <Badge tone="accent">v0.1.13</Badge>
+        Updates <Badge tone="accent">v0.1.14</Badge>
       </div>
       <p className="mb-3 text-xs text-[var(--text-secondary)]">
         SENTINEL checks for signed updates on launch and installs them automatically. You can also check now.
