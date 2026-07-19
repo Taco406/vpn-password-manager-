@@ -180,6 +180,41 @@ export async function openFolder(path: string): Promise<void> {
   await core.invoke("open_folder", { path });
 }
 
+// --- WireGuard prerequisite monitor (real-VPN) ------------------------------
+
+export interface WgStatusInfo {
+  installed: boolean;
+  path: string | null;
+  elevated: boolean;
+  elevationMatters: boolean;
+  downloadUrl: string;
+}
+
+/** Whether WireGuard is installed locally and whether SENTINEL is elevated (both needed to connect). */
+export async function wgStatus(): Promise<WgStatusInfo> {
+  const fallback: WgStatusInfo = {
+    installed: false,
+    path: null,
+    elevated: false,
+    elevationMatters: false,
+    downloadUrl: "https://www.wireguard.com/install/",
+  };
+  if (!inTauri()) return fallback;
+  const core = await import("@tauri-apps/api/core");
+  const s = (await core.invoke("wg_status")) as Partial<WgStatusInfo>;
+  return { ...fallback, ...s };
+}
+
+/** Open an http(s) URL in the default browser. */
+export async function openUrl(url: string): Promise<void> {
+  if (!inTauri()) {
+    window.open?.(url, "_blank", "noopener");
+    return;
+  }
+  const core = await import("@tauri-apps/api/core");
+  await core.invoke("open_url", { url });
+}
+
 // --- Diagnostics error log --------------------------------------------------
 
 /** The last `limit` lines of the app's diagnostics log (errors + notable events). */

@@ -284,6 +284,129 @@ fn wireguard_bin() -> String {
         .unwrap_or_else(|_| r"C:\Program Files\WireGuard\wireguard.exe".to_string())
 }
 
+/// Where to send users who don't have WireGuard yet.
+pub const WG_DOWNLOAD_URL: &str = "https://www.wireguard.com/install/";
+
+/// First matching `bin` found on `PATH`, if any (used for the unix WireGuard check).
+fn which_on_path(bin: &str) -> Option<String> {
+    let path = std::env::var_os("PATH")?;
+    for dir in std::env::split_paths(&path) {
+        let cand = dir.join(bin);
+        if cand.is_file() {
+            return Some(cand.to_string_lossy().to_string());
+        }
+    }
+    None
+}
+
+/// Whether the OS WireGuard tooling is installed, and the path/command we found (for display).
+/// Honors the `SENTINEL_WIREGUARD_EXE` / `SENTINEL_WG_EXE` overrides used in dev/tests.
+fn wireguard_installed() -> (bool, Option<String>) {
+    if cfg!(windows) {
+        for cand in [wireguard_bin(), wg_bin()] {
+            if std::path::Path::new(&cand).exists() {
+                return (true, Some(cand));
+            }
+        }
+        (false, None)
+    } else {
+        let wg = wg_bin();
+        if std::path::Path::new(&wg).is_absolute() && std::path::Path::new(&wg).is_file() {
+            return (true, Some(wg));
+        }
+        for bin in ["wg-quick", "wg"] {
+            if let Some(p) = which_on_path(bin) {
+                return (true, Some(p));
+            }
+        }
+        (false, None)
+    }
+}
+
+/// Whether SENTINEL is running elevated. Installing a WireGuard tunnel *service* on Windows
+/// requires Administrator; `net session` succeeds only when elevated (a standard, dependency-free
+/// probe). Non-Windows isn't gated on this here (the unix path uses `wg-quick` under sudo/root).
+fn is_elevated() -> bool {
+    if cfg!(windows) {
+        std::process::Command::new("net")
+            .arg("session")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
+    } else {
+        true
+    }
+}
+
+/// Live status of the local WireGuard prerequisites, for the Settings "WireGuard" monitor.
+#[derive(serde::Serialize)]
+pub struct WgStatus {
+    /// The `wireguard.exe` / `wg` tooling is present.
+    pub installed: bool,
+    /// The path we detected it at (or `None`).
+    pub path: Option<String>,
+    /// SENTINEL is running as Administrator (Windows) — required to bring the tunnel up.
+    pub elevated: bool,
+    /// True on Windows, where elevation actually matters (the UI hides the admin row elsewhere).
+    pub elevation_matters: bool,
+    /// Where to download WireGuard if it's missing.
+    pub download_url: String,
+}
+
+/// Report whether WireGuard is installed and whether we're elevated (for the monitor + pre-flight).
+#[tauri::command]
+pub fn wg_status() -> WgStatus {
+    let (installed, path) = wireguard_installed();
+    WgStatus {
+        installed,
+        path,
+        elevated: is_elevated(),
+        elevation_matters: cfg!(windows),
+        download_url: WG_DOWNLOAD_URL.to_string(),
+    }
+}
+
+/// Open an http(s) URL in the default browser (the "Download WireGuard" button).
+#[tauri::command]
+pub fn open_url(url: String) -> std::result::Result<(), String> {
+    if !url.starts_with("https://") && !url.starts_with("http://") {
+        return Err("refusing to open a non-http URL".into());
+    }
+    #[cfg(target_os = "windows")]
+    let cmd = "explorer";
+    #[cfg(target_os = "macos")]
+    let cmd = "open";
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let cmd = "xdg-open";
+    std::process::Command::new(cmd)
+        .arg(&url)
+        .spawn()
+        .map(|_| ())
+        .map_err(|e| format!("open url: {e}"))
+}
+
+/// Fail fast — before we create a paid Linode — if the local WireGuard prerequisites are missing,
+/// so the user fixes them instead of watching a node spin up and then die at the tunnel step.
+fn preflight_vpn() -> std::result::Result<(), String> {
+    if !wireguard_installed().0 {
+        return Err(format!(
+            "WireGuard isn't installed on this PC, so the tunnel can't come up. Install it from \
+             {WG_DOWNLOAD_URL} (on Windows, then launch SENTINEL as Administrator) and try Connect \
+             again — no server was created."
+        ));
+    }
+    if cfg!(windows) && !is_elevated() {
+        return Err(
+            "SENTINEL needs to run as Administrator to create the WireGuard tunnel. Close SENTINEL, \
+             right-click it, choose \"Run as administrator\", then Connect again — no server was created."
+                .into(),
+        );
+    }
+    Ok(())
+}
+
 fn wg_err(detail: impl Into<String>) -> CoreError {
     CoreError::Provision {
         stage: "wg",
@@ -328,7 +451,18 @@ impl WgController for SystemWgController {
         let path = self.conf_path.to_string_lossy().to_string();
 
         if cfg!(windows) {
-            run(&wireguard_bin(), &["/installtunnelservice", &path]).await?;
+            if let Err(e) = run(&wireguard_bin(), &["/installtunnelservice", &path]).await {
+                // Installing a Windows tunnel service needs elevation; the raw error is a cryptic
+                // "Access is denied". Translate it into something the user can act on.
+                let es = e.to_string();
+                if es.contains("Access is denied") || es.contains("denied") {
+                    return Err(wg_err(
+                        "SENTINEL must run as Administrator to create the WireGuard tunnel. \
+                         Close SENTINEL, right-click it, choose \"Run as administrator\", then Connect again.",
+                    ));
+                }
+                return Err(e);
+            }
         } else {
             run("wg-quick", &["up", &path]).await?;
         }
@@ -386,7 +520,9 @@ impl HttpPubkeyFetcher {
     pub fn new() -> Self {
         HttpPubkeyFetcher {
             http: reqwest::Client::builder()
-                .timeout(Duration::from_secs(8))
+                // The responder calls out to ipify to learn its own IP, so a single request can
+                // take ~10s once it's up; keep the client timeout above that.
+                .timeout(Duration::from_secs(15))
                 .build()
                 .unwrap_or_default(),
         }
@@ -398,8 +534,10 @@ impl ServerPubkeyFetcher for HttpPubkeyFetcher {
     async fn fetch(&self, ip: &str, token: &str, hmac_key_hex: &str) -> CoreResult<String> {
         let url = format!("http://{ip}:443/");
         let mut last = String::from("no response");
-        // The node may still be booting its responder — retry with backoff (~60s).
-        for _ in 0..30 {
+        // The node may still be running cloud-init (apt update + install wireguard-tools) before
+        // its responder listens — that can take a few minutes on a fresh Linode. Retry ~90×2s ≈
+        // 3 min (plus per-request time) so a slow provision doesn't fail a connect that would work.
+        for _ in 0..90 {
             match self.http.get(&url).bearer_auth(token).send().await {
                 Ok(resp) if resp.status().is_success() => match resp.json::<CallbackBody>().await {
                     Ok(body) => return verify_callback(&body, hmac_key_hex),
@@ -1014,6 +1152,8 @@ pub async fn connect_real(
     if state.inner.lock().unwrap().vpn.is_some() {
         return Err("already connected".into());
     }
+    // Check the local WireGuard prerequisites BEFORE spending money on a Linode.
+    preflight_vpn()?;
     let token = get_token().ok_or_else(|| "no Linode token configured".to_string())?;
     let deps = live_deps(token);
 
@@ -1182,6 +1322,8 @@ async fn multihop_run(
     if state.inner.lock().unwrap().vpn.is_some() {
         return Err("already connected".into());
     }
+    // Check the local WireGuard prerequisites BEFORE spending money on a Linode.
+    preflight_vpn()?;
     let token = get_token().ok_or_else(|| "no Linode token configured".to_string())?;
     let deps = live_deps(token);
     let data_dir = { state.inner.lock().unwrap().data_dir.clone() };

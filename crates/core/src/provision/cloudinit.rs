@@ -1,5 +1,7 @@
 //! Cloud-init user-data for a single-boot ephemeral WireGuard node. The rendered YAML:
-//! installs WireGuard, applies an nftables default-drop firewall plus NAT (so forwarded
+//! installs `wireguard-tools` (userspace only — the WireGuard module ships in Linode's kernel,
+//! so we skip the slow `wireguard` DKMS compile that delayed the pubkey callback), applies an
+//! nftables default-drop firewall plus NAT (so forwarded
 //! client traffic actually egresses — either to the internet, or to the next hop for a
 //! multi-hop chain), disables SSH entirely, writes the server config, serves its public key
 //! once over HTTPS authenticated by an HMAC, and arms a dead-man timer that powers the box
@@ -16,7 +18,7 @@ use minijinja::{context, Environment};
 const TEMPLATE: &str = r#"#cloud-config
 package_update: true
 packages:
-  - wireguard
+  - wireguard-tools
   - nftables
 
 write_files:
