@@ -8,6 +8,23 @@ The format follows [Keep a Changelog](https://keepachangelog.com/). Versions are
 [semantic](https://semver.org/). **Add a new `## [x.y.z]` section at the top in the same PR
 that bumps the app version** — that's how "the changelog updates on every merge."
 
+## [0.1.19] — 2026-07-19
+
+### Fixed
+- **The real VPN now actually completes its handshake.** Single-hop connects were failing every time
+  with *"no WireGuard handshake within 60s/120s"* because of a key mismatch: the exit node ran the
+  server key SENTINEL generated, but the client was pinning a *different*, unrelated key the node
+  reported back over its setup callback — so every handshake was sealed to a key the server didn't
+  hold and was silently dropped. The client now pins the correct server key directly (the same way
+  multi-hop "bounce" already did), so a real Connect can reach **tunnel up**. The node's callback is
+  kept purely as an authenticated "I've finished booting" signal.
+
+### Changed
+- If a connect ever still times out at the handshake, the error now reports the tunnel's byte counters
+  and says whether your PC never sent traffic (a local WireGuard/driver issue) or sent it but the node
+  never replied (a server-side issue), and the full `wg show` dump is written to the errors log — so a
+  failure points at the cause instead of being a blind guess.
+
 ## [0.1.18] — 2026-07-19
 
 ### Fixed

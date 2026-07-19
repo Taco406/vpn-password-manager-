@@ -159,20 +159,30 @@ async fn connect_inner(
         detail: "no ipv4".into(),
     })?;
 
-    // 4) Retrieve the server pubkey via the authenticated one-shot callback.
+    // 4) Wait for the node to finish booting. The callback is an HMAC-authenticated *readiness*
+    //    gate — it only answers once cloud-init has brought wg0 and its services up (the callback
+    //    unit is ordered `After=wg-quick@wg0.service`). If it never answers we fail here and the
+    //    caller destroys the created instance.
+    //
+    //    We deliberately DON'T use the pubkey it returns. The server's identity is the
+    //    app-generated `server_kp`, whose PRIVATE key we baked into `wg0.conf` (step 1). Pinning
+    //    the callback's key here was a bug: the node reported a *different*, freshly on-box-generated
+    //    key, so every client handshake was sealed to a key `wg0` doesn't hold and was silently
+    //    dropped — the "no handshake within 120s" failure, every time. The multi-hop path already
+    //    pins the app-generated key directly; single-hop now matches it.
     emit(ConnectState::ExchangingKeys);
-    let server_pubkey = deps
+    let _ready = deps
         .fetcher
         .fetch(&ip, &callback_token, &callback_hmac_key)
         .await?;
 
-    // 5) Bring the tunnel up.
+    // 5) Bring the tunnel up, pinning the server key `wg0` actually runs.
     emit(ConnectState::StartingTunnel);
     let conf = ClientConf {
         client_private_key: client_kp.private_base64(),
         client_address: "10.66.0.2/32".into(),
         dns: "1.1.1.1".into(),
-        server_public_key: server_pubkey,
+        server_public_key: server_kp.public_base64(),
         server_endpoint: format!("{ip}:51820"),
         allowed_ips: full_tunnel(),
         keepalive: 25,

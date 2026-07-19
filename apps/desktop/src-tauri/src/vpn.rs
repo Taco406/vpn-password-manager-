@@ -491,15 +491,39 @@ impl WgController for SystemWgController {
             }
             tokio::time::sleep(Duration::from_secs(2)).await;
         }
+        // Handshake never landed. Capture a diagnostic BEFORE tearing the tunnel down so a
+        // failure is actionable instead of another blind round: `wg show` tells us whether the
+        // client even sent packets (tx) and whether the exit node ever replied (rx).
+        let dump = run(&wg_bin(), &["show", TUNNEL]).await.unwrap_or_default();
+        let transfer = run(&wg_bin(), &["show", TUNNEL, "transfer"])
+            .await
+            .unwrap_or_default();
+        let mut cols = transfer.split_whitespace();
+        let _pk = cols.next();
+        let rx: u64 = cols.next().and_then(|s| s.parse().ok()).unwrap_or(0);
+        let tx: u64 = cols.next().and_then(|s| s.parse().ok()).unwrap_or(0);
+        crate::applog::error(
+            "vpn.handshake",
+            &format!("no handshake in 120s (tx={tx} rx={rx})\n{}", dump.trim()),
+        );
+        // tx=0 ⇒ the client never even sent into the tunnel (local routing/driver); tx>0 rx=0 ⇒
+        // we're sending but the node is silent (server-side firewall/wg0). Anything else is odd.
+        let side = if tx == 0 {
+            " Your PC never sent any tunnel traffic — a local WireGuard/driver issue."
+        } else if rx == 0 {
+            " Your PC sent traffic but the exit node never replied — a server-side issue."
+        } else {
+            ""
+        };
         // CRITICAL: a full-tunnel config routes ALL traffic through this interface. If the
         // handshake never lands we must remove the tunnel before returning, or the PC is left
         // routing everything into a dead tunnel — i.e. no internet — until the user removes it
         // by hand. Tear it down first, then fail.
         let _ = self.down().await;
-        Err(wg_err(
-            "no WireGuard handshake within 120s — the exit node didn't answer. The tunnel was \
-             removed so your internet is restored; please try Connect again.",
-        ))
+        Err(wg_err(format!(
+            "no WireGuard handshake within 120s — the exit node didn't answer (tx={tx}B rx={rx}B).{side} \
+             The tunnel was removed so your internet is restored; please try Connect again."
+        )))
     }
 
     async fn down(&self) -> CoreResult<()> {

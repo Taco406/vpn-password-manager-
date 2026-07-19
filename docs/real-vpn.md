@@ -51,9 +51,10 @@ To go back to the simulation, clear the token (Settings → Real VPN → blank �
 - On Connect, SENTINEL creates a Linode tagged `sentinel-ephemeral`, handing it a hardened
   cloud-init that installs WireGuard, locks the firewall down to just the WireGuard port + a
   one-time key-exchange port, **disables SSH entirely**, and arms the dead-man switch.
-- The fresh node reports its WireGuard public key back over a one-shot callback that's
-  **authenticated by an HMAC** (not by TLS) — a tampered key is rejected, so a network attacker
-  can't man-in-the-middle the handshake.
+- The node runs the WireGuard server key SENTINEL generated for it (the private key is delivered
+  only inside the node's cloud-init), so the app already knows the exact key to pin — no key is
+  ever trusted from the network. The node's one-shot callback, **authenticated by an HMAC**, is
+  used only as a "finished booting" signal before the tunnel is brought up.
 - SENTINEL then brings up the local WireGuard tunnel (full-tunnel: all traffic + DNS via the node)
   and only reports **Connected** once a real handshake lands.
 - On Disconnect (or on any failure at all), the tunnel comes down and the Linode is deleted.
