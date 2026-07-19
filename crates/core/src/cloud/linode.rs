@@ -8,6 +8,7 @@ use super::provider::{
 };
 use crate::error::{CoreError, Result};
 use async_trait::async_trait;
+use serde::de::DeserializeOwned;
 use serde::Deserialize;
 
 const API: &str = "https://api.linode.com/v4";
@@ -35,6 +36,50 @@ impl LinodeClient {
 
     fn net(e: reqwest::Error) -> CoreError {
         CoreError::Network(e.to_string())
+    }
+
+    /// Read a Linode error response body and pull out its human reason. Linode returns
+    /// `{"errors":[{"reason":"...","field":"..."}]}`; surfacing that (instead of a bare HTTP
+    /// status) is what tells the user *why* a create failed — bad token scope, an un-activated
+    /// account, an unsupported region, etc.
+    fn linode_reason(status: reqwest::StatusCode, body: &str) -> CoreError {
+        let reason = serde_json::from_str::<serde_json::Value>(body)
+            .ok()
+            .and_then(|v| {
+                v.get("errors")
+                    .and_then(|e| e.get(0))
+                    .map(|e0| {
+                        let r = e0.get("reason").and_then(|r| r.as_str()).unwrap_or("");
+                        match e0.get("field").and_then(|f| f.as_str()) {
+                            Some(f) if !f.is_empty() => format!("{r} ({f})"),
+                            _ => r.to_string(),
+                        }
+                    })
+                    .filter(|s| !s.is_empty())
+            })
+            .unwrap_or_else(|| body.trim().chars().take(300).collect());
+        CoreError::Network(format!("Linode API {}: {reason}", status.as_u16()))
+    }
+
+    /// Send a request and decode JSON, surfacing Linode's error reason on non-2xx.
+    async fn json_ok<T: DeserializeOwned>(resp: reqwest::Response) -> Result<T> {
+        let status = resp.status();
+        let text = resp.text().await.map_err(Self::net)?;
+        if !status.is_success() {
+            return Err(Self::linode_reason(status, &text));
+        }
+        serde_json::from_str(&text)
+            .map_err(|e| CoreError::Network(format!("Linode API: bad response ({e})")))
+    }
+
+    /// Send a request expecting an empty 2xx, surfacing Linode's error reason on non-2xx.
+    async fn empty_ok(resp: reqwest::Response) -> Result<()> {
+        let status = resp.status();
+        if status.is_success() {
+            return Ok(());
+        }
+        let text = resp.text().await.unwrap_or_default();
+        Err(Self::linode_reason(status, &text))
     }
 }
 
@@ -89,48 +134,39 @@ impl CloudProvider for LinodeClient {
             "private_ip": false,
             "metadata": { "user_data": spec.user_data },
         });
-        let inst: LinodeInstance = self
+        let resp = self
             .http
             .post(format!("{API}/linode/instances"))
             .bearer_auth(&self.token)
             .json(&body)
             .send()
             .await
-            .map_err(Self::net)?
-            .error_for_status()
-            .map_err(Self::net)?
-            .json()
-            .await
             .map_err(Self::net)?;
+        let inst: LinodeInstance = Self::json_ok(resp).await?;
         Ok(inst.into())
     }
 
     async fn get(&self, id: &str) -> Result<Instance> {
-        let inst: LinodeInstance = self
+        let resp = self
             .http
             .get(format!("{API}/linode/instances/{id}"))
             .bearer_auth(&self.token)
             .send()
             .await
-            .map_err(Self::net)?
-            .error_for_status()
-            .map_err(Self::net)?
-            .json()
-            .await
             .map_err(Self::net)?;
+        let inst: LinodeInstance = Self::json_ok(resp).await?;
         Ok(inst.into())
     }
 
     async fn delete(&self, id: &str) -> Result<()> {
-        self.http
+        let resp = self
+            .http
             .delete(format!("{API}/linode/instances/{id}"))
             .bearer_auth(&self.token)
             .send()
             .await
-            .map_err(Self::net)?
-            .error_for_status()
             .map_err(Self::net)?;
-        Ok(())
+        Self::empty_ok(resp).await
     }
 
     async fn list_ephemeral(&self) -> Result<Vec<Instance>> {
@@ -139,19 +175,15 @@ impl CloudProvider for LinodeClient {
             data: Vec<LinodeInstance>,
         }
         let filter = serde_json::json!({ "tags": EPHEMERAL_TAG }).to_string();
-        let page: Page = self
+        let resp = self
             .http
             .get(format!("{API}/linode/instances"))
             .bearer_auth(&self.token)
             .header("X-Filter", filter)
             .send()
             .await
-            .map_err(Self::net)?
-            .error_for_status()
-            .map_err(Self::net)?
-            .json()
-            .await
             .map_err(Self::net)?;
+        let page: Page = Self::json_ok(resp).await?;
         Ok(page.data.into_iter().map(Instance::from).collect())
     }
 
@@ -166,15 +198,13 @@ impl CloudProvider for LinodeClient {
             label: String,
             country: String,
         }
-        let page: Page = self
+        let resp = self
             .http
             .get(format!("{API}/regions"))
             .send()
             .await
-            .map_err(Self::net)?
-            .json()
-            .await
             .map_err(Self::net)?;
+        let page: Page = Self::json_ok(resp).await?;
         Ok(page
             .data
             .into_iter()
@@ -212,14 +242,13 @@ impl CloudProvider for LinodeClient {
 impl LinodeClient {
     /// POST a power action (`boot`/`shutdown`/`reboot`) to a Linode instance.
     async fn power(&self, id: &str, action: &str) -> Result<()> {
-        self.http
+        let resp = self
+            .http
             .post(format!("{API}/linode/instances/{id}/{action}"))
             .bearer_auth(&self.token)
             .send()
             .await
-            .map_err(Self::net)?
-            .error_for_status()
             .map_err(Self::net)?;
-        Ok(())
+        Self::empty_ok(resp).await
     }
 }

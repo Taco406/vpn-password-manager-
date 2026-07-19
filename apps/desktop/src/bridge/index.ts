@@ -180,6 +180,29 @@ export async function openFolder(path: string): Promise<void> {
   await core.invoke("open_folder", { path });
 }
 
+// --- Diagnostics error log --------------------------------------------------
+
+/** The last `limit` lines of the app's diagnostics log (errors + notable events). */
+export async function logTail(limit = 200): Promise<string> {
+  if (!inTauri()) return "";
+  const core = await import("@tauri-apps/api/core");
+  return core.invoke("log_tail", { limit }) as Promise<string>;
+}
+
+/** Clear the diagnostics log. */
+export async function logClear(): Promise<void> {
+  if (!inTauri()) return;
+  const core = await import("@tauri-apps/api/core");
+  await core.invoke("log_clear");
+}
+
+/** The folder holding the log file (for an "Open folder" button). */
+export async function logDirPath(): Promise<string> {
+  if (!inTauri()) return "";
+  const core = await import("@tauri-apps/api/core");
+  return core.invoke("log_dir_path") as Promise<string>;
+}
+
 // --- Windows Hello unlock opt-in helpers ------------------------------------
 
 export async function helloStatus(): Promise<{ available: boolean; enabled: boolean }> {

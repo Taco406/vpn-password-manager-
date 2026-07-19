@@ -45,6 +45,10 @@ pub struct ConnectDeps {
     pub fetcher: Arc<dyn ServerPubkeyFetcher>,
     /// Max boot polls before giving up.
     pub max_boot_polls: u32,
+    /// Delay between boot polls, in milliseconds. Live: ~3s (a Linode takes ~1 min to reach
+    /// Running, so `max_boot_polls * poll_interval_ms` must cover that). Tests/mock: 0 so the
+    /// deterministic poll-count model never actually sleeps.
+    pub poll_interval_ms: u64,
 }
 
 /// A successful connection.
@@ -132,6 +136,11 @@ async fn connect_inner(
     emit(ConnectState::Booting);
     let mut running = instance.clone();
     for _ in 0..deps.max_boot_polls {
+        // Wait between polls — a real Linode takes ~1 min to reach Running, so polling in a
+        // tight loop (no delay) would exhaust every attempt in seconds and wrongly time out.
+        if deps.poll_interval_ms > 0 {
+            tokio::time::sleep(std::time::Duration::from_millis(deps.poll_interval_ms)).await;
+        }
         let cur = deps.cloud.get(&instance.id).await?;
         if cur.state == InstanceState::Running {
             running = cur;
@@ -239,6 +248,7 @@ mod tests {
             wg: Arc::new(MockWgController::default()),
             fetcher: Arc::new(MockPubkeyFetcher { fail: fetcher_fail }),
             max_boot_polls: 10,
+            poll_interval_ms: 0, // deterministic poll-count model — never actually sleep in tests
         }
     }
 

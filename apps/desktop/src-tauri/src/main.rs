@@ -5,6 +5,7 @@
 // Hide the console window on Windows in release.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod applog;
 mod commands;
 mod hello;
 mod nmhost;
@@ -106,6 +107,9 @@ fn main() {
             nmhost::autofill_uninstall,
             nmhost::autofill_prepare,
             nmhost::open_folder,
+            applog::log_tail,
+            applog::log_clear,
+            applog::log_dir_path,
         ])
         .build(tauri::generate_context!())
         .expect("error while building SENTINEL")
