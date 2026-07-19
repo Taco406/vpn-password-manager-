@@ -123,13 +123,19 @@ use base64::Engine as _;
 #[async_trait]
 impl CloudProvider for LinodeClient {
     async fn create(&self, spec: &InstanceSpec) -> Result<Instance> {
+        // Empty tags = ephemeral (managed by the orphan sweep); a durable node passes its own.
+        let tags: Vec<String> = if spec.tags.is_empty() {
+            vec![EPHEMERAL_TAG.to_string()]
+        } else {
+            spec.tags.clone()
+        };
         let body = serde_json::json!({
             "region": spec.region,
             "type": spec.instance_type,
             "label": spec.label,
             "image": "linode/debian12",
             "root_pass": self.root_pass,
-            "tags": [EPHEMERAL_TAG],
+            "tags": tags,
             "backups_enabled": false,
             "private_ip": false,
             "metadata": { "user_data": spec.user_data },

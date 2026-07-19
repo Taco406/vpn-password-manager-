@@ -263,6 +263,105 @@ pub fn render_base64(params: &CloudInitParams) -> Result<String> {
     Ok(base64::engine::general_purpose::STANDARD.encode(render(params)?))
 }
 
+// ---------------------------------------------------------------------------
+// Sync server (durable): a Docker install of the prebuilt `sentinel-api` image + Postgres,
+// serving HTTPS with an app-generated self-signed cert. Unlike the ephemeral VPN node, this box
+// is meant to STAY UP (tagged `sentinel-sync`, excluded from the orphan sweep). No callback and
+// no domain: the app generates the bootstrap token + TLS cert/key client-side and bakes them in,
+// so it already knows the secrets to auth with and the exact cert to pin.
+// ---------------------------------------------------------------------------
+
+const SYNC_TEMPLATE: &str = r#"#cloud-config
+package_update: true
+packages:
+  - openssl
+  - curl
+
+write_files:
+  - path: /opt/sentinel/run.sh
+    permissions: '0755'
+    content: |
+      #!/usr/bin/env bash
+      set -euo pipefail
+      mkdir -p /opt/sentinel/tls /opt/sentinel/pgdata
+      # The TLS cert+key are app-generated (base64 here) so the app can pin the exact cert; the
+      # JWT signing key is generated on-box (stable across restarts while the box lives).
+      echo "{{ tls_cert_b64 }}" | base64 -d > /opt/sentinel/tls/cert.pem
+      echo "{{ tls_key_b64 }}" | base64 -d > /opt/sentinel/tls/key.pem
+      openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:P-256 -out /opt/sentinel/tls/jwt.pem
+      chown -R 10001:10001 /opt/sentinel/tls
+      chmod 640 /opt/sentinel/tls/*.pem
+      curl -fsSL https://get.docker.com | sh
+      docker network create sentinel || true
+      docker rm -f sentinel-db sentinel-api >/dev/null 2>&1 || true
+      docker run -d --name sentinel-db --restart=always --network sentinel \
+        -e POSTGRES_PASSWORD={{ db_password }} -e POSTGRES_USER=sentinel -e POSTGRES_DB=sentinel \
+        -v /opt/sentinel/pgdata:/var/lib/postgresql/data postgres:16
+      for i in $(seq 1 60); do docker exec sentinel-db pg_isready -U sentinel -q && break || sleep 2; done
+      docker run -d --name sentinel-api --restart=always --network sentinel \
+        -p 443:8787 \
+        -e SENTINEL_ENV=production \
+        -e SENTINEL_API_BIND=0.0.0.0:8787 \
+        -e SENTINEL_BOOTSTRAP_TOKEN={{ bootstrap_token }} \
+        -e SENTINEL_TLS_CERT_PEM=/tls/cert.pem \
+        -e SENTINEL_TLS_KEY_PEM=/tls/key.pem \
+        -e SENTINEL_JWT_ES256_PEM=/tls/jwt.pem \
+        -e SENTINEL_AUTO_MIGRATE=1 \
+        -e DATABASE_URL=postgres://sentinel:{{ db_password }}@sentinel-db:5432/sentinel \
+        -v /opt/sentinel/tls:/tls:ro \
+        {{ image_ref }}
+
+runcmd:
+  - systemctl disable ssh || true
+  - systemctl stop ssh || true
+  - systemctl mask ssh.service || true
+  - bash /opt/sentinel/run.sh
+"#;
+
+/// Inputs to the sync-server cloud-init. All secrets are app-generated so the app knows the pin
+/// (`tls_cert`/`tls_key` base64-encoded) and the bootstrap token without any callback.
+#[derive(Clone, Debug)]
+pub struct SyncServerParams {
+    /// The prebuilt image to run, e.g. `ghcr.io/taco406/sentinel-api:latest`.
+    pub image_ref: String,
+    /// Shared secret the app exchanges at `/v1/auth/bootstrap` (hex).
+    pub bootstrap_token: String,
+    /// Postgres password (kept on-box only).
+    pub db_password: String,
+    /// Base64 of the self-signed TLS certificate PEM (SAN `sentinel-sync`).
+    pub tls_cert_b64: String,
+    /// Base64 of the matching private key PEM.
+    pub tls_key_b64: String,
+}
+
+/// Render the sync-server cloud-init YAML.
+pub fn render_sync(params: &SyncServerParams) -> Result<String> {
+    let mut env = Environment::new();
+    env.add_template("sync", SYNC_TEMPLATE)
+        .map_err(|e| CoreError::Provision {
+            stage: "template",
+            detail: e.to_string(),
+        })?;
+    let tmpl = env.get_template("sync").unwrap();
+    tmpl.render(context! {
+        image_ref => params.image_ref,
+        bootstrap_token => params.bootstrap_token,
+        db_password => params.db_password,
+        tls_cert_b64 => params.tls_cert_b64,
+        tls_key_b64 => params.tls_key_b64,
+    })
+    .map_err(|e| CoreError::Provision {
+        stage: "render",
+        detail: e.to_string(),
+    })
+}
+
+/// Base64-encode the rendered sync-server cloud-init for Linode's `metadata.user_data`.
+pub fn render_sync_base64(params: &SyncServerParams) -> Result<String> {
+    use base64::Engine as _;
+    Ok(base64::engine::general_purpose::STANDARD.encode(render_sync(params)?))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -333,6 +432,47 @@ mod tests {
     fn base64_is_decodable() {
         use base64::Engine as _;
         let b64 = render_base64(&params()).unwrap();
+        let decoded = base64::engine::general_purpose::STANDARD
+            .decode(b64)
+            .unwrap();
+        assert!(String::from_utf8(decoded)
+            .unwrap()
+            .contains("#cloud-config"));
+    }
+
+    fn sync_params() -> SyncServerParams {
+        SyncServerParams {
+            image_ref: "ghcr.io/taco406/sentinel-api:latest".into(),
+            bootstrap_token: "deadbeefcafe".into(),
+            db_password: "pgpasswd123".into(),
+            tls_cert_b64: "Q0VSVA==".into(),
+            tls_key_b64: "S0VZ".into(),
+        }
+    }
+
+    #[test]
+    fn sync_cloud_init_has_docker_image_tls_and_bootstrap() {
+        let yaml = render_sync(&sync_params()).unwrap();
+        assert!(yaml.starts_with("#cloud-config\n"));
+        // Runs the prebuilt image and wires the generated secrets.
+        assert!(yaml.contains("ghcr.io/taco406/sentinel-api:latest"));
+        assert!(yaml.contains("SENTINEL_BOOTSTRAP_TOKEN=deadbeefcafe"));
+        assert!(yaml.contains("SENTINEL_AUTO_MIGRATE=1"));
+        assert!(yaml.contains("SENTINEL_ENV=production"));
+        // TLS cert/key are decoded on-box; HTTPS is served (host 443 → container 8787).
+        assert!(yaml.contains("Q0VSVA==")); // tls_cert_b64
+        assert!(yaml.contains("SENTINEL_TLS_CERT_PEM=/tls/cert.pem"));
+        assert!(yaml.contains("-p 443:8787"));
+        // Postgres with a persistent volume; SSH disabled.
+        assert!(yaml.contains("postgres:16"));
+        assert!(yaml.contains("/opt/sentinel/pgdata"));
+        assert!(yaml.contains("systemctl mask ssh.service"));
+    }
+
+    #[test]
+    fn sync_cloud_init_base64_decodes() {
+        use base64::Engine as _;
+        let b64 = render_sync_base64(&sync_params()).unwrap();
         let decoded = base64::engine::general_purpose::STANDARD
             .decode(b64)
             .unwrap();

@@ -50,6 +50,11 @@ import {
   syncRestore,
   syncDevices,
   syncDeviceRevoke,
+  syncServerStatus,
+  syncDeploy,
+  syncServerDestroy,
+  onSyncDeploy,
+  type SyncServerStatus,
   type NetStatusInfo,
   type SyncStatusInfo,
   type SyncDevice,
@@ -137,6 +142,7 @@ export function Settings() {
       <VpnNodes />
       <MultiHop />
       <BrowserAutofill />
+      <SyncServer />
       <AccountSync />
       <Diagnostics />
       <Updates />
@@ -151,6 +157,126 @@ const btnCls =
 
 function errMsg(e: unknown): string {
   return e instanceof Error ? e.message : String(e);
+}
+
+const SYNC_REGIONS: { id: string; label: string }[] = [
+  { id: "us-east", label: "US East (Newark)" },
+  { id: "us-central", label: "US Central (Dallas)" },
+  { id: "us-west", label: "US West (Fremont)" },
+  { id: "eu-central", label: "EU Central (Frankfurt)" },
+  { id: "eu-west", label: "EU West (London)" },
+  { id: "ap-south", label: "Asia (Singapore)" },
+  { id: "ap-northeast", label: "Asia (Tokyo)" },
+];
+
+function SyncServer() {
+  const [st, setSt] = useState<SyncServerStatus | null>(null);
+  const [region, setRegion] = useState("us-east");
+  const [busy, setBusy] = useState(false);
+  const [progress, setProgress] = useState("");
+  const [msg, setMsg] = useState("");
+
+  const refresh = async () => {
+    try {
+      setSt(await syncServerStatus());
+    } catch {
+      /* ignore */
+    }
+  };
+  useEffect(() => {
+    void refresh();
+    let un: (() => void) | undefined;
+    void onSyncDeploy((e) => setProgress(e.detail)).then((fn) => (un = fn));
+    return () => un?.();
+  }, []);
+
+  const deploy = async () => {
+    setBusy(true);
+    setMsg("");
+    setProgress("Starting…");
+    try {
+      await syncDeploy(region);
+      setProgress("");
+      setMsg("Sync server is up and this device is signed in. Use Cross-device sync below to sync.");
+      await refresh();
+    } catch (e) {
+      setProgress("");
+      setMsg(e instanceof Error ? e.message : String(e));
+    }
+    setBusy(false);
+  };
+
+  const destroy = async () => {
+    if (!window.confirm("Destroy the sync server? This deletes the Linode and stops billing. Your local vault is untouched.")) return;
+    setBusy(true);
+    setMsg("");
+    try {
+      await syncServerDestroy();
+      setMsg("Sync server destroyed. Billing stopped.");
+      await refresh();
+    } catch (e) {
+      setMsg(e instanceof Error ? e.message : String(e));
+    }
+    setBusy(false);
+  };
+
+  return (
+    <Card className="mb-4">
+      <div className="mb-2 flex items-center justify-between text-sm font-medium">
+        <span className="flex items-center gap-2">
+          <Cloud size={15} /> Sync server <span className="text-[11px] font-normal text-[var(--text-muted)]">(one-click)</span>
+        </span>
+        <Badge tone={st?.deployed ? "ok" : "neutral"}>{st?.deployed ? "Running" : "Not deployed"}</Badge>
+      </div>
+      <p className="mb-3 text-xs text-[var(--text-secondary)]">
+        Spin up your <span className="font-medium">own</span> encrypted sync server on Linode with one click — it reuses your
+        Real VPN token, generates its own keys, and this device signs in automatically. No Google account or domain needed.
+        The vault stays end-to-end encrypted (the server only sees ciphertext).
+      </p>
+
+      {!st?.deployed && (
+        <>
+          <div className="mb-2 rounded-[10px] border border-[var(--warn)]/30 bg-[var(--warn)]/10 p-2 text-[11px] text-[var(--text-secondary)]">
+            Unlike the VPN, a sync server is <span className="font-medium">always on</span> and bills continuously
+            (~$5/month for a Nanode) until you Destroy it. Requires a Linode token (set it under Real VPN above).
+          </div>
+          <div className="flex items-center gap-2">
+            <select
+              value={region}
+              onChange={(e) => setRegion(e.target.value)}
+              className="flex-1 rounded-[10px] border border-[var(--border-strong)] bg-[var(--bg-inset)] px-3 py-2 text-sm outline-none focus:border-[var(--accent)]"
+            >
+              {SYNC_REGIONS.map((r) => (
+                <option key={r.id} value={r.id}>{r.label}</option>
+              ))}
+            </select>
+            <button
+              onClick={() => void deploy()}
+              disabled={busy}
+              className="rounded-[10px] border border-[var(--border-strong)] px-3 py-2 text-sm hover:border-[var(--accent)]/50 disabled:opacity-50"
+            >
+              {busy ? "Deploying…" : "Deploy"}
+            </button>
+          </div>
+          {busy && progress && <p className="mt-2 text-xs text-[var(--accent)]">{progress}</p>}
+        </>
+      )}
+
+      {st?.deployed && (
+        <div className="space-y-1.5 text-xs text-[var(--text-secondary)]">
+          <div>Server: <span className="mono">{st.ipv4}</span>{st.state ? ` · ${st.state}` : ""}</div>
+          <div>
+            Cost: <span className="font-medium">${st.monthlyUsd.toFixed(2)}/mo</span> (~${st.hourlyUsd.toFixed(3)}/hr) — billing until destroyed.
+          </div>
+          <button onClick={() => void destroy()} disabled={busy} className="mt-1 text-[var(--danger)] hover:underline disabled:opacity-50">
+            Destroy sync server (stop billing)
+          </button>
+        </div>
+      )}
+
+      {msg && <p className="mt-2 text-xs text-[var(--text-muted)]">{msg}</p>}
+    </Card>
+  );
 }
 
 function AccountSync() {
@@ -1342,7 +1468,7 @@ function Updates() {
   return (
     <Card>
       <div className="mb-2 flex items-center justify-between text-sm font-medium">
-        Updates <Badge tone="accent">v0.1.16</Badge>
+        Updates <Badge tone="accent">v0.1.17</Badge>
       </div>
       <p className="mb-3 text-xs text-[var(--text-secondary)]">
         SENTINEL checks for signed updates on launch and installs them automatically. You can also check now.

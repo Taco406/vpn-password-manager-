@@ -374,6 +374,42 @@ async function inv<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
   return core.invoke(cmd, args) as Promise<T>;
 }
 
+// --- One-click "Deploy my sync server" (durable Linode, reuses the VPN's Linode token) ------
+
+export interface SyncServerStatus {
+  deployed: boolean;
+  ipv4?: string;
+  state?: string;
+  hourlyUsd: number;
+  monthlyUsd: number;
+}
+
+export async function syncServerStatus(): Promise<SyncServerStatus> {
+  if (!inTauri()) return { deployed: false, hourlyUsd: 0, monthlyUsd: 0 };
+  return inv<SyncServerStatus>("sync_server_status");
+}
+
+/** Provision a durable Linode running the sync server and auto-configure the app. Long-running. */
+export async function syncDeploy(region: string, instanceType?: string): Promise<void> {
+  if (!inTauri()) throw new Error("Deploying a sync server is only available in the desktop app.");
+  await inv("sync_deploy", { region, instanceType: instanceType ?? null });
+}
+
+/** Destroy the deployed sync server (stops billing) and clear local sync state. */
+export async function syncServerDestroy(): Promise<void> {
+  if (!inTauri()) return;
+  await inv("sync_server_destroy");
+}
+
+/** Subscribe to deploy progress events; returns an unsubscribe fn. */
+export async function onSyncDeploy(
+  cb: (e: { stage: string; detail: string }) => void,
+): Promise<() => void> {
+  if (!inTauri()) return () => {};
+  const { listen } = await import("@tauri-apps/api/event");
+  return listen<{ stage: string; detail: string }>("sync:deploy", (ev) => cb(ev.payload));
+}
+
 export async function syncStatus(): Promise<SyncStatusInfo> {
   if (!inTauri()) return { serverUrl: null, googleClientId: null, signedIn: false, email: null };
   return inv<SyncStatusInfo>("sync_status");

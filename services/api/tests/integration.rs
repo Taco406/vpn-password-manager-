@@ -49,6 +49,10 @@ async fn ensure_migrated(pool: &PgPool) {
 }
 
 async fn setup() -> (Router, PgPool) {
+    setup_with(None).await
+}
+
+async fn setup_with(bootstrap_token: Option<&str>) -> (Router, PgPool) {
     let pool = sentinel_api::connect(&database_url())
         .await
         .expect("db connect");
@@ -58,6 +62,7 @@ async fn setup() -> (Router, PgPool) {
         bind: "127.0.0.1:0".into(),
         database_url: database_url(),
         google_client_id: None,
+        bootstrap_token: bootstrap_token.map(|s| s.to_string()),
         totp_enc_key: [7u8; 32],
         production: false,
         trust_forwarded_for: false,
@@ -66,6 +71,51 @@ async fn setup() -> (Router, PgPool) {
     let google: Arc<dyn GoogleVerifier> = Arc::new(MockGoogleVerifier);
     let app = sentinel_api::build_app(pool.clone(), JwtKeys::ephemeral(), config, google);
     (app, pool)
+}
+
+#[tokio::test]
+async fn bootstrap_mints_a_working_approved_session() {
+    let (app, _pool) = setup_with(Some("s3cr3t-bootstrap")).await;
+
+    // Wrong token → 401.
+    let (s, _v) = call(
+        &app,
+        post(
+            "/v1/auth/bootstrap",
+            None,
+            json!({ "token": "nope", "device": { "name": "Desk", "platform": "linux" } }),
+        ),
+    )
+    .await;
+    assert_eq!(s, StatusCode::UNAUTHORIZED);
+
+    // Right token mints a session directly — no Google, no TOTP.
+    let (s, v) = call(
+        &app,
+        post(
+            "/v1/auth/bootstrap",
+            None,
+            json!({ "token": "s3cr3t-bootstrap", "device": { "name": "Desk", "platform": "linux" } }),
+        ),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "bootstrap: {v}");
+    let access = v["access_token"].as_str().unwrap().to_string();
+
+    // The device is already APPROVED: an authed sync call must not 403. A fresh account has no
+    // vault yet → 204 (not 403), proving the bootstrap session works on the sync endpoints.
+    let req = Request::builder()
+        .method("GET")
+        .uri("/v1/vault")
+        .header("authorization", format!("Bearer {access}"))
+        .body(Body::empty())
+        .unwrap();
+    let (s, _v) = call(&app, req).await;
+    assert_ne!(s, StatusCode::FORBIDDEN, "device should be approved");
+    assert!(
+        s == StatusCode::NO_CONTENT || s == StatusCode::OK,
+        "vault get: {s}"
+    );
 }
 
 async fn call(app: &Router, req: Request<Body>) -> (StatusCode, Value) {

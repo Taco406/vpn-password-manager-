@@ -1417,6 +1417,7 @@ async fn multihop_run(
             instance_type: itype.clone(),
             user_data: ud,
             label: format!("sentinel-hop{i}"),
+            tags: vec![], // ephemeral hop — the sweep manages it
         };
         let inst = match deps.cloud.create(&spec).await {
             Ok(x) => x,

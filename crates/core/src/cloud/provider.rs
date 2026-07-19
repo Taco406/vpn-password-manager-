@@ -5,9 +5,14 @@
 use crate::error::Result;
 use async_trait::async_trait;
 
-/// The tag every SENTINEL-created instance carries, so the orphan sweep can find and
-/// destroy anything a crash left behind (D10).
+/// The tag every ephemeral VPN exit node carries, so the orphan sweep can find and destroy
+/// anything a crash left behind (D10). The sweep filters on this tag server-side.
 pub const EPHEMERAL_TAG: &str = "sentinel-ephemeral";
+
+/// The tag a durable sync-server node carries. It deliberately does NOT include
+/// [`EPHEMERAL_TAG`], so the orphan sweep (which lists only ephemeral-tagged nodes) never sees
+/// or destroys it — the sync server is meant to stay up.
+pub const SYNC_TAG: &str = "sentinel-sync";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum InstanceState {
@@ -40,6 +45,10 @@ pub struct InstanceSpec {
     /// base64 cloud-init user_data.
     pub user_data: String,
     pub label: String,
+    /// Tags to stamp on the instance. Empty means "ephemeral" — the provider applies
+    /// [`EPHEMERAL_TAG`] so the orphan sweep manages it. A durable node (e.g. the sync server)
+    /// passes `vec![SYNC_TAG.into()]` to opt out of the sweep.
+    pub tags: Vec<String>,
 }
 
 /// A provider region with hourly price context.

@@ -8,6 +8,30 @@ The format follows [Keep a Changelog](https://keepachangelog.com/). Versions are
 [semantic](https://semver.org/). **Add a new `## [x.y.z]` section at the top in the same PR
 that bumps the app version** — that's how "the changelog updates on every merge."
 
+## [0.1.17] — 2026-07-19
+
+### Added
+- **One-click "Deploy my sync server."** **Settings → Sync server → Deploy** now provisions your
+  *own* encrypted sync server on Linode in one click — it reuses your Real VPN token, spins up a
+  durable node, installs everything (Docker + a prebuilt image + Postgres), generates its own keys
+  and a **self-signed TLS certificate the app pins**, and signs this device in automatically. **No
+  Google account, no OAuth client id, and no domain required.** The vault stays end-to-end encrypted
+  (the server only ever sees ciphertext). The panel shows the running cost and a one-click
+  **Destroy** to stop billing.
+  - It authenticates with a generated **bootstrap token** instead of Google (a new
+    `/v1/auth/bootstrap` endpoint on the server). The old "Sign in with Google" remains for advanced
+    setups under **Cross-device sync**.
+  - **One-time setup:** the server image is published to GitHub Container Registry; make that package
+    **Public** once so the deploy can pull it (see the setup guide — the deploy tells you if this is
+    the holdup).
+  - **Heads-up on cost:** unlike the ephemeral VPN, a sync server is **always-on and bills ~$5/month**
+    until you Destroy it. The UI says so up front.
+
+### Changed
+- The sync server can now serve **HTTPS directly** from a provided certificate (no reverse proxy
+  needed) and **self-migrate** its database on first boot, which is what makes the one-click deploy
+  possible. Durable sync nodes are tagged so the VPN's orphan-sweep never touches them.
+
 ## [0.1.16] — 2026-07-19
 
 ### Changed
@@ -229,6 +253,7 @@ is the next phase. Windows-first and experimental — the live Linode path can't
   Releases). Local-first vault UI, command palette, generator, and health audit. VPN screen
   runs a built-in simulation until a Linode token is added.
 
+[0.1.17]: https://github.com/Taco406/vpn-password-manager-/releases/tag/v0.1.17
 [0.1.16]: https://github.com/Taco406/vpn-password-manager-/releases/tag/v0.1.16
 [0.1.15]: https://github.com/Taco406/vpn-password-manager-/releases/tag/v0.1.15
 [0.1.14]: https://github.com/Taco406/vpn-password-manager-/releases/tag/v0.1.14

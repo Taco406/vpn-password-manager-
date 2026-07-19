@@ -128,6 +128,7 @@ async fn connect_inner(
         instance_type: instance_type.into(),
         user_data: cloud_init,
         label: format!("sentinel-{region}"),
+        tags: vec![], // ephemeral VPN exit node — the sweep manages it
     };
     let instance = deps.cloud.create(&spec).await?;
     *created = Some(instance.id.clone());

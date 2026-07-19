@@ -29,7 +29,7 @@ use serde_json::json;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
-use tauri::{AppHandle, State};
+use tauri::{AppHandle, Emitter, State};
 
 const KC_SERVICE: &str = "com.sentinel.desktop";
 const KC_ACCESS: &str = "sync-access";
@@ -53,6 +53,23 @@ fn http_client() -> reqwest::Client {
         .timeout(Duration::from_secs(30))
         .build()
         .unwrap_or_default()
+}
+
+/// Build the sync HTTP client. For a deployed server we PIN its self-signed cert (trust exactly
+/// that cert) and resolve the fixed `sentinel-sync` hostname to the server's IP — so there's real
+/// TLS with no public CA or domain. For a manually-configured (real-CA) server this is the plain
+/// client. The Google token exchanger deliberately keeps the un-pinned `http_client()`.
+fn sync_http_client(cfg: &SyncConfig) -> reqwest::Client {
+    let mut b = reqwest::Client::builder().timeout(Duration::from_secs(30));
+    if let (Some(pem), Some(ip)) = (cfg.pinned_cert_pem.as_ref(), cfg.server_ip.as_ref()) {
+        if let Ok(cert) = reqwest::Certificate::from_pem(pem.as_bytes()) {
+            b = b.add_root_certificate(cert);
+        }
+        if let Ok(addr) = format!("{ip}:443").parse::<std::net::SocketAddr>() {
+            b = b.resolve(SYNC_HOST, addr);
+        }
+    }
+    b.build().unwrap_or_default()
 }
 
 fn data_dir(state: &State<'_, AppState>) -> PathBuf {
@@ -138,6 +155,26 @@ struct SyncConfig {
     google_client_id: Option<String>,
     #[serde(default)]
     email: Option<String>,
+    /// For a deployed (self-signed) sync server: the exact cert PEM to pin (non-secret).
+    #[serde(default)]
+    pinned_cert_pem: Option<String>,
+    /// The deployed server's IP, so the pinned client can resolve the fixed `sentinel-sync`
+    /// hostname (whose cert SAN we control) to it without needing a domain.
+    #[serde(default)]
+    server_ip: Option<String>,
+}
+
+/// The fixed hostname baked into the deployed server's self-signed cert SAN. The desktop pins the
+/// cert and resolves this name to the server's IP, so no domain / public CA is needed.
+const SYNC_HOST: &str = "sentinel-sync";
+/// Keychain account for the deployed server's bootstrap secret.
+const KC_BOOTSTRAP: &str = "sync-bootstrap";
+/// The prebuilt server image a deploy runs (published by CI to ghcr). Overridable for testing.
+fn sync_image_ref() -> String {
+    std::env::var("SENTINEL_SYNC_IMAGE")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "ghcr.io/taco406/sentinel-api:latest".to_string())
 }
 
 fn config_path(dir: &Path) -> PathBuf {
@@ -586,14 +623,19 @@ impl Api {
     }
 }
 
-/// Build an `Api` from the configured server URL (base `<serverUrl>/v1`).
+/// Build an `Api` from the configured server URL (base `<serverUrl>/v1`), pinning the deployed
+/// server's self-signed cert when present.
 fn api_for(state: &State<'_, AppState>) -> Result<Api, String> {
     let cfg = load_config(&data_dir(state));
     let server = cfg
         .server_url
+        .clone()
         .filter(|s| !s.trim().is_empty())
         .ok_or("no sync server configured")?;
-    Ok(Api::new(format!("{}/v1", server.trim_end_matches('/'))))
+    Ok(Api {
+        http: sync_http_client(&cfg),
+        base: format!("{}/v1", server.trim_end_matches('/')),
+    })
 }
 
 /// Snapshot the local vault and push it, merging + retrying once on a version conflict.
@@ -985,5 +1027,286 @@ pub async fn sync_device_revoke(state: State<'_, AppState>, id: String) -> Resul
     if !resp.status().is_success() {
         return Err(format!("revoke device: HTTP {}", resp.status()));
     }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// "Deploy my sync server" — one-click durable Linode running the prebuilt image over
+// self-signed HTTPS, authed by a generated bootstrap token. No Google client id, no domain.
+// ---------------------------------------------------------------------------
+
+use sentinel_core::cloud::{CloudProvider, InstanceSpec, LinodeClient, SYNC_TAG};
+use sentinel_core::provision::{render_sync_base64, SyncServerParams};
+
+/// Tracks the durable sync-server node so status/destroy work across restarts. Secrets that
+/// matter (the bootstrap token) live in the keychain; the pinned cert lives in `SyncConfig`.
+#[derive(Serialize, Deserialize, Default, Clone)]
+struct SyncServerRecord {
+    instance_id: String,
+    ipv4: String,
+    instance_type: String,
+    region: String,
+    created_at: i64,
+}
+
+fn server_record_path(dir: &Path) -> PathBuf {
+    dir.join("sync-server.json")
+}
+fn load_server_record(dir: &Path) -> Option<SyncServerRecord> {
+    std::fs::read_to_string(server_record_path(dir))
+        .ok()
+        .and_then(|t| serde_json::from_str(&t).ok())
+}
+fn save_server_record(dir: &Path, rec: &SyncServerRecord) -> Result<(), String> {
+    std::fs::create_dir_all(dir).map_err(estr)?;
+    std::fs::write(
+        server_record_path(dir),
+        serde_json::to_string_pretty(rec).map_err(estr)?,
+    )
+    .map_err(estr)
+}
+fn delete_server_record(dir: &Path) {
+    let _ = std::fs::remove_file(server_record_path(dir));
+}
+
+fn now_unix() -> i64 {
+    time::OffsetDateTime::now_utc().unix_timestamp()
+}
+
+/// A random lowercase-hex string of `bytes` bytes.
+fn rand_hex(bytes: usize) -> String {
+    use rand::RngCore;
+    let mut b = vec![0u8; bytes];
+    rand::rngs::OsRng.fill_bytes(&mut b);
+    b.iter().map(|x| format!("{x:02x}")).collect()
+}
+
+fn emit_deploy(app: &AppHandle, stage: &str, detail: &str) {
+    let _ = app.emit("sync:deploy", json!({ "stage": stage, "detail": detail }));
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SyncServerStatusOut {
+    deployed: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    ipv4: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    state: Option<String>,
+    hourly_usd: f64,
+    monthly_usd: f64,
+}
+
+/// Current deployed-sync-server status (from the local record + a live Linode `get`).
+#[tauri::command]
+pub async fn sync_server_status(state: State<'_, AppState>) -> Result<SyncServerStatusOut, String> {
+    let dir = data_dir(&state);
+    let Some(rec) = load_server_record(&dir) else {
+        return Ok(SyncServerStatusOut {
+            deployed: false,
+            ipv4: None,
+            state: None,
+            hourly_usd: 0.0,
+            monthly_usd: 0.0,
+        });
+    };
+    let token = crate::vpn::get_token().ok_or("no Linode token configured")?;
+    let cloud = LinodeClient::new(token);
+    let hourly = cloud.price_per_hour(&rec.instance_type);
+    let live = cloud.get(&rec.instance_id).await.ok();
+    Ok(SyncServerStatusOut {
+        deployed: true,
+        ipv4: Some(rec.ipv4.clone()),
+        state: live.map(|i| format!("{:?}", i.state).to_lowercase()),
+        hourly_usd: hourly,
+        monthly_usd: hourly * 24.0 * 30.0,
+    })
+}
+
+/// Provision a durable Linode running the sync server, wire the app to it, and sign in via the
+/// generated bootstrap token. Long-running (a fresh box installs Docker + pulls the image); emits
+/// `sync:deploy` progress events.
+#[tauri::command]
+pub async fn sync_deploy(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    region: String,
+    instance_type: Option<String>,
+) -> Result<(), String> {
+    let dir = data_dir(&state);
+    if load_server_record(&dir).is_some() {
+        return Err("a sync server is already deployed — destroy it first".into());
+    }
+    let token = crate::vpn::get_token()
+        .ok_or("set a Linode API token first (Settings → Real VPN) — the deploy reuses it")?;
+    let itype = instance_type.unwrap_or_else(|| "g6-nanode-1".to_string());
+
+    // 1) Generate everything client-side so we know the secrets + the exact cert to pin.
+    emit_deploy(&app, "creating", "generating keys…");
+    let bootstrap_token = rand_hex(32);
+    let db_password = rand_hex(16);
+    let certified = rcgen::generate_simple_self_signed(vec![SYNC_HOST.to_string()])
+        .map_err(|e| format!("generate cert: {e}"))?;
+    let cert_pem = certified.cert.pem();
+    let key_pem = certified.key_pair.serialize_pem();
+
+    let user_data = render_sync_base64(&SyncServerParams {
+        image_ref: sync_image_ref(),
+        bootstrap_token: bootstrap_token.clone(),
+        db_password,
+        tls_cert_b64: STANDARD.encode(cert_pem.as_bytes()),
+        tls_key_b64: STANDARD.encode(key_pem.as_bytes()),
+    })
+    .map_err(estr)?;
+
+    // 2) Create the durable (sentinel-sync-tagged) node.
+    emit_deploy(&app, "creating", "creating the Linode…");
+    let cloud = LinodeClient::new(token);
+    let spec = InstanceSpec {
+        region: region.clone(),
+        instance_type: itype.clone(),
+        user_data,
+        label: "sentinel-sync".into(),
+        tags: vec![SYNC_TAG.to_string()],
+    };
+    let inst = cloud.create(&spec).await.map_err(estr)?;
+
+    // 3) Resolve the IP (assigned at create; poll a few times if not yet present).
+    let mut ipv4 = inst.ipv4.clone();
+    for _ in 0..20 {
+        if ipv4.as_deref().map(|s| !s.is_empty()).unwrap_or(false) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_secs(3)).await;
+        if let Ok(cur) = cloud.get(&inst.id).await {
+            ipv4 = cur.ipv4.clone();
+        }
+    }
+    let ipv4 = match ipv4.filter(|s| !s.is_empty()) {
+        Some(ip) => ip,
+        None => {
+            let _ = cloud.delete(&inst.id).await; // don't leave a billing box on failure
+            return Err("the server never reported an IP; it was destroyed".into());
+        }
+    };
+
+    // 4) Persist the record + wire the app to the pinned server BEFORE the health wait, so a
+    //    crash mid-wait still lets the user see/destroy the node.
+    save_server_record(
+        &dir,
+        &SyncServerRecord {
+            instance_id: inst.id.clone(),
+            ipv4: ipv4.clone(),
+            instance_type: itype,
+            region,
+            created_at: now_unix(),
+        },
+    )?;
+    {
+        let mut cfg = load_config(&dir);
+        cfg.server_url = Some(format!("https://{SYNC_HOST}"));
+        cfg.pinned_cert_pem = Some(cert_pem);
+        cfg.server_ip = Some(ipv4.clone());
+        save_config(&dir, &cfg)?;
+    }
+    kc_set(KC_BOOTSTRAP, &bootstrap_token)?;
+
+    // 5) Wait for the server to finish installing (Docker + image pull + Postgres + migrate can
+    //    take a few minutes) by polling /healthz over the pinned HTTPS.
+    emit_deploy(
+        &app,
+        "provisioning",
+        "installing the server (this can take a few minutes)…",
+    );
+    let client = sync_http_client(&load_config(&dir));
+    let health_url = format!("https://{SYNC_HOST}/healthz");
+    let mut healthy = false;
+    for _ in 0..80 {
+        // ~80 × 5s ≈ 6.5 min
+        if let Ok(resp) = client.get(&health_url).send().await {
+            if resp.status().is_success() {
+                healthy = true;
+                break;
+            }
+        }
+        tokio::time::sleep(Duration::from_secs(5)).await;
+    }
+    if !healthy {
+        return Err(
+            "the server didn't come up in time. It's still provisioning — check status shortly, \
+             or if the image pull failed, make the ghcr package public (see the setup guide)."
+                .into(),
+        );
+    }
+
+    // 6) Sign in with the bootstrap token → real access/refresh session.
+    emit_deploy(&app, "connecting", "signing in…");
+    bootstrap_signin(&dir).await?;
+    emit_deploy(&app, "ready", "sync server ready");
+    Ok(())
+}
+
+/// Exchange the stored bootstrap token for an access/refresh session (mirrors the Google path's
+/// token handling, but with no TOTP step).
+async fn bootstrap_signin(dir: &Path) -> Result<(), String> {
+    let token = kc_get(KC_BOOTSTRAP).ok_or("no bootstrap token — redeploy the sync server")?;
+    let cfg = load_config(dir);
+    let base = cfg
+        .server_url
+        .clone()
+        .ok_or("no sync server configured")?
+        .trim_end_matches('/')
+        .to_string();
+    let client = sync_http_client(&cfg);
+    let resp = client
+        .post(format!("{base}/v1/auth/bootstrap"))
+        .json(&json!({
+            "token": token,
+            "device": { "name": device_name(), "platform": platform_str() },
+        }))
+        .send()
+        .await
+        .map_err(estr)?;
+    if !resp.status().is_success() {
+        return Err(format!("bootstrap sign-in failed: HTTP {}", resp.status()));
+    }
+    let t: ServerTokens = resp.json().await.map_err(estr)?;
+    kc_set(KC_ACCESS, &t.access_token)?;
+    kc_set(KC_REFRESH, &t.refresh_token)?;
+    Ok(())
+}
+
+fn platform_str() -> &'static str {
+    if cfg!(target_os = "windows") {
+        "windows"
+    } else if cfg!(target_os = "macos") {
+        "macos"
+    } else {
+        "linux"
+    }
+}
+
+/// Destroy the deployed sync server (stops billing) and clear all local sync state.
+#[tauri::command]
+pub async fn sync_server_destroy(state: State<'_, AppState>) -> Result<(), String> {
+    let dir = data_dir(&state);
+    if let Some(rec) = load_server_record(&dir) {
+        if let Some(token) = crate::vpn::get_token() {
+            let cloud = LinodeClient::new(token);
+            let _ = cloud.delete(&rec.instance_id).await;
+        }
+    }
+    delete_server_record(&dir);
+    // Clear the pinned-server config + all session state.
+    let mut cfg = load_config(&dir);
+    cfg.server_url = None;
+    cfg.pinned_cert_pem = None;
+    cfg.server_ip = None;
+    cfg.email = None;
+    save_config(&dir, &cfg)?;
+    kc_del(KC_BOOTSTRAP);
+    kc_del(KC_ACCESS);
+    kc_del(KC_REFRESH);
+    kc_del(KC_PENDING);
     Ok(())
 }

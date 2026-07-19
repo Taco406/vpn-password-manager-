@@ -20,8 +20,11 @@ axum = "0.8"
 # Runtime queries only (sqlx::query / query_as) — no compile-time DB, no offline
 # cache. Avoids the sqlx-prepare CI dependency (DECISIONS D17).
 sqlx = { version = "0.8", default-features = false, features = [
-    "runtime-tokio", "tls-rustls", "postgres", "uuid", "time",
+    "runtime-tokio", "tls-rustls", "postgres", "uuid", "time", "migrate",
 ] }
+# Serve HTTPS directly from an (app-generated, self-signed) cert for one-click deploys, with no
+# reverse proxy. rustls/ring is already in the graph via reqwest + sqlx.
+axum-server = { version = "0.7", features = ["tls-rustls"] }
 tower = { version = "0.5", features = ["util"] }
 tower-http = { version = "0.6", features = ["trace", "cors"] }
 jsonwebtoken = "9"

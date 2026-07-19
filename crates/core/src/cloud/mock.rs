@@ -80,13 +80,20 @@ impl CloudProvider for MockCloud {
         let n = self.next_id.fetch_add(1, Ordering::SeqCst);
         let id = format!("inst-{n}");
         let octet = (n % 250) + 1;
+        // Honor the spec's tags (else ephemeral), matching the real client, so tests can prove a
+        // durable-tagged node is excluded from the ephemeral-only sweep.
+        let tags = if spec.tags.is_empty() {
+            vec![EPHEMERAL_TAG.into()]
+        } else {
+            spec.tags.clone()
+        };
         let inst = Instance {
             id: id.clone(),
             region: spec.region.clone(),
             instance_type: spec.instance_type.clone(),
             state: InstanceState::Booting,
             ipv4: Some(format!("203.0.113.{octet}")),
-            tags: vec![EPHEMERAL_TAG.into()],
+            tags,
         };
         self.instances.lock().unwrap().insert(
             id.clone(),
@@ -196,6 +203,7 @@ mod tests {
             instance_type: "g6-nanode-1".into(),
             user_data: String::new(),
             label: "sentinel-test".into(),
+            tags: vec![],
         }
     }
 

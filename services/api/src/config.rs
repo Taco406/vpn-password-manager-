@@ -8,6 +8,9 @@ pub struct Config {
     pub database_url: String,
     /// Public Google OAuth client id used to validate the `aud` of id_tokens.
     pub google_client_id: Option<String>,
+    /// Shared secret for the personal `/v1/auth/bootstrap` path (a one-click self-hosted deploy
+    /// sets this so no Google OAuth client id is needed). `None` disables the endpoint.
+    pub bootstrap_token: Option<String>,
     /// 32-byte key that encrypts account TOTP secrets at rest (D8). Generated if unset.
     pub totp_enc_key: [u8; 32],
     /// True when `SENTINEL_ENV=production`. In production the server refuses to boot with
@@ -70,6 +73,9 @@ impl Config {
         let google_client_id = std::env::var("GOOGLE_OAUTH_CLIENT_ID")
             .ok()
             .filter(|s| !s.is_empty());
+        let bootstrap_token = std::env::var("SENTINEL_BOOTSTRAP_TOKEN")
+            .ok()
+            .filter(|s| !s.is_empty());
 
         let totp_enc_key = match std::env::var("SENTINEL_TOTP_ENC_KEY")
             .ok()
@@ -113,6 +119,7 @@ impl Config {
             bind,
             database_url,
             google_client_id,
+            bootstrap_token,
             totp_enc_key,
             production,
             trust_forwarded_for,
@@ -131,9 +138,15 @@ impl Config {
         if !self.production {
             return Vec::new();
         }
+        // Identity provider: EITHER a Google OAuth client id OR a personal bootstrap token
+        // satisfies "how do accounts get in" — a one-click self-hosted deploy uses the latter.
+        let has_identity = self.google_client_id.is_some() || self.bootstrap_token.is_some();
         [
             ("SENTINEL_JWT_ES256_PEM", jwt_pem_set),
-            ("GOOGLE_OAUTH_CLIENT_ID", self.google_client_id.is_some()),
+            (
+                "GOOGLE_OAUTH_CLIENT_ID or SENTINEL_BOOTSTRAP_TOKEN",
+                has_identity,
+            ),
             ("SENTINEL_TOTP_ENC_KEY", totp_key_set),
         ]
         .into_iter()
@@ -151,6 +164,7 @@ mod tests {
             bind: "127.0.0.1:0".into(),
             database_url: "postgres://x".into(),
             google_client_id: google.map(|s| s.to_string()),
+            bootstrap_token: None,
             totp_enc_key: [0u8; 32],
             production,
             trust_forwarded_for: false,
@@ -169,7 +183,7 @@ mod tests {
     fn production_requires_all_three_secrets() {
         let missing = cfg(true, None).check_production_secrets(false, false);
         assert!(missing.contains(&"SENTINEL_JWT_ES256_PEM"));
-        assert!(missing.contains(&"GOOGLE_OAUTH_CLIENT_ID"));
+        assert!(missing.contains(&"GOOGLE_OAUTH_CLIENT_ID or SENTINEL_BOOTSTRAP_TOKEN"));
         assert!(missing.contains(&"SENTINEL_TOTP_ENC_KEY"));
     }
 
@@ -178,6 +192,18 @@ mod tests {
         assert!(cfg(true, Some("client-id"))
             .check_production_secrets(true, true)
             .is_empty());
+    }
+
+    #[test]
+    fn bootstrap_token_satisfies_identity_without_google() {
+        let mut c = cfg(true, None);
+        c.bootstrap_token = Some("secret".into());
+        // Identity now satisfied by the bootstrap token; only JWT+TOTP would remain if unset.
+        assert!(c
+            .check_production_secrets(true, true)
+            .iter()
+            .all(|m| !m.contains("BOOTSTRAP")));
+        assert!(c.check_production_secrets(true, true).is_empty());
     }
 
     #[test]
