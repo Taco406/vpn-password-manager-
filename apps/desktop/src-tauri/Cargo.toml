@@ -43,6 +43,9 @@ uuid = "1"
 rand = { workspace = true }
 # Render the authenticator-app enrollment secret as a scannable QR (SVG only — no image deps).
 qrcode = { version = "0.14", default-features = false, features = ["svg"] }
+# Generate the self-signed TLS cert for a deployed sync server (ring backend — already in the
+# graph via rustls; avoids aws-lc-rs, which is painful to cross-compile to windows-gnu).
+rcgen = { version = "0.13", default-features = false, features = ["ring", "pem"] }
 # Resolve <app_data_dir> in native-messaging host mode without a Tauri handle
 # (dirs::data_dir().join("com.sentinel.desktop") mirrors Tauri's app_data_dir()).
 # Pinned to the version already resolved in the workspace lockfile.

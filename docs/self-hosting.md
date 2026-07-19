@@ -4,6 +4,26 @@ The desktop app and vault work with **no server** — see the local-first note i
 README. You only need the sync API for multi-device sync, new-device approval, and
 iPhone-unlock relay. It's a single Rust binary (`sentinel-api`) plus Postgres 16.
 
+## One-click deploy from the app (easiest)
+
+If you already use the Real VPN (a Linode token is set), **Settings → Sync server → Deploy**
+provisions a durable Linode, installs the server (Docker + the prebuilt image + Postgres),
+generates its own secrets and a **self-signed TLS cert the app pins**, and signs this device in
+automatically — **no Google OAuth client id and no domain required**. It authenticates with a
+generated **bootstrap token** (server env `SENTINEL_BOOTSTRAP_TOKEN`) instead of Google.
+
+Two things to know:
+
+- **It's always-on and bills continuously** (~$5/mo for a Nanode) until you click **Destroy** —
+  unlike the ephemeral VPN. The panel shows the running cost.
+- **One-time GitHub step:** the deploy pulls the prebuilt image from GitHub Container Registry
+  (`ghcr.io/<owner>/sentinel-api:latest`, published by the release workflow). A freshly-published
+  ghcr package is **private** by default, so make it **Public** once (GitHub → your profile →
+  Packages → `sentinel-api` → Package settings → Change visibility → Public) so the Linode can pull
+  it unauthenticated. If a deploy reports the server didn't come up, this is the usual cause.
+
+The manual Docker path below is still available for advanced setups (e.g. a real domain + CA cert).
+
 ## Deploy with Docker (recommended)
 
 The fastest path is the bundled `docker-compose.yml` (repo root). It builds the API,

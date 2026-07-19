@@ -53,6 +53,7 @@ mod tests {
             instance_type: "g6-nanode-1".into(),
             user_data: String::new(),
             label: "active".into(),
+            tags: vec![],
         };
         let active = cloud.create(&spec).await.unwrap();
         let reaped = orphan_sweep(&cloud, Some(&active.id)).await.unwrap();
@@ -70,6 +71,7 @@ mod tests {
             instance_type: "g6-nanode-1".into(),
             user_data: String::new(),
             label: "kept".into(),
+            tags: vec![],
         };
         let a = cloud.create(&spec).await.unwrap();
         let b = cloud.create(&spec).await.unwrap();
@@ -79,5 +81,32 @@ mod tests {
         assert_eq!(reaped, vec!["orphan-666".to_string()]);
         assert!(cloud.get(&a.id).await.is_ok());
         assert!(cloud.get(&b.id).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn durable_sync_node_is_never_reaped() {
+        // A node tagged `sentinel-sync` (not ephemeral) must be invisible to the sweep, even the
+        // "keep nothing" panic-button variant — the sync server is meant to stay up.
+        let cloud = MockCloud::new(0);
+        let spec = crate::cloud::InstanceSpec {
+            region: "us-east".into(),
+            instance_type: "g6-nanode-1".into(),
+            user_data: String::new(),
+            label: "sync".into(),
+            tags: vec![crate::cloud::SYNC_TAG.into()],
+        };
+        let sync = cloud.create(&spec).await.unwrap();
+        // Sweep keeping nothing (the destroy-all path).
+        let reaped = orphan_sweep_keeping(&cloud, &HashSet::new()).await.unwrap();
+        assert!(reaped.contains(&"orphan-666".to_string()));
+        assert!(!reaped.contains(&sync.id));
+        // The sync node survives and isn't even listed as ephemeral.
+        assert!(cloud.get(&sync.id).await.is_ok());
+        assert!(cloud
+            .list_ephemeral()
+            .await
+            .unwrap()
+            .iter()
+            .all(|i| i.id != sync.id));
     }
 }

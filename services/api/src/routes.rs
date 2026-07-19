@@ -20,6 +20,7 @@ pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/healthz", get(healthz))
         .route("/v1/auth/google", post(auth_google))
+        .route("/v1/auth/bootstrap", post(auth_bootstrap))
         .route("/v1/auth/totp/enroll", post(totp_enroll))
         .route("/v1/auth/totp/verify", post(totp_verify))
         .route("/v1/auth/refresh", post(auth_refresh))
@@ -116,6 +117,59 @@ async fn auth_google(
 
 fn valid_platform(p: &str) -> bool {
     matches!(p, "windows" | "macos" | "linux" | "ios")
+}
+
+// --- auth: bootstrap (personal, no Google) --------------------------------
+// A one-click self-hosted deploy sets SENTINEL_BOOTSTRAP_TOKEN. A device presenting that shared
+// secret is trusted as THE single personal account and is issued a real session directly — no
+// Google OAuth client id required. Inert (401) unless the token is configured.
+
+#[derive(Deserialize)]
+struct BootstrapReq {
+    token: String,
+    device: DeviceReq,
+}
+
+async fn auth_bootstrap(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+    peer: PeerAddr,
+    Json(req): Json<BootstrapReq>,
+) -> ApiResult<Json<TokensResp>> {
+    rate_limit(&st, &headers, peer.0, "auth_bootstrap", 10, 60)?;
+    let expected = st
+        .config
+        .bootstrap_token
+        .as_deref()
+        .ok_or(ApiError::Unauthorized)?;
+    if !auth::constant_time_eq(req.token.as_bytes(), expected.as_bytes()) {
+        return Err(ApiError::Unauthorized);
+    }
+    if req.device.name.len() > 64 || !valid_platform(&req.device.platform) {
+        return Err(ApiError::BadRequest("invalid device".into()));
+    }
+    // The single personal account, keyed on a synthetic sub (never collides with a Google sub).
+    let account: Uuid = sqlx::query_scalar(
+        "INSERT INTO accounts (google_sub, email) VALUES ($1, $2)
+         ON CONFLICT (google_sub) DO UPDATE SET email = EXCLUDED.email
+         RETURNING id",
+    )
+    .bind("bootstrap:local")
+    .bind("personal@sentinel.local")
+    .fetch_one(&st.pool)
+    .await?;
+    // Bootstrap trust == device trust: register this device as already approved so the sync
+    // endpoints (which require an approved device) work immediately, without a TOTP step.
+    let device: Uuid = sqlx::query_scalar(
+        "INSERT INTO devices (account_id, name, platform, status)
+         VALUES ($1, $2, $3, 'approved') RETURNING id",
+    )
+    .bind(account)
+    .bind(&req.device.name)
+    .bind(&req.device.platform)
+    .fetch_one(&st.pool)
+    .await?;
+    Ok(Json(mint_session(&st, account, device, None).await?))
 }
 
 // --- auth: totp -----------------------------------------------------------
