@@ -21,6 +21,9 @@ import {
   vpnNodeAction,
   vpnNodesDestroyAll,
   vpnConnectMultihop,
+  logTail,
+  logClear,
+  logDirPath,
   type VpnNode,
   type VpnCostSummary,
   syncStatus,
@@ -119,6 +122,7 @@ export function Settings() {
       <MultiHop />
       <BrowserAutofill />
       <AccountSync />
+      <Diagnostics />
       <Updates />
     </div>
   );
@@ -1117,6 +1121,71 @@ function renderChangelog(md: string): ReactElement[] {
     }
   }
   return out;
+}
+
+function Diagnostics() {
+  const [log, setLog] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [copied, setCopied] = useState(false);
+
+  const refresh = async () => {
+    setBusy(true);
+    try {
+      setLog(await logTail(300));
+    } catch {
+      /* ignore */
+    }
+    setBusy(false);
+  };
+
+  useEffect(() => {
+    void refresh();
+  }, []);
+
+  const copy = async () => {
+    try {
+      await navigator.clipboard.writeText(log);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    } catch {
+      /* clipboard may be unavailable */
+    }
+  };
+
+  return (
+    <Card className="mb-4">
+      <div className="mb-2 flex items-center justify-between text-sm font-medium">
+        Diagnostics (error log)
+        <button onClick={() => void refresh()} disabled={busy} className="text-xs text-[var(--accent)] hover:underline">
+          {busy ? "…" : "Refresh"}
+        </button>
+      </div>
+      <p className="mb-2 text-xs text-[var(--text-secondary)]">
+        Errors and notable events are recorded here (no passwords or secrets). If something like a
+        VPN connect fails, copy this and send it over.
+      </p>
+      <pre className="max-h-64 overflow-auto whitespace-pre-wrap rounded-[10px] border border-[var(--border-strong)] bg-[var(--bg-inset)] p-3 text-[11px] leading-relaxed text-[var(--text-secondary)]">
+        {log || "No entries yet."}
+      </pre>
+      <div className="mt-2 flex items-center gap-3 text-xs">
+        <button onClick={copy} className="text-[var(--accent)] hover:underline">
+          {copied ? "Copied" : "Copy"}
+        </button>
+        <button onClick={async () => void openFolder(await logDirPath())} className="text-[var(--accent)] hover:underline">
+          Open folder
+        </button>
+        <button
+          onClick={async () => {
+            await logClear();
+            void refresh();
+          }}
+          className="text-[var(--danger)] hover:underline"
+        >
+          Clear
+        </button>
+      </div>
+    </Card>
+  );
 }
 
 function Updates() {

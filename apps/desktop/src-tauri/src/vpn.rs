@@ -444,7 +444,10 @@ fn live_deps(token: String) -> ConnectDeps {
         cloud: Arc::new(LinodeClient::new(token)),
         wg: Arc::new(SystemWgController::new()),
         fetcher: Arc::new(HttpPubkeyFetcher::new()),
+        // A real Linode reaches Running in ~1 min, so poll every 3s up to 60 times (3 min cap).
+        // Without a delay the loop would burn all 60 polls in seconds and wrongly time out at boot.
         max_boot_polls: 60,
+        poll_interval_ms: 3000,
     }
 }
 
@@ -986,7 +989,11 @@ pub async fn vpn_connect(
     region: String,
     instance_type: String,
 ) -> std::result::Result<(), String> {
-    connect_real(app, &state, region, instance_type).await
+    let r = connect_real(app, &state, region.clone(), instance_type).await;
+    if let Err(e) = &r {
+        crate::applog::error("vpn.connect", &format!("region {region}: {e}"));
+    }
+    r
 }
 
 /// The shared connect path used by both the manual `vpn_connect` command and the
@@ -1147,6 +1154,19 @@ pub async fn vpn_connect_multihop(
     regions: Vec<String>,
     instance_type: Option<String>,
 ) -> std::result::Result<(), String> {
+    let r = multihop_run(app, &state, regions, instance_type).await;
+    if let Err(e) = &r {
+        crate::applog::error("vpn.multihop", e);
+    }
+    r
+}
+
+async fn multihop_run(
+    app: AppHandle,
+    state: &AppState,
+    regions: Vec<String>,
+    instance_type: Option<String>,
+) -> std::result::Result<(), String> {
     if regions.len() < 2 {
         return Err("multi-hop needs at least 2 regions".into());
     }
@@ -1245,6 +1265,9 @@ pub async fn vpn_connect_multihop(
         emit(&app, ConnectState::Booting);
         let mut running = inst.clone();
         for _ in 0..deps.max_boot_polls {
+            if deps.poll_interval_ms > 0 {
+                tokio::time::sleep(Duration::from_millis(deps.poll_interval_ms)).await;
+            }
             if let Ok(cur) = deps.cloud.get(&inst.id).await {
                 if cur.state == InstanceState::Running {
                     running = cur;
