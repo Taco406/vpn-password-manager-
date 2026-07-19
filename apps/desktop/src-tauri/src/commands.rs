@@ -3,7 +3,7 @@
 //! the persistent, unlocked vault in `AppState`. VPN/auth/pairing are still served by the
 //! in-browser simulation (delegated in the frontend bridge); everything here is real.
 
-use crate::state::{load_or_create_key, AppState};
+use crate::state::AppState;
 use sentinel_core::generator::{self, PassphraseSpec, PasswordSpec};
 use sentinel_core::health::{run_audit, RealHibp};
 use sentinel_core::totp::TotpSecret;
@@ -143,11 +143,19 @@ pub fn lock(app: AppHandle, state: State<AppState>) -> R<()> {
     Ok(())
 }
 
-/// Re-unlock by re-reading the vault key from the OS keychain. The real security boundary
-/// is the OS login that guards the keychain; the in-app lock is a convenience screen-lock,
-/// so every unlock path funnels through the same keychain read.
+/// Re-unlock by re-reading the vault key from the OS keychain (the biometric / phone / recovery
+/// paths). If a master password is set, the plaintext keychain key was deleted and the vault
+/// only opens via the password — so refuse here and route the user to the password unlock,
+/// rather than minting a fresh, wrong key.
 fn reunlock(state: &State<AppState>) -> R<()> {
-    let vk = load_or_create_key().map_err(|m| err("keychain", m))?;
+    let dir = { state.inner.lock().unwrap().data_dir.clone() };
+    if crate::state::password_protected(&dir) {
+        return Err(err(
+            "password",
+            "a master password is set — unlock with your password",
+        ));
+    }
+    let vk = crate::state::load_key_strict().map_err(|m| err("keychain", m))?;
     state.inner.lock().unwrap().session = VaultSession::unlocked(vk);
     Ok(())
 }

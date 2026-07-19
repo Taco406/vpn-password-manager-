@@ -4148,6 +4148,8 @@ dependencies = [
  "base64 0.22.1",
  "dirs",
  "keyring",
+ "qrcode",
+ "rand 0.8.7",
  "reqwest 0.12.28",
  "sentinel-core",
  "serde",

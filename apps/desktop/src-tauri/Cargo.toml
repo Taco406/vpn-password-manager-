@@ -39,6 +39,10 @@ tauri-plugin-process = "2"
 keyring = { version = "3", default-features = false, features = ["windows-native", "apple-native", "sync-secret-service"] }
 base64 = "0.22"
 uuid = "1"
+# Random salt for the optional master-password KEK.
+rand = { workspace = true }
+# Render the authenticator-app enrollment secret as a scannable QR (SVG only — no image deps).
+qrcode = { version = "0.14", default-features = false, features = ["svg"] }
 # Resolve <app_data_dir> in native-messaging host mode without a Tauri handle
 # (dirs::data_dir().join("com.sentinel.desktop") mirrors Tauri's app_data_dir()).
 # Pinned to the version already resolved in the workspace lockfile.

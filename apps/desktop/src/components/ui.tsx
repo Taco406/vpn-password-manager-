@@ -11,22 +11,24 @@ export function Button({
   variant = "primary",
   className = "",
   type = "button",
+  disabled = false,
 }: {
   children: ReactNode;
   onClick?: () => void;
   variant?: "primary" | "ghost" | "danger";
   className?: string;
   type?: "button" | "submit";
+  disabled?: boolean;
 }) {
   const base =
-    "inline-flex items-center justify-center gap-2 rounded-[10px] px-4 py-2 text-sm font-medium transition-colors cursor-pointer select-none";
+    "inline-flex items-center justify-center gap-2 rounded-[10px] px-4 py-2 text-sm font-medium transition-colors cursor-pointer select-none disabled:cursor-not-allowed disabled:opacity-50";
   const styles = {
     primary: "bg-[var(--accent)] text-[#04121a] hover:bg-[var(--accent-hover)]",
     ghost: "bg-transparent text-[var(--text-secondary)] border border-[var(--border-strong)] hover:text-[var(--text-primary)]",
     danger: "bg-transparent text-[var(--danger)] border border-[var(--danger)]/40 hover:bg-[var(--danger)]/10",
   }[variant];
   return (
-    <button type={type} onClick={onClick} className={`${base} ${styles} ${className}`}>
+    <button type={type} onClick={onClick} disabled={disabled} className={`${base} ${styles} ${className}`}>
       {children}
     </button>
   );

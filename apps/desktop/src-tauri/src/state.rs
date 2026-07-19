@@ -18,6 +18,8 @@ use std::sync::Mutex;
 
 const KEYCHAIN_SERVICE: &str = "com.sentinel.desktop";
 const KEYCHAIN_ACCOUNT: &str = "vault-key";
+/// Keychain account holding the base32 authenticator-app (TOTP) secret, when enrolled.
+const KEYCHAIN_TOTP: &str = "applock-totp";
 
 /// Shared, thread-safe app state.
 pub struct AppState {
@@ -42,13 +44,19 @@ impl AppState {
             .to_str()
             .ok_or_else(|| "vault path is not valid UTF-8".to_string())?;
         let vault = LocalVault::open(path_str).map_err(|e| format!("open vault: {e}"))?;
-        // Ensure the key exists (first run creates + stores it). If Windows Hello unlock is
-        // enabled, start locked so the UI requires a Hello prompt before revealing anything.
-        let vault_key = load_or_create_key()?;
-        let session = if require_hello(&data_dir) {
+        // Boot unlocked by default (personal-use tool). Start LOCKED only if the user has opted
+        // into a protection method — a master password, an authenticator-app code, or Windows
+        // Hello — so nothing is revealed until they pass it.
+        //
+        // Important: when a master password is set, the plaintext keychain key was DELETED (the
+        // password is the only way in), so we must NOT call `load_or_create_key` here — it would
+        // mint a fresh, wrong key. In that case we boot locked with no key and unlock via password.
+        let protected =
+            password_protected(&data_dir) || require_hello(&data_dir) || totp_enabled(&data_dir);
+        let session = if protected {
             VaultSession::locked()
         } else {
-            VaultSession::unlocked(vault_key)
+            VaultSession::unlocked(load_or_create_key()?)
         };
         Ok(AppState {
             inner: Mutex::new(Inner {
@@ -77,11 +85,96 @@ impl AppState {
 
 /// Whether the "require Windows Hello to unlock" setting is on (read from settings.json).
 pub fn require_hello(data_dir: &std::path::Path) -> bool {
+    settings_bool(data_dir, "requireHello")
+}
+
+/// Whether an authenticator-app (TOTP) unlock code is required (read from settings.json).
+pub fn totp_enabled(data_dir: &std::path::Path) -> bool {
+    settings_bool(data_dir, "applockTotpEnabled")
+}
+
+fn settings_bool(data_dir: &std::path::Path, key: &str) -> bool {
     std::fs::read_to_string(data_dir.join("settings.json"))
         .ok()
         .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
-        .and_then(|v| v.get("requireHello").and_then(|b| b.as_bool()))
+        .and_then(|v| v.get(key).and_then(|b| b.as_bool()))
         .unwrap_or(false)
+}
+
+/// Path of the optional master-password wrapped-key blob.
+pub fn wrap_path(data_dir: &std::path::Path) -> PathBuf {
+    data_dir.join("vault-key.wrap")
+}
+
+/// Whether a master password is set (the wrapped-key blob exists on disk). When true, the
+/// plaintext keychain key has been removed and the vault only opens via the password.
+pub fn password_protected(data_dir: &std::path::Path) -> bool {
+    wrap_path(data_dir).exists()
+}
+
+/// Store the vault key in the OS keychain (used when removing a master password, to return to
+/// the keychain-backed "unlocked by default" model).
+pub fn store_key(vk: &VaultKey) -> Result<(), String> {
+    let entry =
+        keyring::Entry::new(KEYCHAIN_SERVICE, KEYCHAIN_ACCOUNT).map_err(|e| e.to_string())?;
+    let b64 = base64::engine::general_purpose::STANDARD.encode(vk.key().as_bytes());
+    entry
+        .set_password(&b64)
+        .map_err(|e| format!("store vault key: {e}"))
+}
+
+/// Remove the plaintext vault key from the OS keychain (used when a master password is set, so
+/// the password becomes the only way in). A missing entry is not an error.
+pub fn delete_key() -> Result<(), String> {
+    let entry =
+        keyring::Entry::new(KEYCHAIN_SERVICE, KEYCHAIN_ACCOUNT).map_err(|e| e.to_string())?;
+    match entry.delete_credential() {
+        Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
+        Err(e) => Err(format!("delete vault key: {e}")),
+    }
+}
+
+/// Store the base32 authenticator-app secret in the OS keychain.
+pub fn totp_secret_store(secret: &str) -> Result<(), String> {
+    keyring::Entry::new(KEYCHAIN_SERVICE, KEYCHAIN_TOTP)
+        .map_err(|e| e.to_string())?
+        .set_password(secret)
+        .map_err(|e| format!("store totp secret: {e}"))
+}
+
+/// Load the base32 authenticator-app secret, or `None` if none is enrolled.
+pub fn totp_secret_load() -> Result<Option<String>, String> {
+    let entry = keyring::Entry::new(KEYCHAIN_SERVICE, KEYCHAIN_TOTP).map_err(|e| e.to_string())?;
+    match entry.get_password() {
+        Ok(s) => Ok(Some(s)),
+        Err(keyring::Error::NoEntry) => Ok(None),
+        Err(e) => Err(format!("keychain: {e}")),
+    }
+}
+
+/// Remove the enrolled authenticator-app secret. A missing entry is not an error.
+pub fn totp_secret_delete() -> Result<(), String> {
+    let entry = keyring::Entry::new(KEYCHAIN_SERVICE, KEYCHAIN_TOTP).map_err(|e| e.to_string())?;
+    match entry.delete_credential() {
+        Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
+        Err(e) => Err(format!("delete totp secret: {e}")),
+    }
+}
+
+/// Read the vault key from the keychain WITHOUT creating one if it's absent (unlike
+/// `load_or_create_key`). Used on unlock paths that must never mint a spurious key.
+pub fn load_key_strict() -> Result<VaultKey, String> {
+    let entry =
+        keyring::Entry::new(KEYCHAIN_SERVICE, KEYCHAIN_ACCOUNT).map_err(|e| e.to_string())?;
+    let b64 = entry.get_password().map_err(|e| format!("keychain: {e}"))?;
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(b64.trim())
+        .map_err(|e| format!("decode stored key: {e}"))?;
+    let arr: [u8; 32] = bytes
+        .as_slice()
+        .try_into()
+        .map_err(|_| "stored vault key is not 32 bytes".to_string())?;
+    Ok(VaultKey::from_key(Key32::from_bytes(arr)))
 }
 
 /// Read the 256-bit vault key from the OS keychain, generating and storing it on first run.
