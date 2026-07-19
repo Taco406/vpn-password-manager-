@@ -8,6 +8,22 @@ The format follows [Keep a Changelog](https://keepachangelog.com/). Versions are
 [semantic](https://semver.org/). **Add a new `## [x.y.z]` section at the top in the same PR
 that bumps the app version** — that's how "the changelog updates on every merge."
 
+## [0.1.15] — 2026-07-19
+
+### Fixed
+- **A failed VPN connect can no longer take your internet down.** When the tunnel came up but the
+  exit node never completed a handshake, SENTINEL destroyed the server but left the tunnel installed
+  — and because it routes *all* traffic, the PC was left with no internet until you removed the
+  tunnel by hand. The tunnel is now torn down automatically on a failed handshake, restoring normal
+  internet before the error is shown.
+- **More time for the tunnel to come up.** The handshake wait went from 60s to 120s, since a fresh
+  exit node's WireGuard can take longer than a minute to answer the first handshake.
+
+### Added
+- **"Remove stuck tunnel (restore internet)" button** under **Settings → WireGuard**. One click
+  removes any leftover SENTINEL tunnel and clears kill-switch firewall rules — your escape hatch if
+  a connection ever leaves you offline.
+
 ## [0.1.14] — 2026-07-19
 
 ### Added
@@ -190,6 +206,7 @@ is the next phase. Windows-first and experimental — the live Linode path can't
   Releases). Local-first vault UI, command palette, generator, and health audit. VPN screen
   runs a built-in simulation until a Linode token is added.
 
+[0.1.15]: https://github.com/Taco406/vpn-password-manager-/releases/tag/v0.1.15
 [0.1.14]: https://github.com/Taco406/vpn-password-manager-/releases/tag/v0.1.14
 [0.1.13]: https://github.com/Taco406/vpn-password-manager-/releases/tag/v0.1.13
 [0.1.12]: https://github.com/Taco406/vpn-password-manager-/releases/tag/v0.1.12
