@@ -54,7 +54,18 @@ SENTINEL_JWT_ES256_PEM=/run/secrets/sentinel/jwt.pem
 
 # Host port to publish the API on (behind TLS you'd normally proxy to this).
 SENTINEL_API_PORT=8787
+
+# Mark this a real deployment. With this set, the server refuses to start unless the
+# three secrets above are all present — no silent fallback to dev fixtures.
+SENTINEL_ENV=production
 ```
+
+> **Production safety.** With `SENTINEL_ENV=production` the server **will not boot** if
+> `GOOGLE_OAUTH_CLIENT_ID`, `SENTINEL_TOTP_ENC_KEY`, or `SENTINEL_JWT_ES256_PEM` is missing —
+> this prevents accidentally running the mock Google verifier (which accepts any identity) or an
+> ephemeral JWT key. If you terminate TLS at a proxy, also set `SENTINEL_TRUST_FORWARDED_FOR=1`
+> so rate limiting reads the client IP from `X-Forwarded-For`; otherwise it uses the real peer
+> address. Restrict browser access with `SENTINEL_CORS_ALLOWED_ORIGINS` if a web front-end is used.
 
 Generate the two secrets:
 

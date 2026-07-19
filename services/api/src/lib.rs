@@ -23,6 +23,27 @@ pub fn build_app(
     config: Config,
     google: Arc<dyn auth::GoogleVerifier>,
 ) -> axum::Router {
+    use axum::http::{HeaderValue, Method};
+    use tower_http::cors::{Any, CorsLayer};
+    use tower_http::trace::TraceLayer;
+
+    // CORS: the desktop app is a native client (unaffected by CORS), so this only governs
+    // browsers. In production, allow exactly the configured origins (empty = none); in dev,
+    // stay permissive so local tooling works.
+    let cors = if config.production {
+        let origins: Vec<HeaderValue> = config
+            .cors_allowed_origins
+            .iter()
+            .filter_map(|o| o.parse::<HeaderValue>().ok())
+            .collect();
+        CorsLayer::new()
+            .allow_methods([Method::GET, Method::POST, Method::PUT, Method::DELETE])
+            .allow_headers(Any)
+            .allow_origin(origins)
+    } else {
+        CorsLayer::permissive()
+    };
+
     let state = AppState {
         pool,
         keys,
@@ -31,6 +52,8 @@ pub fn build_app(
         limiter: ratelimit::RateLimiter::new(),
     };
     routes::router(state)
+        .layer(cors)
+        .layer(TraceLayer::new_for_http())
 }
 
 /// Connect to Postgres with a bounded pool.
