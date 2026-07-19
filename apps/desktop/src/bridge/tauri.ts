@@ -56,9 +56,12 @@ export function createTauriBridge(): SentinelBridge {
   const emitLocal = (e: BridgeEvent) => localListeners.forEach((l) => l(e));
 
   // Real VPN is used only when a Linode token is configured; otherwise the VPN methods
-  // fall back to the in-browser simulation. Memoized so we check the backend once.
+  // fall back to the in-browser simulation. Memoized to avoid re-hitting the keychain on
+  // every state poll, but callers that can change the answer (connecting, opening the region
+  // picker) pass force=true so saving a token mid-session takes effect without a restart.
   let realVpnP: Promise<boolean> | null = null;
-  const realVpn = (): Promise<boolean> => {
+  const realVpn = (force = false): Promise<boolean> => {
+    if (force) realVpnP = null;
     if (!realVpnP) {
       realVpnP = invoke<{ realEnabled: boolean }>("vpn_config")
         .then((c) => !!c?.realEnabled)
@@ -133,11 +136,11 @@ export function createTauriBridge(): SentinelBridge {
     vaultExport: (k: "encrypted" | "plain_csv", p?: string) => mockBridge.vaultExport(k, p),
     favicon: (d: string) => mockBridge.favicon(d),
     vpnRegions: async (): Promise<Region[]> =>
-      (await realVpn()) ? invoke<Region[]>("vpn_regions_real") : mockBridge.vpnRegions(),
+      (await realVpn(true)) ? invoke<Region[]>("vpn_regions_real") : mockBridge.vpnRegions(),
     vpnInstanceTypes: async (): Promise<InstanceType[]> =>
       (await realVpn()) ? invoke<InstanceType[]>("vpn_instance_types_real") : mockBridge.vpnInstanceTypes(),
     vpnConnect: async (r: string, i: string, p?: string) =>
-      (await realVpn())
+      (await realVpn(true))
         ? invoke<void>("vpn_connect", { region: r, instanceType: i })
         : mockBridge.vpnConnect(r, i, p),
     vpnDisconnect: async () =>
