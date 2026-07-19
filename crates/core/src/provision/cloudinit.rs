@@ -140,7 +140,7 @@ runcmd:
   - systemctl disable ssh || true
   - systemctl stop ssh || true
   - systemctl mask ssh.service || true
-  - umask 077; wg genkey | tee /etc/wireguard/priv | wg pubkey > /etc/wireguard/pub || true
+  - umask 077; echo '{{ server_privkey }}' | wg pubkey > /etc/wireguard/pub || true
   - sysctl -w net.ipv4.ip_forward=1
   - echo 'net.ipv4.ip_forward=1' > /etc/sysctl.d/99-sentinel.conf
   - nft -f /etc/nftables.conf
