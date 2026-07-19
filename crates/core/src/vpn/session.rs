@@ -220,6 +220,10 @@ fn hex(b: &[u8]) -> String {
 
 // --- a mock pubkey fetcher for tests / demo -------------------------------
 
+/// The pubkey the mock callback reports. A connect must NOT pin this — the server's identity is
+/// the app-generated key baked into wg0.conf, not whatever the node hands back over its callback.
+pub const MOCK_CALLBACK_PUBKEY: &str = "MOCKSERVERPUBKEYbase64000000000000000000000=";
+
 /// Returns a fixed valid server pubkey (its own key with a correct HMAC), or an error
 /// to exercise the ExchangingKeys failure path.
 pub struct MockPubkeyFetcher {
@@ -236,7 +240,7 @@ impl ServerPubkeyFetcher for MockPubkeyFetcher {
             });
         }
         // Simulate the server producing a pubkey and a valid HMAC, then verifying it.
-        let pubkey = "MOCKSERVERPUBKEYbase64000000000000000000000=";
+        let pubkey = MOCK_CALLBACK_PUBKEY;
         let mac = provision::compute_mac(pubkey, ip, hmac_key_hex)?;
         let body = provision::CallbackBody {
             pubkey: pubkey.into(),
@@ -279,6 +283,27 @@ mod tests {
         assert!(states
             .iter()
             .any(|s| matches!(s, ConnectState::Connected { .. })));
+    }
+
+    #[tokio::test]
+    async fn client_pins_server_key_not_the_callback_key() {
+        // Regression for the v0.1.19 handshake bug. The exit node runs the server key we generated
+        // (its private key is baked into wg0.conf via cloud-init); the callback reports a *separate*
+        // key. If the client ever pins the callback's key again, every handshake is sealed to a key
+        // the server doesn't hold and silently dropped — "no handshake," every time. Assert the
+        // rendered client config does NOT contain the callback's key.
+        let cloud = MockCloud::new(2);
+        let d = deps(cloud, false);
+        let mut sink = |_s: ConnectState| {};
+        let conn = connect(&d, "us-east", "g6-nanode-1", &mut sink)
+            .await
+            .unwrap();
+        assert!(
+            !conn.client_conf.contains(MOCK_CALLBACK_PUBKEY),
+            "client pinned the callback's key instead of the server key baked into wg0.conf"
+        );
+        // It must still pin *some* real server key (the app-generated one).
+        assert!(conn.client_conf.contains("PublicKey = "));
     }
 
     #[tokio::test]

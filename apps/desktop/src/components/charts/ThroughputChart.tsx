@@ -110,7 +110,15 @@ export function ThroughputChart({
     return () => cancelAnimationFrame(raf);
   }, [width, height, color]);
 
-  return <canvas ref={canvasRef} style={{ width, height, display: "block" }} aria-label="Throughput chart" />;
+  // Display responsively: the canvas renders at its intrinsic `width` but is CSS-scaled to fill
+  // (never exceed) its container, so it can't overflow a narrow panel. maxWidth caps it on wide ones.
+  return (
+    <canvas
+      ref={canvasRef}
+      style={{ width: "100%", maxWidth: width, height, display: "block" }}
+      aria-label="Throughput chart"
+    />
+  );
 }
 
 /** Format bytes/sec into a compact human string. */

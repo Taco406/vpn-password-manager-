@@ -8,6 +8,35 @@ The format follows [Keep a Changelog](https://keepachangelog.com/). Versions are
 [semantic](https://semver.org/). **Add a new `## [x.y.z]` section at the top in the same PR
 that bumps the app version** — that's how "the changelog updates on every merge."
 
+## [0.1.20] — 2026-07-19
+
+### Fixed
+- **Websites load over the VPN again.** After a connect, pages could hang or the connection felt
+  dead even though the tunnel was up — the classic WireGuard full-tunnel MTU problem (small packets
+  like DNS get through, large ones are silently dropped). The client tunnel now sets **MTU = 1420**
+  and the exit node **clamps TCP MSS to the path MTU**, so full-size responses get through instead of
+  stalling.
+- **The throughput graph no longer overflows the page.** The live chart is now responsive and scales
+  to fit its panel instead of spilling past the edge on narrower windows.
+
+### Added
+- **A headless VPN self-test** so the app can prove the real tunnel works end-to-end. Running
+  `SENTINEL --vpn-selftest [region]` from an Administrator terminal spins up a throwaway Linode,
+  brings a tunnel up with **minimal routing** (only the tunnel subnet — it never touches your default
+  route or DNS, so it can't disrupt your internet), verifies a **real WireGuard handshake**, then
+  **destroys the node** — printing each stage plus a PASS/FAIL (also saved to the errors log). It's
+  the first way to *see* the live handshake succeed instead of inferring it, and it's what a future
+  automated test runner will drive.
+
+### Changed
+- The WireGuard client config now omits the `DNS` line when no DNS is set (used by the self-test's
+  no-hijack routing). Normal VPN connects are unchanged.
+
+### Internal
+- Added a regression test pinning the v0.1.19 fix: a connect must pin the server key baked into the
+  node's config, never the key the node reports over its callback — so that class of "silent
+  no-handshake" bug can't come back unnoticed.
+
 ## [0.1.19] — 2026-07-19
 
 ### Fixed

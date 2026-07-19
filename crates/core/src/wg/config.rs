@@ -25,11 +25,19 @@ pub struct ServerConf {
 
 /// Render the client tunnel config.
 pub fn render_client_conf(c: &ClientConf) -> String {
+    // DNS is optional: an empty string omits the line entirely. The VPN self-test uses this so it
+    // can bring a tunnel up to verify the handshake without redirecting the host's DNS resolution.
+    let dns_line = if c.dns.trim().is_empty() {
+        String::new()
+    } else {
+        format!("DNS = {}\n", c.dns)
+    };
     format!(
         "[Interface]\n\
          PrivateKey = {priv}\n\
          Address = {addr}\n\
-         DNS = {dns}\n\
+         {dns_line}\
+         MTU = 1420\n\
          \n\
          [Peer]\n\
          PublicKey = {spub}\n\
@@ -38,7 +46,7 @@ pub fn render_client_conf(c: &ClientConf) -> String {
          PersistentKeepalive = {ka}\n",
         priv = c.client_private_key,
         addr = c.client_address,
-        dns = c.dns,
+        dns_line = dns_line,
         spub = c.server_public_key,
         endpoint = c.server_endpoint,
         allowed = c.allowed_ips.join(", "),
@@ -107,6 +115,27 @@ mod tests {
         let out = render_server_conf(&s);
         assert!(out.contains("SaveConfig = false"));
         assert!(out.contains("ListenPort = 51820"));
+    }
+
+    #[test]
+    fn empty_dns_omits_the_line() {
+        // The self-test passes an empty DNS so the tunnel never redirects host DNS resolution.
+        let c = ClientConf {
+            client_private_key: "x".into(),
+            client_address: "10.66.0.2/32".into(),
+            dns: String::new(),
+            server_public_key: "y".into(),
+            server_endpoint: "z:1".into(),
+            allowed_ips: vec!["10.66.0.0/24".into()],
+            keepalive: 25,
+        };
+        let out = render_client_conf(&c);
+        assert!(
+            !out.contains("DNS ="),
+            "empty DNS must omit the line entirely"
+        );
+        assert!(out.contains("Address = 10.66.0.2/32"));
+        assert!(out.contains("AllowedIPs = 10.66.0.0/24"));
     }
 
     #[test]

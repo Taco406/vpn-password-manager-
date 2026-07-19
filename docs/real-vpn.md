@@ -46,6 +46,22 @@ To go back to the simulation, clear the token (Settings → Real VPN → blank �
 - After Disconnect, open the [Linode Cloud Manager](https://cloud.linode.com/linodes) and confirm
   the `sentinel-*` Linode is **gone**. (It should be — but verify while you're getting comfortable.)
 
+## Built-in self-test (prove the tunnel works, without touching your internet)
+
+SENTINEL can test the whole real path by itself. From an **Administrator** terminal (with WireGuard
+installed and a Linode token saved, or set in `SENTINEL_LINODE_TOKEN`):
+
+```
+SENTINEL.exe --vpn-selftest us-east
+```
+
+It spins up a throwaway Linode, brings a WireGuard tunnel up with **minimal routing** — only the
+`10.66.0.0/24` tunnel subnet, so it **never changes your default route or DNS** and can't disrupt your
+connection — verifies a **real handshake**, then **destroys the node**. It prints each stage and a
+final `PASS ✓` / `FAIL ✗` (also written to the errors log). A `FAIL` line reports the tunnel's byte
+counters so you can see whether your PC never sent traffic (local) or the node never replied (server).
+This is the safe way to confirm a real connect works before routing your actual traffic through it.
+
 ## How it works (the short version)
 
 - On Connect, SENTINEL creates a Linode tagged `sentinel-ephemeral`, handing it a hardened
