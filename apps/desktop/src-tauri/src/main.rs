@@ -27,6 +27,10 @@ fn main() {
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
         .setup(|app| {
+            // SAFETY: unconditionally clear any stale kill-switch firewall rules FIRST, before
+            // anything else, so a crash/kill while connected can never leave the user offline.
+            vpn::killswitch_clear_all();
+
             let data_dir = app
                 .path()
                 .app_data_dir()
@@ -42,6 +46,8 @@ fn main() {
             }
             // If real VPN is configured, reap any orphaned ephemeral nodes from a prior crash.
             vpn::sweep_on_launch();
+            // Background poller: auto-connect on untrusted Wi-Fi (opt-in; self-gating each tick).
+            vpn::spawn_autoconnect_poller(app.handle().clone());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -74,6 +80,9 @@ fn main() {
             vpn::vpn_state,
             vpn::vpn_cost_estimate,
             vpn::vpn_history,
+            vpn::net_status,
+            vpn::net_set,
+            vpn::killswitch_clear,
             sync::sync_status,
             sync::sync_set_config,
             sync::auth_google_signin,
@@ -89,6 +98,13 @@ fn main() {
             nmhost::autofill_install,
             nmhost::autofill_uninstall,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running SENTINEL");
+        .build(tauri::generate_context!())
+        .expect("error while building SENTINEL")
+        .run(|_app, event| {
+            // SAFETY: on exit, tear down any kill-switch rules so quitting the app can never
+            // leave the user's internet blocked (self-heal on next launch also covers crashes).
+            if let tauri::RunEvent::Exit = event {
+                vpn::killswitch_clear_all();
+            }
+        });
 }

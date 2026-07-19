@@ -36,6 +36,46 @@ export async function vpnRealEnabled(): Promise<boolean> {
   return !!c?.realEnabled;
 }
 
+// --- VPN depth (experimental, real-VPN only): kill switch + untrusted-Wi-Fi auto-connect ---
+// Not part of the SentinelBridge contract (they only mean something in the shell, and only in
+// real-Linode mode). In the browser they no-op / return safe defaults so Settings renders.
+
+export interface NetStatusInfo {
+  ssid: string | null;
+  trusted: boolean;
+  autoConnect: boolean;
+}
+
+/** Current Wi-Fi SSID + whether it's trusted, and whether untrusted-Wi-Fi auto-connect is on. */
+export async function netStatus(): Promise<NetStatusInfo> {
+  if (!inTauri()) return { ssid: null, trusted: false, autoConnect: false };
+  const core = await import("@tauri-apps/api/core");
+  const s = (await core.invoke("net_status")) as {
+    ssid?: string | null;
+    trusted?: boolean;
+    autoConnect?: boolean;
+  };
+  return {
+    ssid: s?.ssid ?? null,
+    trusted: !!s?.trusted,
+    autoConnect: !!s?.autoConnect,
+  };
+}
+
+/** Persist the auto-connect toggle and the trusted-SSID allowlist. */
+export async function netSet(autoConnect: boolean, trustedSsids: string[]): Promise<void> {
+  if (!inTauri()) return;
+  const core = await import("@tauri-apps/api/core");
+  await core.invoke("net_set", { autoConnect, trustedSsids });
+}
+
+/** Manual panic button: remove every kill-switch firewall rule immediately. */
+export async function killswitchClear(): Promise<void> {
+  if (!inTauri()) return;
+  const core = await import("@tauri-apps/api/core");
+  await core.invoke("killswitch_clear");
+}
+
 // --- Browser autofill (experimental) opt-in helpers -------------------------
 // Register/unregister this app as the Chrome/Edge native-messaging host. Not part of the
 // SentinelBridge contract (they only mean something in the shell); in the browser they
