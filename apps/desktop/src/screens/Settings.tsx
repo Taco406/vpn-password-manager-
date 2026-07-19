@@ -1,6 +1,7 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, type ReactElement } from "react";
 import { Moon, Sun, Monitor, Globe, Cloud, LogIn, Download, RefreshCw, Trash2, Upload, Puzzle, Wifi, ShieldOff, X } from "lucide-react";
 import type { Settings as SettingsT } from "@sentinel/shared";
+import changelogRaw from "../../../../CHANGELOG.md?raw";
 import {
   bridge,
   vpnSetToken,
@@ -773,9 +774,58 @@ function BrowserAutofill() {
   );
 }
 
+// Render the (bundled) CHANGELOG.md into a compact list. Handles just the subset the file
+// uses: `## [ver] — date`, `### Category`, and `- bullet`; skips the title/intro and the
+// reference-link definitions at the bottom.
+function renderChangelog(md: string): ReactElement[] {
+  const start = md.indexOf("## [");
+  const body = start >= 0 ? md.slice(start) : md;
+  const out: ReactElement[] = [];
+  let key = 0;
+  for (const raw of body.split("\n")) {
+    const line = raw.trimEnd();
+    if (!line.trim() || /^\[[^\]]+\]:/.test(line)) continue;
+    if (line.startsWith("## ")) {
+      const t = line
+        .slice(3)
+        .replace(/^\[(.+?)\]/, "v$1")
+        .replace(/\s*—\s*/, " · ");
+      out.push(
+        <div key={key++} className="mt-3 mb-1 text-sm font-semibold first:mt-0">
+          {t}
+        </div>,
+      );
+    } else if (line.startsWith("### ")) {
+      out.push(
+        <div
+          key={key++}
+          className="mt-2 text-[10px] font-semibold uppercase tracking-wide text-[var(--accent)]"
+        >
+          {line.slice(4)}
+        </div>,
+      );
+    } else if (line.startsWith("- ")) {
+      out.push(
+        <div key={key++} className="ml-1 mt-1 flex gap-1.5 text-xs text-[var(--text-secondary)]">
+          <span>•</span>
+          <span>{line.slice(2).replace(/\*\*/g, "")}</span>
+        </div>,
+      );
+    } else {
+      out.push(
+        <div key={key++} className="ml-3.5 text-xs text-[var(--text-secondary)]">
+          {line.replace(/\*\*/g, "").trim()}
+        </div>,
+      );
+    }
+  }
+  return out;
+}
+
 function Updates() {
   const [status, setStatus] = useState<string>("");
   const [busy, setBusy] = useState(false);
+  const [showNotes, setShowNotes] = useState(false);
 
   const check = async () => {
     setBusy(true);
@@ -801,7 +851,7 @@ function Updates() {
   return (
     <Card>
       <div className="mb-2 flex items-center justify-between text-sm font-medium">
-        Updates <Badge tone="accent">v0.1.7</Badge>
+        Updates <Badge tone="accent">v0.1.8</Badge>
       </div>
       <p className="mb-3 text-xs text-[var(--text-secondary)]">
         SENTINEL checks for signed updates on launch and installs them automatically. You can also check now.
@@ -814,8 +864,19 @@ function Updates() {
         >
           {busy ? "Checking…" : "Check for updates"}
         </button>
+        <button
+          onClick={() => setShowNotes((v) => !v)}
+          className="text-xs text-[var(--accent)] hover:underline"
+        >
+          {showNotes ? "Hide" : "What's new"}
+        </button>
         {status && <span className="text-xs text-[var(--text-muted)]">{status}</span>}
       </div>
+      {showNotes && (
+        <div className="mt-3 max-h-72 overflow-y-auto rounded-[10px] border border-[var(--border-strong)] p-3">
+          {renderChangelog(changelogRaw)}
+        </div>
+      )}
     </Card>
   );
 }

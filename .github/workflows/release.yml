@@ -83,6 +83,29 @@ jobs:
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
           echo "Resolved release tag: $tag"
 
+      # Use the matching CHANGELOG.md section as the GitHub Release notes, so releases and the
+      # in-app "What's new" stay in lockstep. Falls back to a generic line if no section exists.
+      - name: Extract release notes from CHANGELOG
+        id: notes
+        shell: bash
+        run: |
+          ver="${{ steps.rel.outputs.tag }}"; ver="${ver#v}"
+          notes=$(awk -v v="$ver" '
+            index($0, "## [" v "]") == 1 { grab = 1; next }
+            grab && index($0, "## [") == 1 { exit }
+            grab { print }
+          ' CHANGELOG.md)
+          if [ -z "$(printf '%s' "$notes" | tr -d '[:space:]')" ]; then
+            notes="See the assets below."
+          fi
+          {
+            echo "body<<SENTINEL_EOF"
+            printf '%s\n' "$notes"
+            echo ""
+            echo "Download the installer for your platform below. Installed apps update themselves from this release."
+            echo "SENTINEL_EOF"
+          } >> "$GITHUB_OUTPUT"
+
       - name: Build + publish release
         uses: tauri-apps/tauri-action@v0
         env:
@@ -93,7 +116,7 @@ jobs:
           projectPath: apps/desktop
           tagName: ${{ steps.rel.outputs.tag }}
           releaseName: "SENTINEL ${{ steps.rel.outputs.tag }}"
-          releaseBody: "Download the installer for your platform below. Installed apps update themselves from this release."
+          releaseBody: ${{ steps.notes.outputs.body }}
           releaseDraft: false
           prerelease: false
           args: ${{ matrix.args }}
