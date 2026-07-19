@@ -32,6 +32,9 @@ fn main() {
             // SAFETY: unconditionally clear any stale kill-switch firewall rules FIRST, before
             // anything else, so a crash/kill while connected can never leave the user offline.
             vpn::killswitch_clear_all();
+            // Also scrub any WireGuard routing/DNS leftovers from an unclean prior teardown, so the
+            // app self-heals a stranded connection on the very next launch (no netsh needed).
+            vpn::flush_wg_network();
 
             let data_dir = app
                 .path()
