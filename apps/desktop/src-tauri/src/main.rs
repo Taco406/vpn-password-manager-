@@ -25,6 +25,13 @@ fn main() {
         return;
     }
 
+    // Headless VPN self-test: `SENTINEL --vpn-selftest [region]` runs a real end-to-end connect
+    // (minimal routing, no full-tunnel), verifies the WireGuard handshake, destroys the node, and
+    // exits with 0/1. Lets the shipped app double as a live VPN tester for a human or a CI runner.
+    if let Some(region) = vpn::selftest_region() {
+        vpn::run_selftest(region); // diverges (exits the process)
+    }
+
     tauri::Builder::default()
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())

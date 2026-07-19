@@ -640,6 +640,220 @@ fn live_deps(token: String) -> ConnectDeps {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Headless VPN self-test — the shipped binary doubles as a live end-to-end tester.
+//
+// `SENTINEL(.exe) --vpn-selftest [region]` runs the REAL connect path against a live Linode with
+// MINIMAL routing (only the 10.66.0.0/24 tunnel subnet — never the default route or host DNS), so
+// it can verify a real WireGuard handshake WITHOUT hijacking the machine's internet. It always
+// destroys the node afterward. This is the reusable engine a human — or a CI Windows runner — uses
+// to actually SEE the live handshake land, instead of inferring it. Needs WireGuard installed,
+// admin (Windows), and a Linode token (SENTINEL_LINODE_TOKEN env or the one saved in Settings).
+// ---------------------------------------------------------------------------
+
+/// Detect a `--vpn-selftest [region]` invocation; returns the region (default `us-east`) if present.
+pub fn selftest_region() -> Option<String> {
+    let mut args = std::env::args().skip(1);
+    while let Some(a) = args.next() {
+        if a == "--vpn-selftest" {
+            return Some(args.next().unwrap_or_else(|| "us-east".to_string()));
+        }
+    }
+    None
+}
+
+/// Emit one self-test line to both stdout (visible when run from a console) and the errors log
+/// (the reliable, file-backed channel — the report is always recoverable there).
+fn selftest_say(msg: &str) {
+    println!("[vpn-selftest] {msg}");
+    crate::applog::info("vpn.selftest", msg);
+}
+
+/// Best-effort data-plane ping to the peer's tunnel address (bonus signal beyond the handshake).
+fn selftest_ping(ip: &str) -> bool {
+    let count_flag = if cfg!(windows) { "-n" } else { "-c" };
+    std::process::Command::new("ping")
+        .args([count_flag, "1", ip])
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
+/// Run the headless self-test to completion and exit the process (0 = handshake landed, 1 = not).
+pub fn run_selftest(region: String) -> ! {
+    // A release build is a GUI-subsystem app with no console of its own; attach to the launching
+    // terminal so the report is visible when run interactively from cmd/PowerShell. Best-effort —
+    // redirected output (a runner piping to a file) and the errors log both work regardless.
+    #[cfg(windows)]
+    {
+        extern "system" {
+            fn AttachConsole(dw_process_id: u32) -> i32;
+        }
+        const ATTACH_PARENT_PROCESS: u32 = 0xFFFF_FFFF;
+        unsafe {
+            let _ = AttachConsole(ATTACH_PARENT_PROCESS);
+        }
+    }
+    let code = tauri::async_runtime::block_on(selftest_inner(&region));
+    std::process::exit(code);
+}
+
+/// The steps between node-create and node-destroy: boot → readiness callback → tunnel up (minimal
+/// routing, which makes `wg.up` wait for a real handshake) → optional data-plane ping.
+async fn selftest_probe(
+    deps: &ConnectDeps,
+    inst_id: &str,
+    client_kp: &WgKeypair,
+    server_kp: &WgKeypair,
+    callback_token: &str,
+    callback_hmac: &str,
+) -> std::result::Result<(), String> {
+    selftest_say("waiting for the node to boot…");
+    let mut running = None;
+    for _ in 0..deps.max_boot_polls {
+        if deps.poll_interval_ms > 0 {
+            tokio::time::sleep(Duration::from_millis(deps.poll_interval_ms)).await;
+        }
+        if let Ok(cur) = deps.cloud.get(inst_id).await {
+            if cur.state == InstanceState::Running {
+                running = Some(cur);
+                break;
+            }
+        }
+    }
+    let running = running.ok_or_else(|| "node did not reach Running in time".to_string())?;
+    let ip = running
+        .ipv4
+        .clone()
+        .ok_or_else(|| "node reported no IP".to_string())?;
+    selftest_say(&format!("node running at {ip}"));
+
+    selftest_say("waiting for the HMAC-authenticated readiness callback…");
+    deps.fetcher
+        .fetch(&ip, callback_token, callback_hmac)
+        .await
+        .map_err(|e| format!("callback: {e}"))?;
+
+    selftest_say("callback OK — bringing the tunnel up (minimal routing, no full-tunnel, no DNS)…");
+    // Minimal AllowedIPs = just the tunnel subnet, so this never touches the host's default route
+    // or DNS. `wg.up` itself waits for a real handshake and returns Err (with tx/rx diagnostics) if
+    // none lands within its window — so a successful return IS the proof we're after.
+    let conf = ClientConf {
+        client_private_key: client_kp.private_base64(),
+        client_address: "10.66.0.2/32".into(),
+        dns: String::new(),
+        server_public_key: server_kp.public_base64(),
+        server_endpoint: format!("{ip}:51820"),
+        allowed_ips: vec!["10.66.0.0/24".into()],
+        keepalive: 25,
+    };
+    deps.wg.up(&conf).await.map_err(|e| e.to_string())?;
+    selftest_say("handshake landed ✓ — tunnel is up");
+
+    if selftest_ping("10.66.0.1") {
+        selftest_say("data-plane ping to 10.66.0.1 replied ✓");
+    } else {
+        selftest_say(
+            "data-plane ping to 10.66.0.1 got no reply (the handshake alone proves the fix)",
+        );
+    }
+
+    let _ = deps.wg.down().await;
+    Ok(())
+}
+
+/// Orchestrate a full self-test: create a node, probe it, then ALWAYS destroy it. Returns a process
+/// exit code.
+async fn selftest_inner(region: &str) -> i32 {
+    selftest_say(&format!("starting VPN self-test in region {region}"));
+
+    if let Err(e) = preflight_vpn() {
+        selftest_say(&format!("FAIL preflight: {e}"));
+        return 1;
+    }
+    let token = match std::env::var("SENTINEL_LINODE_TOKEN")
+        .ok()
+        .filter(|t| !t.is_empty())
+        .or_else(get_token)
+    {
+        Some(t) => t,
+        None => {
+            selftest_say(
+                "FAIL: no Linode token (set SENTINEL_LINODE_TOKEN, or save one in Settings → VPN)",
+            );
+            return 1;
+        }
+    };
+    let deps = live_deps(token);
+
+    // Same hardened key material + cloud-init a real connect uses.
+    let client_kp = WgKeypair::generate();
+    let server_kp = WgKeypair::generate();
+    let callback_token = rand_hex(16);
+    let callback_hmac = rand_hex(32);
+    let params = CloudInitParams::single(
+        server_kp.private_base64(),
+        client_kp.public_base64(),
+        "10.66.0.2".into(),
+        51820,
+        callback_token.clone(),
+        callback_hmac.clone(),
+        900,
+    );
+    let user_data = match render_base64(&params) {
+        Ok(u) => u,
+        Err(e) => {
+            selftest_say(&format!("FAIL render cloud-init: {e}"));
+            return 1;
+        }
+    };
+
+    selftest_say("creating a throwaway Linode (billed only until it's destroyed)…");
+    let spec = InstanceSpec {
+        region: region.into(),
+        instance_type: DEFAULT_INSTANCE_TYPE.into(),
+        user_data,
+        label: format!("sentinel-selftest-{region}"),
+        tags: vec![], // ephemeral — the orphan sweep would also reap it
+    };
+    let inst = match deps.cloud.create(&spec).await {
+        Ok(i) => i,
+        Err(e) => {
+            selftest_say(&format!("FAIL create instance: {e}"));
+            return 1;
+        }
+    };
+    selftest_say(&format!("created node {}", inst.id));
+
+    let outcome = selftest_probe(
+        &deps,
+        &inst.id,
+        &client_kp,
+        &server_kp,
+        &callback_token,
+        &callback_hmac,
+    )
+    .await;
+
+    // ALWAYS tear down: destroy the node (stop billing) and scrub any local tunnel leftovers.
+    selftest_say("destroying the node…");
+    let _ = deps.wg.down().await;
+    let _ = deps.cloud.delete(&inst.id).await;
+
+    match outcome {
+        Ok(()) => {
+            selftest_say(
+                "PASS ✓ — a real WireGuard handshake succeeded end-to-end; node destroyed.",
+            );
+            0
+        }
+        Err(e) => {
+            selftest_say(&format!("FAIL ✗ — {e}; node destroyed."));
+            1
+        }
+    }
+}
+
 fn state_json(s: &ConnectState, region: &str, instance_type: &str) -> serde_json::Value {
     let (stage, detail, egress): (&str, String, Option<String>) = match s {
         ConnectState::Idle => ("idle", String::new(), None),

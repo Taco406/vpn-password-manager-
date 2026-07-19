@@ -62,7 +62,12 @@ write_files:
           tcp dport 443 accept
           iif "wg0" accept
         }
-        chain forward { type filter hook forward priority 0; policy accept; }
+        chain forward {
+          type filter hook forward priority 0; policy accept;
+          # Clamp TCP MSS to the path MTU so full-tunnel clients can load large responses (HTTPS
+          # pages) instead of stalling on oversized packets that get silently dropped.
+          tcp flags syn tcp option maxseg size set rt mtu
+        }
         chain output { type filter hook output priority 0; policy accept; }
       }
       table ip nat {
