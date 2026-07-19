@@ -33,6 +33,21 @@ use std::path::{Path, PathBuf};
 /// so the host manifest below can allow-list exactly this extension.
 pub const EXTENSION_ID: &str = "pbcngnmfielibgghcofedjmojogohcdf";
 
+/// The Chrome Web Store assigns its own id on publish (independent of the pinned `key`), so a
+/// store-installed extension has a *different* origin than the unpacked one. Once the store
+/// listing is live, put its id here and the host will allow both. `None` until then.
+/// See `docs/chrome-web-store.md`.
+pub const STORE_EXTENSION_ID: Option<&str> = None;
+
+/// Every extension id the native-messaging host will talk to (unpacked-dev + store, if set).
+fn allowed_ids() -> Vec<&'static str> {
+    let mut ids = vec![EXTENSION_ID];
+    if let Some(store) = STORE_EXTENSION_ID {
+        ids.push(store);
+    }
+    ids
+}
+
 /// Native-messaging host name — matches `NM_HOST_NAME` in `packages/shared` and the
 /// filename Chrome/Edge look up.
 const HOST_NAME: &str = "com.sentinel.host";
@@ -403,7 +418,7 @@ fn error(id: &str, kind: NmType, code: NmErrorCode, message: &str) -> NmEnvelope
 // opt-in enable / disable (Tauri commands)
 // ---------------------------------------------------------------------------
 
-/// Render the host manifest with this binary's path (JSON-escaped) and the pinned id.
+/// Render the host manifest with this binary's path (JSON-escaped) and the allowed origins.
 fn render_manifest() -> Result<String, String> {
     let exe = std::env::current_exe().map_err(|e| format!("current exe: {e}"))?;
     // The path lands inside a JSON string literal: escape backslashes (Windows) and quotes.
@@ -411,9 +426,74 @@ fn render_manifest() -> Result<String, String> {
         .to_string_lossy()
         .replace('\\', "\\\\")
         .replace('"', "\\\"");
+    let origins = allowed_ids()
+        .iter()
+        .map(|id| format!("\"chrome-extension://{id}/\""))
+        .collect::<Vec<_>>()
+        .join(", ");
     Ok(HOST_MANIFEST_TMPL
         .replace("__SENTINEL_NM_HOST_PATH__", &escaped)
-        .replace("__SENTINEL_EXTENSION_ID__", EXTENSION_ID))
+        .replace("__SENTINEL_ALLOWED_ORIGINS__", &format!("[{origins}]")))
+}
+
+/// Copy a directory tree recursively (`std` has no built-in for this).
+fn copy_dir_all(src: &Path, dst: &Path) -> io::Result<()> {
+    std::fs::create_dir_all(dst)?;
+    for entry in std::fs::read_dir(src)? {
+        let entry = entry?;
+        let from = entry.path();
+        let to = dst.join(entry.file_name());
+        if entry.file_type()?.is_dir() {
+            copy_dir_all(&from, &to)?;
+        } else {
+            std::fs::copy(&from, &to)?;
+        }
+    }
+    Ok(())
+}
+
+/// Copy the bundled browser extension out of the app's read-only resources into a stable,
+/// user-writable folder (`<app_data_dir>/extension`) and return that path, so the user can
+/// point Chrome/Edge "Load unpacked" at it. The extension is bundled into the installer via
+/// `bundle.resources` in tauri.conf.json; in a dev build it may be absent (returns an error).
+#[tauri::command]
+pub fn autofill_prepare(app: tauri::AppHandle) -> Result<String, String> {
+    use tauri::Manager;
+    let base = app
+        .path()
+        .resource_dir()
+        .map_err(|e| format!("resource dir: {e}"))?;
+    // Be tolerant of how Tauri lays out mapped resources across versions/platforms.
+    let candidates = [
+        base.join("extension"),
+        base.join("resources").join("extension"),
+    ];
+    let src = candidates
+        .iter()
+        .find(|p| p.join("manifest.json").exists())
+        .ok_or_else(|| {
+            "bundled extension not found (only available in an installed build)".to_string()
+        })?;
+    let dest = data_dir().join("extension");
+    let _ = std::fs::remove_dir_all(&dest);
+    copy_dir_all(src, &dest).map_err(|e| format!("copy extension: {e}"))?;
+    Ok(dest.to_string_lossy().to_string())
+}
+
+/// Reveal a folder in the OS file manager (so the user can drag it into "Load unpacked").
+#[tauri::command]
+pub fn open_folder(path: String) -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    let (cmd, args): (&str, Vec<&str>) = ("explorer", vec![path.as_str()]);
+    #[cfg(target_os = "macos")]
+    let (cmd, args): (&str, Vec<&str>) = ("open", vec![path.as_str()]);
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let (cmd, args): (&str, Vec<&str>) = ("xdg-open", vec![path.as_str()]);
+    std::process::Command::new(cmd)
+        .args(&args)
+        .spawn()
+        .map(|_| ())
+        .map_err(|e| format!("open folder: {e}"))
 }
 
 /// Register this binary as the `com.sentinel.host` native-messaging host for Chrome/Edge.

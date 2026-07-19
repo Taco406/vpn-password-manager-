@@ -81,6 +81,10 @@ data without any cloud account or the Tauri binary. Build the real desktop app w
 
 ## Install & auto-update
 
+**New here?** Start with the [**Setup & required-downloads guide**](docs/setup.md) — one page
+covering the installer plus what each optional feature needs (WireGuard, Linode, the browser
+extension, sync server), with costs and admin requirements.
+
 Installers (Windows `.exe`/`.msi`, macOS `.dmg`, Linux `.deb`/AppImage) are built by CI
 and attached to GitHub Releases. Push a tag and the [`Release`](.github/workflows/release.yml)
 workflow builds all three on their own runners:

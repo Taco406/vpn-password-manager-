@@ -45,5 +45,6 @@ Thumbs.db
 
 # Build artifacts / uploads
 /apps/desktop/src-tauri/gen
+/apps/desktop/src-tauri/resources
 /apps/ios-key/build
 *.log

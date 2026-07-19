@@ -99,6 +99,20 @@ export async function autofillUninstall(): Promise<void> {
   await core.invoke("autofill_uninstall");
 }
 
+/** Copy the bundled extension to a stable folder and return its path (for "Load unpacked"). */
+export async function autofillPrepare(): Promise<string> {
+  if (!inTauri()) throw new Error("Browser autofill is only available in the desktop app.");
+  const core = await import("@tauri-apps/api/core");
+  return core.invoke("autofill_prepare") as Promise<string>;
+}
+
+/** Reveal a folder in the OS file manager. */
+export async function openFolder(path: string): Promise<void> {
+  if (!inTauri()) return;
+  const core = await import("@tauri-apps/api/core");
+  await core.invoke("open_folder", { path });
+}
+
 // --- Windows Hello unlock opt-in helpers ------------------------------------
 
 export async function helloStatus(): Promise<{ available: boolean; enabled: boolean }> {

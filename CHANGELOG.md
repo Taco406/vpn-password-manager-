@@ -8,6 +8,22 @@ The format follows [Keep a Changelog](https://keepachangelog.com/). Versions are
 [semantic](https://semver.org/). **Add a new `## [x.y.z]` section at the top in the same PR
 that bumps the app version** — that's how "the changelog updates on every merge."
 
+## [0.1.9] — 2026-07-19
+
+### Added
+- **Browser autofill is now built in and easy to install.** The extension ships inside the
+  installer. Settings → Browser autofill → **"Get the extension"** copies it to a folder and
+  registers the browser host; you just point Chrome/Edge's "Load unpacked" at the shown path
+  (with Copy-path / Open-folder buttons). Previously the extension wasn't shipped to users at all.
+- **One consolidated Setup & required-downloads guide** (`docs/setup.md`), linked from the app
+  (Settings) and the README: what each feature needs (WireGuard, Linode, sync server), with costs.
+- Chrome Web Store submission is prepped (`docs/chrome-web-store.md` + listing/privacy copy); the
+  native-messaging host already accepts both the unpacked and future store extension ids.
+
+### Fixed
+- Corrected a stale doc note that claimed the shipped VPN was always a simulation (real VPN has
+  been available since v0.1.2 when a Linode token is set).
+
 ## [0.1.8] — 2026-07-19
 
 ### Fixed
@@ -86,6 +102,7 @@ that bumps the app version** — that's how "the changelog updates on every merg
   Releases). Local-first vault UI, command palette, generator, and health audit. VPN screen
   runs a built-in simulation until a Linode token is added.
 
+[0.1.9]: https://github.com/Taco406/vpn-password-manager-/releases/tag/v0.1.9
 [0.1.8]: https://github.com/Taco406/vpn-password-manager-/releases/tag/v0.1.8
 [0.1.7]: https://github.com/Taco406/vpn-password-manager-/releases/tag/v0.1.7
 [0.1.6]: https://github.com/Taco406/vpn-password-manager-/releases/tag/v0.1.6
