@@ -8,6 +8,23 @@ The format follows [Keep a Changelog](https://keepachangelog.com/). Versions are
 [semantic](https://semver.org/). **Add a new `## [x.y.z]` section at the top in the same PR
 that bumps the app version** — that's how "the changelog updates on every merge."
 
+## [0.1.12] — 2026-07-19
+
+### Added
+- **Multi-hop VPN ("bounce").** Real-VPN only. Under **Settings → Multi-hop (bounce)** you can
+  route traffic through **2–3 exit nodes in a row** (entry → exit). Your device keeps one tunnel to
+  the entry hop; each hop forwards to the next server-side, and only the last node egresses to the
+  internet — so no single server sees both who you are and where you're going.
+- **Cost/latency are surfaced up front:** cost is **N× a single node** and latency compounds, so
+  the UI says so and caps chains at 3 hops.
+
+### Fixed
+- **NAT on exit nodes.** The provisioning cloud-init now installs a masquerade rule so forwarded
+  client traffic actually egresses — this also hardens the regular single-hop VPN.
+
+_Experimental and Windows-first; the live multi-hop path can't be exercised in CI, so the config
+generation is golden-tested and any failed connect destroys every provisioned node (no orphan bills)._
+
 ## [0.1.11] — 2026-07-19
 
 ### Added
@@ -131,6 +148,7 @@ is the next phase. Windows-first and experimental — the live Linode path can't
   Releases). Local-first vault UI, command palette, generator, and health audit. VPN screen
   runs a built-in simulation until a Linode token is added.
 
+[0.1.12]: https://github.com/Taco406/vpn-password-manager-/releases/tag/v0.1.12
 [0.1.11]: https://github.com/Taco406/vpn-password-manager-/releases/tag/v0.1.11
 [0.1.10]: https://github.com/Taco406/vpn-password-manager-/releases/tag/v0.1.10
 [0.1.9]: https://github.com/Taco406/vpn-password-manager-/releases/tag/v0.1.9

@@ -106,15 +106,15 @@ async fn connect_inner(
     let callback_hmac_key = hex(&hmac_b);
 
     let server_kp = WgKeypair::generate(); // server privkey travels only in user_data
-    let cloud_init = provision::render_base64(&CloudInitParams {
-        server_privkey: server_kp.private_base64(),
-        client_pubkey: client_kp.public_base64(),
-        client_ip: "10.66.0.2".into(),
-        listen_port: 51820,
-        callback_token: callback_token.clone(),
-        callback_hmac_key: callback_hmac_key.clone(),
-        deadman_secs: 900,
-    })?;
+    let cloud_init = provision::render_base64(&CloudInitParams::single(
+        server_kp.private_base64(),
+        client_kp.public_base64(),
+        "10.66.0.2".into(),
+        51820,
+        callback_token.clone(),
+        callback_hmac_key.clone(),
+        900,
+    ))?;
 
     // 2) Create the instance. It is tagged ephemeral, so even if we crash right here the
     //    launch sweep will reap it.

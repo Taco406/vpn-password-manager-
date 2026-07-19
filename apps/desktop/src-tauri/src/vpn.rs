@@ -12,15 +12,19 @@
 
 use crate::state::AppState;
 use async_trait::async_trait;
-use sentinel_core::cloud::LinodeClient;
+use sentinel_core::cloud::{InstanceSpec, InstanceState, LinodeClient};
 use sentinel_core::error::{CoreError, Result as CoreResult};
-use sentinel_core::provision::{verify_callback, CallbackBody};
+use sentinel_core::provision::{
+    render_base64, verify_callback, CallbackBody, CloudInitParams, NextHop,
+};
 use sentinel_core::vpn::{
     connect as core_connect, disconnect as core_disconnect, orphan_sweep_keeping, ConnectDeps,
     ConnectState, ServerPubkeyFetcher,
 };
 use sentinel_core::vpn::{CostTicker, HistoryStore, SessionRecord};
-use sentinel_core::wg::{render_client_conf, ClientConf, WgController, WgCounters};
+use sentinel_core::wg::{
+    full_tunnel, render_client_conf, ClientConf, WgController, WgCounters, WgKeypair,
+};
 use serde::Serialize;
 use serde_json::json;
 use std::collections::HashSet;
@@ -419,7 +423,11 @@ impl ServerPubkeyFetcher for HttpPubkeyFetcher {
 
 pub struct VpnActive {
     pub deps: ConnectDeps,
+    /// The entry node's instance id (the one the local tunnel connects to).
     pub instance_id: String,
+    /// Every node id in the path, entry-first. Single-hop = `[instance_id]`; multi-hop lists
+    /// all hops so disconnect destroys the whole chain (money-critical — no orphan hops).
+    pub chain: Vec<String>,
     pub region: String,
     pub instance_type: String,
     pub egress_ip: Option<String>,
@@ -1040,6 +1048,7 @@ pub async fn connect_real(
     let active = VpnActive {
         deps: deps.clone(),
         instance_id: conn.instance.id.clone(),
+        chain: vec![conn.instance.id.clone()],
         region: region.clone(),
         instance_type: instance_type.clone(),
         egress_ip: conn.instance.ipv4.clone(),
@@ -1079,6 +1088,255 @@ pub async fn connect_real(
     Ok(())
 }
 
+/// Max hops in a multi-hop chain (cost = N× a single node, latency compounds).
+const MAX_HOPS: usize = 3;
+
+/// A random lowercase-hex string of `bytes` bytes, via uuids (no extra dependency). Used for
+/// the per-node callback token/hmac fields, which multi-hop doesn't actually call.
+fn rand_hex(bytes: usize) -> String {
+    let mut s = String::new();
+    while s.len() < bytes * 2 {
+        s.push_str(&uuid::Uuid::new_v4().simple().to_string());
+    }
+    s.truncate(bytes * 2);
+    s
+}
+
+/// Spawn the 2s throughput-emitting loop for an active tunnel (shared by single- and multi-hop).
+fn spawn_metrics_loop(
+    app: AppHandle,
+    wg: Arc<dyn WgController>,
+    stop: Arc<AtomicBool>,
+    started_at: i64,
+) {
+    tauri::async_runtime::spawn(async move {
+        let mut prev: Option<WgCounters> = None;
+        loop {
+            if stop.load(Ordering::Relaxed) {
+                break;
+            }
+            let elapsed = (now_secs() - started_at) as f64;
+            if let Ok(c) = wg.counters(elapsed).await {
+                let (rx, tx) = match prev {
+                    Some(p) => (
+                        c.rx_bytes.saturating_sub(p.rx_bytes) as f64 / 2.0,
+                        c.tx_bytes.saturating_sub(p.tx_bytes) as f64 / 2.0,
+                    ),
+                    None => (0.0, 0.0),
+                };
+                prev = Some(c);
+                let _ = app.emit(
+                    "vpn:metrics",
+                    json!({ "rx": rx, "tx": tx, "cpuPct": 0, "memPct": 0, "nicPct": 0, "latencyMs": 0, "ts": now_secs() * 1000 }),
+                );
+            }
+            tokio::time::sleep(Duration::from_secs(2)).await;
+        }
+    });
+}
+
+/// Connect through a CHAIN of exit nodes (multi-hop "bounce"). `regions` is entry→exit
+/// (2..=3). Traffic enters the first hop, is forwarded hop-to-hop server-side (each hop runs a
+/// wg1 client to the next), and egresses at the last. The local client keeps ONE tunnel (to the
+/// entry). Experimental + real-VPN only; cost is N× a single node. All keys are app-generated so
+/// no per-hop callback is needed. On ANY failure every provisioned node is destroyed (cost-safe).
+#[tauri::command]
+pub async fn vpn_connect_multihop(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    regions: Vec<String>,
+    instance_type: Option<String>,
+) -> std::result::Result<(), String> {
+    if regions.len() < 2 {
+        return Err("multi-hop needs at least 2 regions".into());
+    }
+    if regions.len() > MAX_HOPS {
+        return Err(format!("at most {MAX_HOPS} hops (cost = N× a node)"));
+    }
+    let itype = instance_type.unwrap_or_else(|| DEFAULT_INSTANCE_TYPE.to_string());
+
+    if CONNECTING.swap(true, Ordering::SeqCst) {
+        return Err("a connection attempt is already in progress".into());
+    }
+    let _connecting = ConnectingGuard;
+    if state.inner.lock().unwrap().vpn.is_some() {
+        return Err("already connected".into());
+    }
+    let token = get_token().ok_or_else(|| "no Linode token configured".to_string())?;
+    let deps = live_deps(token);
+    let data_dir = { state.inner.lock().unwrap().data_dir.clone() };
+    let _ = orphan_sweep_keeping(&*deps.cloud, &kept_ids(&data_dir)).await;
+
+    let n = regions.len();
+    let entry_label = format!("{} → {}", regions[0], regions[n - 1]);
+    let emit = |app: &AppHandle, s: ConnectState| {
+        let _ = app.emit("vpn:state", state_json(&s, &entry_label, &itype));
+    };
+
+    // Pre-generate all keys — the app knows every hop's pubkey, so the chain is fully wired
+    // without any per-hop callback. server_kps[i] = hop i's wg0; wg1_kps[i] = hop i's downstream.
+    let client_kp = WgKeypair::generate();
+    let server_kps: Vec<WgKeypair> = (0..n).map(|_| WgKeypair::generate()).collect();
+    let wg1_kps: Vec<WgKeypair> = (0..n.saturating_sub(1))
+        .map(|_| WgKeypair::generate())
+        .collect();
+
+    emit(&app, ConnectState::CreatingInstance);
+
+    // Provision exit(n-1) → entry(0) so each hop's downstream endpoint is already known.
+    let mut created: Vec<String> = Vec::new(); // exit-first
+    let mut downstream: Option<(String, String)> = None; // (next hop server pubkey, ip)
+    let mut entry_ip: Option<String> = None;
+    let mut exit_ip: Option<String> = None;
+
+    for i in (0..n).rev() {
+        let is_exit = i == n - 1;
+        let is_entry = i == 0;
+        // wg0 upstream peer: the entry faces the user's client; every other hop faces the
+        // previous hop's wg1.
+        let (peer_pubkey, peer_ip) = if is_entry {
+            (client_kp.public_base64(), "10.66.0.2".to_string())
+        } else {
+            (wg1_kps[i - 1].public_base64(), "10.67.0.2".to_string())
+        };
+        let next_hop = if is_exit {
+            None
+        } else {
+            let (npub, nip) = downstream.clone().unwrap();
+            Some(NextHop {
+                wg1_privkey: wg1_kps[i].private_base64(),
+                wg1_address: "10.67.0.2/32".into(),
+                peer_pubkey: npub,
+                peer_endpoint: format!("{nip}:51820"),
+            })
+        };
+        let params = CloudInitParams {
+            server_privkey: server_kps[i].private_base64(),
+            client_pubkey: peer_pubkey,
+            client_ip: peer_ip,
+            listen_port: 51820,
+            callback_token: rand_hex(16),
+            callback_hmac_key: rand_hex(32),
+            deadman_secs: 900,
+            next_hop,
+        };
+        let ud = match render_base64(&params) {
+            Ok(u) => u,
+            Err(e) => {
+                destroy_chain(&deps, &created).await;
+                return Err(e.to_string());
+            }
+        };
+        let spec = InstanceSpec {
+            region: regions[i].clone(),
+            instance_type: itype.clone(),
+            user_data: ud,
+            label: format!("sentinel-hop{i}"),
+        };
+        let inst = match deps.cloud.create(&spec).await {
+            Ok(x) => x,
+            Err(e) => {
+                destroy_chain(&deps, &created).await;
+                return Err(e.to_string());
+            }
+        };
+        created.push(inst.id.clone());
+
+        emit(&app, ConnectState::Booting);
+        let mut running = inst.clone();
+        for _ in 0..deps.max_boot_polls {
+            if let Ok(cur) = deps.cloud.get(&inst.id).await {
+                if cur.state == InstanceState::Running {
+                    running = cur;
+                    break;
+                }
+            }
+        }
+        if running.state != InstanceState::Running {
+            destroy_chain(&deps, &created).await;
+            return Err(format!("hop {i} did not boot in time"));
+        }
+        let ip = match running.ipv4.clone() {
+            Some(ip) => ip,
+            None => {
+                destroy_chain(&deps, &created).await;
+                return Err(format!("hop {i} reported no IP"));
+            }
+        };
+        if is_exit {
+            exit_ip = Some(ip.clone());
+        }
+        if is_entry {
+            entry_ip = Some(ip.clone());
+        }
+        downstream = Some((server_kps[i].public_base64(), ip));
+    }
+
+    let entry_ip = entry_ip.unwrap();
+
+    // Bring up the ONE local tunnel to the entry hop.
+    emit(&app, ConnectState::ExchangingKeys);
+    emit(&app, ConnectState::StartingTunnel);
+    let conf = ClientConf {
+        client_private_key: client_kp.private_base64(),
+        client_address: "10.66.0.2/32".into(),
+        dns: "1.1.1.1".into(),
+        server_public_key: server_kps[0].public_base64(),
+        server_endpoint: format!("{entry_ip}:51820"),
+        allowed_ips: full_tunnel(),
+        keepalive: 25,
+    };
+    if let Err(e) = deps.wg.up(&conf).await {
+        killswitch_clear_all();
+        destroy_chain(&deps, &created).await;
+        return Err(e.to_string());
+    }
+
+    // Optional kill switch, engaged against the entry endpoint.
+    if killswitch_enabled(&data_dir) {
+        if let Err(e) = killswitch_engage_for(&entry_ip) {
+            eprintln!("SENTINEL: kill switch engage failed ({e}); clearing to stay fail-safe");
+            killswitch_clear_all();
+        }
+    }
+
+    // chain is entry-first; `created` is exit-first.
+    let mut chain = created.clone();
+    chain.reverse();
+    let entry_id = chain[0].clone();
+
+    let stop = Arc::new(AtomicBool::new(false));
+    let started_at = now_secs();
+    spawn_metrics_loop(app.clone(), deps.wg.clone(), stop.clone(), started_at);
+    let active = VpnActive {
+        deps: deps.clone(),
+        instance_id: entry_id.clone(),
+        chain,
+        region: entry_label.clone(),
+        instance_type: itype.clone(),
+        egress_ip: exit_ip.clone(),
+        started_at,
+        stop,
+    };
+    state.inner.lock().unwrap().vpn = Some(active);
+    emit(
+        &app,
+        ConnectState::Connected {
+            instance_id: entry_id,
+            egress_ip: exit_ip,
+        },
+    );
+    Ok(())
+}
+
+/// Destroy every node id in a (partial) chain — used to clean up on any multi-hop failure so a
+/// half-built chain never leaves paid nodes running.
+async fn destroy_chain(deps: &ConnectDeps, ids: &[String]) {
+    for id in ids {
+        let _ = deps.cloud.delete(id).await;
+    }
+}
+
 #[tauri::command]
 pub async fn vpn_disconnect(
     app: AppHandle,
@@ -1108,7 +1366,12 @@ pub async fn vpn_disconnect(
     let mut emit = move |s: ConnectState| {
         let _ = apph.emit("vpn:state", state_json(&s, &r, &it));
     };
+    // Bring the tunnel down and destroy the ENTRY node. core_disconnect does wg.down + delete.
     let res = core_disconnect(&active.deps, &active.instance_id, &mut emit).await;
+    // Destroy every other hop in the chain too (multi-hop) — never leave a paid orphan behind.
+    for id in active.chain.iter().filter(|id| **id != active.instance_id) {
+        let _ = active.deps.cloud.delete(id).await;
+    }
 
     // Record the session regardless of teardown outcome.
     let ended = now_secs();
@@ -1359,6 +1622,13 @@ pub async fn vpn_disconnect_keep(
     let Some(active) = active else {
         return Err("not connected".into());
     };
+    if active.chain.len() > 1 {
+        // Keeping a multi-hop chain would leave several nodes billing; refuse and put it back.
+        state.inner.lock().unwrap().vpn = Some(active);
+        return Err(
+            "keep isn't supported for a multi-hop chain — use Disconnect to destroy it".into(),
+        );
+    }
     if kept_ids(&data_dir).len() >= MAX_KEPT_NODES {
         // Put it back so the caller can decide; refuse rather than silently destroy.
         state.inner.lock().unwrap().vpn = Some(active);

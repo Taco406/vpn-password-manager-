@@ -133,6 +133,16 @@ export async function vpnNodesDestroyAll(): Promise<number> {
   return core.invoke("vpn_nodes_destroy_all") as Promise<number>;
 }
 
+/**
+ * Connect through a CHAIN of exit nodes (multi-hop "bounce"). `regions` is entry→exit (2–3).
+ * Cost is N× a single node. Experimental; real-VPN (Linode) only.
+ */
+export async function vpnConnectMultihop(regions: string[], instanceType?: string): Promise<void> {
+  if (!inTauri()) throw new Error("Real VPN is only available in the desktop app.");
+  const core = await import("@tauri-apps/api/core");
+  await core.invoke("vpn_connect_multihop", { regions, instanceType: instanceType ?? null });
+}
+
 // --- Browser autofill (experimental) opt-in helpers -------------------------
 // Register/unregister this app as the Chrome/Edge native-messaging host. Not part of the
 // SentinelBridge contract (they only mean something in the shell); in the browser they

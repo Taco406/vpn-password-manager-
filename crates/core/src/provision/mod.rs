@@ -4,4 +4,4 @@ pub mod callback;
 pub mod cloudinit;
 
 pub use callback::{compute_mac, verify_callback, CallbackBody};
-pub use cloudinit::{render, render_base64, CloudInitParams};
+pub use cloudinit::{render, render_base64, CloudInitParams, NextHop};

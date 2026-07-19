@@ -20,6 +20,7 @@ import {
   vpnCostSummary,
   vpnNodeAction,
   vpnNodesDestroyAll,
+  vpnConnectMultihop,
   type VpnNode,
   type VpnCostSummary,
   syncStatus,
@@ -115,6 +116,7 @@ export function Settings() {
       <RealVpn />
       <NetGuard />
       <VpnNodes />
+      <MultiHop />
       <BrowserAutofill />
       <AccountSync />
       <Updates />
@@ -848,6 +850,105 @@ function BrowserAutofill() {
   );
 }
 
+function MultiHop() {
+  const [enabled, setEnabled] = useState(false);
+  const [regions, setRegions] = useState<{ id: string; label: string }[]>([]);
+  const [hops, setHops] = useState<string[]>(["", ""]);
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState("");
+
+  useEffect(() => {
+    void (async () => {
+      try {
+        const on = await vpnRealEnabled();
+        setEnabled(on);
+        if (on) {
+          const rs = await bridge.vpnRegions();
+          const opts = rs.map((r) => ({ id: r.id, label: r.label ?? r.id }));
+          setRegions(opts);
+          if (opts.length >= 2) setHops([opts[0].id, opts[1].id]);
+        }
+      } catch {
+        /* ignore */
+      }
+    })();
+  }, []);
+
+  if (!enabled) return null;
+
+  const setHop = (i: number, v: string) => setHops((h) => h.map((x, j) => (j === i ? v : x)));
+  const addHop = () => setHops((h) => (h.length < 3 ? [...h, regions[0]?.id ?? ""] : h));
+  const removeHop = () => setHops((h) => (h.length > 2 ? h.slice(0, -1) : h));
+
+  const connect = async () => {
+    if (hops.some((h) => !h)) {
+      setMsg("Pick a region for each hop.");
+      return;
+    }
+    setBusy(true);
+    setMsg("Building the chain… this provisions one node per hop and can take a minute.");
+    try {
+      await vpnConnectMultihop(hops);
+      setMsg("Connected through the chain. Disconnect on the VPN screen destroys every hop.");
+    } catch (e) {
+      setMsg(`Couldn't connect: ${errMsg(e)}`);
+    }
+    setBusy(false);
+  };
+
+  return (
+    <Card className="mb-4">
+      <div className="mb-2 flex items-center justify-between text-sm font-medium">
+        <span className="flex items-center gap-2">
+          <Globe size={15} /> Multi-hop (bounce)
+        </span>
+        <Badge tone="warn">experimental</Badge>
+      </div>
+      <p className="mb-3 text-xs text-[var(--text-secondary)]">
+        Route your traffic through 2–3 exit nodes in a row (entry → exit). More privacy, but{" "}
+        <span className="font-medium">cost is N× a single node</span> and latency adds up. One local
+        tunnel; the hops chain server-side. Windows-first and experimental — first real use is a test.
+      </p>
+      <div className="space-y-2">
+        {hops.map((h, i) => (
+          <div key={i} className="flex items-center gap-2 text-xs">
+            <span className="w-14 text-[var(--text-muted)]">
+              {i === 0 ? "Entry" : i === hops.length - 1 ? "Exit" : `Hop ${i + 1}`}
+            </span>
+            <select
+              value={h}
+              onChange={(e) => setHop(i, e.target.value)}
+              className="flex-1 rounded-[10px] border border-[var(--border-subtle)] bg-transparent px-2 py-1.5"
+            >
+              {regions.map((r) => (
+                <option key={r.id} value={r.id}>
+                  {r.label}
+                </option>
+              ))}
+            </select>
+          </div>
+        ))}
+      </div>
+      <div className="mt-3 flex flex-wrap items-center gap-3">
+        <button onClick={connect} disabled={busy} className="rounded-[10px] bg-[var(--accent)] px-3 py-2 text-sm text-black disabled:opacity-50">
+          {busy ? "Connecting…" : `Connect · ${hops.length} hops`}
+        </button>
+        {hops.length < 3 && (
+          <button onClick={addHop} disabled={busy} className="text-xs text-[var(--accent)] hover:underline">
+            + hop
+          </button>
+        )}
+        {hops.length > 2 && (
+          <button onClick={removeHop} disabled={busy} className="text-xs text-[var(--accent)] hover:underline">
+            − hop
+          </button>
+        )}
+        {msg && <span className="text-xs text-[var(--text-muted)]">{msg}</span>}
+      </div>
+    </Card>
+  );
+}
+
 function VpnNodes() {
   const [enabled, setEnabled] = useState(false);
   const [nodes, setNodes] = useState<VpnNode[]>([]);
@@ -1047,7 +1148,7 @@ function Updates() {
   return (
     <Card>
       <div className="mb-2 flex items-center justify-between text-sm font-medium">
-        Updates <Badge tone="accent">v0.1.11</Badge>
+        Updates <Badge tone="accent">v0.1.12</Badge>
       </div>
       <p className="mb-3 text-xs text-[var(--text-secondary)]">
         SENTINEL checks for signed updates on launch and installs them automatically. You can also check now.

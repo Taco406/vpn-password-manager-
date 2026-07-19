@@ -84,6 +84,7 @@ fn main() {
             vpn::net_status,
             vpn::net_set,
             vpn::killswitch_clear,
+            vpn::vpn_connect_multihop,
             vpn::vpn_disconnect_keep,
             vpn::vpn_nodes,
             vpn::vpn_cost_summary,
