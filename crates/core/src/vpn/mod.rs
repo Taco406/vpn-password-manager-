@@ -20,4 +20,4 @@ pub use session::{
     ServerPubkeyFetcher,
 };
 pub use speedtest::{MockSpeedTest, SpeedResult, SpeedTest};
-pub use sweep::orphan_sweep;
+pub use sweep::{orphan_sweep, orphan_sweep_keeping};

@@ -16,13 +16,14 @@ use sentinel_core::cloud::LinodeClient;
 use sentinel_core::error::{CoreError, Result as CoreResult};
 use sentinel_core::provision::{verify_callback, CallbackBody};
 use sentinel_core::vpn::{
-    connect as core_connect, disconnect as core_disconnect, orphan_sweep, ConnectDeps,
+    connect as core_connect, disconnect as core_disconnect, orphan_sweep_keeping, ConnectDeps,
     ConnectState, ServerPubkeyFetcher,
 };
 use sentinel_core::vpn::{CostTicker, HistoryStore, SessionRecord};
 use sentinel_core::wg::{render_client_conf, ClientConf, WgController, WgCounters};
 use serde::Serialize;
 use serde_json::json;
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::Arc;
@@ -1001,8 +1002,10 @@ pub async fn connect_real(
     let token = get_token().ok_or_else(|| "no Linode token configured".to_string())?;
     let deps = live_deps(token);
 
-    // Reap any orphaned nodes before creating a new one.
-    let _ = orphan_sweep(&*deps.cloud, None).await;
+    let data_dir = { state.inner.lock().unwrap().data_dir.clone() };
+    // Reap orphaned nodes before creating a new one — but keep any the user deliberately kept
+    // (registry), so connecting doesn't destroy their saved/stopped nodes.
+    let _ = orphan_sweep_keeping(&*deps.cloud, &kept_ids(&data_dir)).await;
 
     let (r, it) = (region.clone(), instance_type.clone());
     let apph = app.clone();
@@ -1023,7 +1026,6 @@ pub async fn connect_real(
     // leak. It's engaged AFTER the tunnel establishes and carves out the exit node's endpoint,
     // so it never blocks the tunnel from forming. A failure here is logged and cleaned up but
     // never fails an otherwise-working connection.
-    let data_dir = { state.inner.lock().unwrap().data_dir.clone() };
     if killswitch_enabled(&data_dir) {
         if let Some(ip) = conn.instance.ipv4.as_deref() {
             if let Err(e) = killswitch_engage_for(ip) {
@@ -1186,12 +1188,291 @@ pub fn vpn_history(state: State<AppState>, range: String) -> Vec<SessionRowOut> 
         .collect()
 }
 
-/// Reap any orphaned ephemeral nodes on launch (called from setup when a token exists).
-pub fn sweep_on_launch() {
+/// Reap any orphaned ephemeral nodes on launch (called from setup when a token exists), keeping
+/// any nodes the user deliberately kept (the registry) so a stopped/saved node survives a restart.
+pub fn sweep_on_launch(data_dir: PathBuf) {
     if let Some(token) = get_token() {
         tauri::async_runtime::spawn(async move {
             let deps = live_deps(token);
-            let _ = orphan_sweep(&*deps.cloud, None).await;
+            let _ = orphan_sweep_keeping(&*deps.cloud, &kept_ids(&data_dir)).await;
         });
     }
+}
+
+// ---------------------------------------------------------------------------
+// Node lifecycle (Phase 3, opt-in): keep-vs-destroy + manage multiple nodes
+// ---------------------------------------------------------------------------
+//
+// COST MODEL: a Linode that is powered OFF still bills (you pay until it's DESTROYED). So
+// "keep" saves your node/IP for a quick restart, but it does NOT stop the meter — only
+// destroy/delete does. The UI surfaces a running cost across all kept nodes, and the launch +
+// pre-connect orphan sweep excludes kept nodes (registry) so they aren't reaped from under you.
+// One tunnel is active at a time; keeping/managing several nodes is about the fleet, not
+// simultaneous tunnels (that's multi-hop, a later phase).
+
+/// Max nodes a user can keep, so a runaway can't quietly rack up an unbounded bill.
+const MAX_KEPT_NODES: usize = 5;
+
+fn registry_path(data_dir: &Path) -> PathBuf {
+    data_dir.join("vpn-nodes.json")
+}
+
+/// The set of node ids the user deliberately kept (excluded from the orphan sweep).
+fn kept_ids(data_dir: &Path) -> HashSet<String> {
+    std::fs::read_to_string(registry_path(data_dir))
+        .ok()
+        .and_then(|s| serde_json::from_str::<Vec<String>>(&s).ok())
+        .map(|v| v.into_iter().collect())
+        .unwrap_or_default()
+}
+
+fn write_kept(data_dir: &Path, ids: &HashSet<String>) {
+    let list: Vec<&String> = ids.iter().collect();
+    if let Ok(s) = serde_json::to_string(&list) {
+        let _ = std::fs::write(registry_path(data_dir), s);
+    }
+}
+
+fn kept_add(data_dir: &Path, id: &str) {
+    let mut ids = kept_ids(data_dir);
+    ids.insert(id.to_string());
+    write_kept(data_dir, &ids);
+}
+
+fn kept_remove(data_dir: &Path, id: &str) {
+    let mut ids = kept_ids(data_dir);
+    ids.remove(id);
+    write_kept(data_dir, &ids);
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NodeOut {
+    id: String,
+    region: String,
+    instance_type: String,
+    /// running | booting | provisioning | stopped | deleting | gone
+    state: String,
+    kept: bool,
+    current: bool,
+    hourly_usd: f64,
+}
+
+fn state_label(s: sentinel_core::cloud::InstanceState) -> &'static str {
+    use sentinel_core::cloud::InstanceState::*;
+    match s {
+        Provisioning => "provisioning",
+        Booting => "booting",
+        Running => "running",
+        Stopped => "stopped",
+        Deleting => "deleting",
+        Gone => "gone",
+    }
+}
+
+/// List every SENTINEL ephemeral node the account has, annotated with live state, whether it's
+/// kept, whether it's the currently-connected node, and its hourly cost. Requires a token.
+#[tauri::command]
+pub async fn vpn_nodes(state: State<'_, AppState>) -> std::result::Result<Vec<NodeOut>, String> {
+    let token = get_token().ok_or_else(|| "no Linode token configured".to_string())?;
+    let (data_dir, current) = {
+        let g = state.inner.lock().unwrap();
+        (
+            g.data_dir.clone(),
+            g.vpn.as_ref().map(|v| v.instance_id.clone()),
+        )
+    };
+    let deps = live_deps(token);
+    let kept = kept_ids(&data_dir);
+    let list = deps
+        .cloud
+        .list_ephemeral()
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(list
+        .into_iter()
+        .map(|i| NodeOut {
+            hourly_usd: hourly_for(&i.instance_type),
+            state: state_label(i.state).to_string(),
+            kept: kept.contains(&i.id),
+            current: current.as_deref() == Some(i.id.as_str()),
+            id: i.id,
+            region: i.region,
+            instance_type: i.instance_type,
+        })
+        .collect())
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CostSummary {
+    node_count: usize,
+    running: usize,
+    stopped: usize,
+    hourly_usd: f64,
+}
+
+/// Running cost across ALL existing ephemeral nodes (running + stopped both bill on Linode).
+#[tauri::command]
+pub async fn vpn_cost_summary() -> std::result::Result<CostSummary, String> {
+    let token = get_token().ok_or_else(|| "no Linode token configured".to_string())?;
+    let deps = live_deps(token);
+    let list = deps
+        .cloud
+        .list_ephemeral()
+        .await
+        .map_err(|e| e.to_string())?;
+    use sentinel_core::cloud::InstanceState;
+    let mut running = 0;
+    let mut stopped = 0;
+    let mut hourly = 0.0;
+    for i in &list {
+        hourly += hourly_for(&i.instance_type);
+        match i.state {
+            InstanceState::Stopped => stopped += 1,
+            InstanceState::Deleting | InstanceState::Gone => {}
+            _ => running += 1,
+        }
+    }
+    Ok(CostSummary {
+        node_count: list.len(),
+        running,
+        stopped,
+        hourly_usd: hourly,
+    })
+}
+
+/// Tear down the local tunnel WITHOUT destroying the node: power it off and keep it (registry),
+/// so it survives sweeps and can be restarted later. Note: a stopped Linode still bills.
+#[tauri::command]
+pub async fn vpn_disconnect_keep(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> std::result::Result<(), String> {
+    LAST_MANUAL_DISCONNECT.store(now_secs(), Ordering::Relaxed);
+    killswitch_clear_all();
+
+    let (active, data_dir) = {
+        let mut g = state.inner.lock().unwrap();
+        (g.vpn.take(), g.data_dir.clone())
+    };
+    let Some(active) = active else {
+        return Err("not connected".into());
+    };
+    if kept_ids(&data_dir).len() >= MAX_KEPT_NODES {
+        // Put it back so the caller can decide; refuse rather than silently destroy.
+        state.inner.lock().unwrap().vpn = Some(active);
+        return Err(format!(
+            "already keeping {MAX_KEPT_NODES} nodes — destroy one first (each kept node keeps billing)"
+        ));
+    }
+    active.stop.store(true, Ordering::Relaxed);
+
+    let last = active
+        .deps
+        .wg
+        .counters((now_secs() - active.started_at) as f64)
+        .await
+        .unwrap_or_default();
+
+    // Bring the local tunnel down, then power the node off (keep it).
+    let _ = active.deps.wg.down().await;
+    let power = active.deps.cloud.shutdown(&active.instance_id).await;
+    kept_add(&data_dir, &active.instance_id);
+
+    let apph = app.clone();
+    let _ = apph.emit(
+        "vpn:state",
+        state_json(&ConnectState::Idle, &active.region, &active.instance_type),
+    );
+
+    let ended = now_secs();
+    let hourly = hourly_for(&active.instance_type);
+    if let Ok(store) = history_store(&state) {
+        let _ = store.insert(&SessionRecord {
+            id: active.instance_id.clone(),
+            region: active.region.clone(),
+            instance_type: active.instance_type.clone(),
+            started_at: active.started_at,
+            ended_at: ended,
+            bytes_rx: last.rx_bytes as i64,
+            bytes_tx: last.tx_bytes as i64,
+            cost_usd: CostTicker::new(hourly, active.started_at).accrued(ended),
+            peak_cpu_pct: 0,
+            down_mbps: 0,
+            up_mbps: 0,
+        });
+    }
+    power.map_err(|e| e.to_string())
+}
+
+/// Power a specific node on/off/reboot or delete it. `action` ∈ start | stop | reboot | delete.
+/// If it targets the currently-connected node, the tunnel is torn down first (kill switch cleared).
+#[tauri::command]
+pub async fn vpn_node_action(
+    state: State<'_, AppState>,
+    id: String,
+    action: String,
+) -> std::result::Result<(), String> {
+    let token = get_token().ok_or_else(|| "no Linode token configured".to_string())?;
+    let deps = live_deps(token);
+
+    // If this node is the active tunnel, take it out and tear the tunnel down first (never leave a
+    // dangling conf). The lock is released before any await — MutexGuard is never held across one.
+    let (data_dir, teardown) = {
+        let mut g = state.inner.lock().unwrap();
+        let is_current = g.vpn.as_ref().map(|v| v.instance_id.as_str()) == Some(id.as_str());
+        let taken = if is_current { g.vpn.take() } else { None };
+        (g.data_dir.clone(), taken)
+    };
+    if let Some(active) = teardown {
+        active.stop.store(true, Ordering::Relaxed);
+        killswitch_clear_all();
+        let _ = active.deps.wg.down().await;
+    }
+
+    match action.as_str() {
+        "start" => deps.cloud.boot(&id).await.map_err(|e| e.to_string()),
+        "reboot" => deps.cloud.reboot(&id).await.map_err(|e| e.to_string()),
+        "stop" => {
+            let r = deps.cloud.shutdown(&id).await.map_err(|e| e.to_string());
+            if r.is_ok() {
+                if kept_ids(&data_dir).len() < MAX_KEPT_NODES {
+                    kept_add(&data_dir, &id);
+                }
+            }
+            r
+        }
+        "delete" => {
+            let r = deps.cloud.delete(&id).await.map_err(|e| e.to_string());
+            kept_remove(&data_dir, &id);
+            r
+        }
+        other => Err(format!("unknown node action: {other}")),
+    }
+}
+
+/// Panic button: disconnect if connected, then DESTROY every ephemeral node and clear the
+/// registry, so the billing meter stops on everything.
+#[tauri::command]
+pub async fn vpn_nodes_destroy_all(
+    state: State<'_, AppState>,
+) -> std::result::Result<usize, String> {
+    let token = get_token().ok_or_else(|| "no Linode token configured".to_string())?;
+    killswitch_clear_all();
+    let (active, data_dir) = {
+        let mut g = state.inner.lock().unwrap();
+        (g.vpn.take(), g.data_dir.clone())
+    };
+    let deps = live_deps(token);
+    if let Some(active) = active {
+        active.stop.store(true, Ordering::Relaxed);
+        let _ = active.deps.wg.down().await;
+    }
+    // Reap everything, keeping nothing.
+    let reaped = orphan_sweep_keeping(&*deps.cloud, &HashSet::new())
+        .await
+        .map_err(|e| e.to_string())?;
+    write_kept(&data_dir, &HashSet::new());
+    Ok(reaped.len())
 }

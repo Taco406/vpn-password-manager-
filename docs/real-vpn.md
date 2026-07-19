@@ -99,6 +99,23 @@ The region picker now measures a best-effort round-trip (a quick TCP connect to 
 Linode speedtest host, ~1s timeout, all regions probed in parallel) and shows it as `latencyMs`.
 If a probe fails it's simply omitted — the list never blocks or hangs on it.
 
+## Node management: power off vs destroy, and the fleet (experimental)
+
+By default a Connect creates a throwaway node and Disconnect **destroys** it — you pay only while
+connected. If you'd rather keep a node around (same IP, instant restart), **Settings → VPN exit
+nodes** lets you manage the fleet:
+
+- **Stop** — powers a node **off** but keeps it. ⚠️ **A stopped Linode still bills** (you pay for its
+  disk until it's destroyed) — only **Destroy** stops the meter. The card shows a running
+  **$/hour** total across all your nodes so there's no surprise.
+- **Start / Reboot** — power a stopped node back on, or reboot a running one.
+- **Destroy** — delete a node for good (stops its billing).
+- **Destroy all nodes** — panic button: disconnect and delete everything, stopping all billing.
+
+Kept nodes are recorded locally so the launch/pre-connect orphan-sweep won't reap them, and there's
+a **cap of 5 kept nodes** so a bug can't quietly run up an unbounded bill. Only one tunnel is active
+at a time; running traffic through several nodes at once (multi-hop) is a later addition.
+
 ## Known limitations (this is a first cut)
 
 - **Windows-first.** The controller drives the official WireGuard app; macOS/Linux use `wg-quick`
