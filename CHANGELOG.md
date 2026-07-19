@@ -8,6 +8,21 @@ The format follows [Keep a Changelog](https://keepachangelog.com/). Versions are
 [semantic](https://semver.org/). **Add a new `## [x.y.z]` section at the top in the same PR
 that bumps the app version** — that's how "the changelog updates on every merge."
 
+## [0.1.18] — 2026-07-19
+
+### Fixed
+- **A dropped VPN can no longer leave your PC without internet.** When a WireGuard full-tunnel is torn
+  down uncleanly it can leave behind "capture-all" routes and a DNS policy that even a full
+  `netsh int ip reset` + reboot won't clear — which could strand your connection. SENTINEL now scrubs
+  those leftovers (the two `0.0.0.0/1` + `128.0.0.0/1` routes, the WireGuard DNS policy, and the DNS
+  cache) **automatically on disconnect, on any failed connect, and on every launch** — so the app
+  self-heals a stranded connection the next time you open it.
+
+### Changed
+- The **Settings → WireGuard** recovery button is now **"Restore internet"** and does the full scrub
+  (leftover tunnel + firewall rules + routes + DNS) in one click, with a note that the last-resort fix
+  for a truly stuck adapter is to uninstall WireGuard and reboot.
+
 ## [0.1.17] — 2026-07-19
 
 ### Added
@@ -253,6 +268,7 @@ is the next phase. Windows-first and experimental — the live Linode path can't
   Releases). Local-first vault UI, command palette, generator, and health audit. VPN screen
   runs a built-in simulation until a Linode token is added.
 
+[0.1.18]: https://github.com/Taco406/vpn-password-manager-/releases/tag/v0.1.18
 [0.1.17]: https://github.com/Taco406/vpn-password-manager-/releases/tag/v0.1.17
 [0.1.16]: https://github.com/Taco406/vpn-password-manager-/releases/tag/v0.1.16
 [0.1.15]: https://github.com/Taco406/vpn-password-manager-/releases/tag/v0.1.15

@@ -726,13 +726,16 @@ function WireGuardMonitor() {
           {busy ? "Checking…" : "Re-check"}
         </button>
         <button onClick={() => void repair()} className="text-[var(--danger)] hover:underline">
-          Remove stuck tunnel (restore internet)
+          Restore internet
         </button>
       </div>
       {repairMsg && <p className="mt-2 text-xs text-[var(--text-muted)]">{repairMsg}</p>}
       <p className="mt-2 text-[11px] text-[var(--text-muted)]">
-        If a failed Connect ever leaves you without internet, click <span className="font-medium">Remove stuck
-        tunnel</span> above — it deletes any leftover SENTINEL tunnel and clears firewall rules.
+        If a failed Connect ever leaves you without internet, click <span className="font-medium">Restore
+        internet</span> above — it removes any leftover SENTINEL tunnel, clears firewall rules, and scrubs
+        the routes and DNS policy WireGuard can leave behind (the app also does this automatically on
+        disconnect and on launch). Last resort if it persists: uninstall WireGuard (Settings → Apps) and
+        reboot, which removes any stuck adapter.
       </p>
     </Card>
   );
@@ -1468,7 +1471,7 @@ function Updates() {
   return (
     <Card>
       <div className="mb-2 flex items-center justify-between text-sm font-medium">
-        Updates <Badge tone="accent">v0.1.17</Badge>
+        Updates <Badge tone="accent">v0.1.18</Badge>
       </div>
       <p className="mb-3 text-xs text-[var(--text-secondary)]">
         SENTINEL checks for signed updates on launch and installs them automatically. You can also check now.

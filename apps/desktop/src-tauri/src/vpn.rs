@@ -394,9 +394,10 @@ pub fn open_url(url: String) -> std::result::Result<(), String> {
 pub async fn vpn_repair_tunnel() -> std::result::Result<(), String> {
     let _ = SystemWgController::new().down().await;
     killswitch_clear_all();
+    flush_wg_network(); // also scrub leftover routes / NRPT DNS policy / DNS cache
     crate::applog::info(
         "vpn.repair",
-        "removed leftover tunnel + cleared kill-switch rules",
+        "restore internet: removed tunnel, cleared kill-switch, scrubbed routes/DNS",
     );
     Ok(())
 }
@@ -509,6 +510,9 @@ impl WgController for SystemWgController {
             run("wg-quick", &["down", &path]).await
         };
         let _ = std::fs::remove_file(&self.conf_path);
+        // Scrub any routes/DNS the tunnel could leave behind so tearing it down can never strand
+        // the PC's internet (even if the uninstall above was partial).
+        flush_wg_network();
         res.map(|_| ())
     }
 
@@ -667,6 +671,44 @@ fn netsh(args: &[&str]) -> Result<(), String> {
             args.join(" "),
             String::from_utf8_lossy(&out.stderr).trim()
         ))
+    }
+}
+
+/// Best-effort scrub of the Windows leftovers a torn-down WireGuard full-tunnel can leave behind
+/// and that `netsh winsock/ip reset` does NOT clear — which is what stranded a user's internet
+/// even after a reboot: the two "capture-all" routes WireGuard installs, the NRPT DNS policy that
+/// forces DNS to the tunnel's server, and the DNS cache. After this, a removed tunnel can't keep
+/// the PC offline. Idempotent; missing leftovers are not errors. No-op off Windows.
+pub fn flush_wg_network() {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        let quiet = |program: &str, args: &[&str]| {
+            let _ = std::process::Command::new(program)
+                .args(args)
+                .creation_flags(CREATE_NO_WINDOW)
+                .output();
+        };
+        // WireGuard implements AllowedIPs=0.0.0.0/0 as two /1 routes through the tunnel; if the
+        // adapter is torn down uncleanly these can linger and black-hole all traffic. Delete both
+        // ("element not found" is fine when they're already gone).
+        quiet("route", &["delete", "0.0.0.0", "mask", "128.0.0.0"]);
+        quiet("route", &["delete", "128.0.0.0", "mask", "128.0.0.0"]);
+        // Remove only NRPT rules that force DNS to the tunnel's server (we set dns=1.1.1.1), so we
+        // never disturb unrelated policy. netsh resets do NOT clear NRPT — this is the piece that
+        // survived a full reset + reboot.
+        quiet(
+            "powershell",
+            &[
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                "Get-DnsClientNrptRule | Where-Object { $_.NameServers -contains '1.1.1.1' } | Remove-DnsClientNrptRule -Force",
+            ],
+        );
+        // Drop stale cached lookups so name resolution recovers immediately.
+        quiet("ipconfig", &["/flushdns"]);
     }
 }
 

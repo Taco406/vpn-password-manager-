@@ -144,6 +144,18 @@ first bounce as a test and watch your Linode billing page.
 - The kill switch uses Windows Firewall rules; because it couldn't be exercised against a live
   Windows machine + Linode from the build environment, treat it as experimental — if you ever lose
   connectivity while connected, hit **Clear kill-switch rules** (or run the `netsh` command above).
+
+### If your internet won't work after using the VPN
+
+A WireGuard full-tunnel can, on an unclean teardown, leave routing/DNS behind that even a
+`netsh int ip reset` + reboot won't clear. SENTINEL now scrubs these automatically on disconnect and
+on launch, but if you're ever stuck:
+
+1. **Settings → WireGuard → Restore internet** — removes any leftover tunnel, clears firewall rules,
+   and deletes WireGuard's capture-all routes + its DNS policy. Just **relaunching SENTINEL** does the
+   same scrub on startup.
+2. **Last resort (removes a stuck adapter):** uninstall **WireGuard** (Windows Settings → Apps →
+   Installed apps → WireGuard → Uninstall) and **reboot**. You can reinstall it afterward.
 - Because this couldn't be tested against a live Linode from the build environment, **you are the
   first real-world test** — if a connect fails, the error message on the VPN screen says which
   stage failed; send it over and it's usually a quick fix.
