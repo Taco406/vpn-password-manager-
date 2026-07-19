@@ -76,6 +76,63 @@ export async function killswitchClear(): Promise<void> {
   await core.invoke("killswitch_clear");
 }
 
+// --- VPN node lifecycle (experimental, real-VPN only): keep vs destroy + manage the fleet ---
+
+export interface VpnNode {
+  id: string;
+  region: string;
+  instanceType: string;
+  state: string; // running | booting | provisioning | stopped | deleting | gone
+  kept: boolean;
+  current: boolean;
+  hourlyUsd: number;
+}
+
+export interface VpnCostSummary {
+  nodeCount: number;
+  running: number;
+  stopped: number;
+  hourlyUsd: number;
+}
+
+/** List every SENTINEL exit node on the account, with live state + whether it's kept/current. */
+export async function vpnNodes(): Promise<VpnNode[]> {
+  if (!inTauri()) return [];
+  const core = await import("@tauri-apps/api/core");
+  return core.invoke("vpn_nodes") as Promise<VpnNode[]>;
+}
+
+/** Running cost across all existing nodes (running + stopped both bill on Linode). */
+export async function vpnCostSummary(): Promise<VpnCostSummary> {
+  if (!inTauri()) return { nodeCount: 0, running: 0, stopped: 0, hourlyUsd: 0 };
+  const core = await import("@tauri-apps/api/core");
+  return core.invoke("vpn_cost_summary") as Promise<VpnCostSummary>;
+}
+
+/** Disconnect but KEEP the node (power it off instead of destroying it). Still bills until destroyed. */
+export async function vpnDisconnectKeep(): Promise<void> {
+  if (!inTauri()) throw new Error("Real VPN is only available in the desktop app.");
+  const core = await import("@tauri-apps/api/core");
+  await core.invoke("vpn_disconnect_keep");
+}
+
+/** Power a node start | stop | reboot, or delete it. */
+export async function vpnNodeAction(
+  id: string,
+  action: "start" | "stop" | "reboot" | "delete",
+): Promise<void> {
+  if (!inTauri()) throw new Error("Real VPN is only available in the desktop app.");
+  const core = await import("@tauri-apps/api/core");
+  await core.invoke("vpn_node_action", { id, action });
+}
+
+/** Panic button: destroy every node and stop all billing. Returns how many were destroyed. */
+export async function vpnNodesDestroyAll(): Promise<number> {
+  if (!inTauri()) return 0;
+  const core = await import("@tauri-apps/api/core");
+  return core.invoke("vpn_nodes_destroy_all") as Promise<number>;
+}
+
 // --- Browser autofill (experimental) opt-in helpers -------------------------
 // Register/unregister this app as the Chrome/Edge native-messaging host. Not part of the
 // SentinelBridge contract (they only mean something in the shell); in the browser they

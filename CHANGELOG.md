@@ -8,6 +8,21 @@ The format follows [Keep a Changelog](https://keepachangelog.com/). Versions are
 [semantic](https://semver.org/). **Add a new `## [x.y.z]` section at the top in the same PR
 that bumps the app version** — that's how "the changelog updates on every merge."
 
+## [0.1.11] — 2026-07-19
+
+### Added
+- **VPN node management (power off vs destroy + manage the fleet).** Real-VPN only. Under
+  **Settings → VPN exit nodes** you can now list every exit node with its live state, **stop**
+  (power off) vs **destroy** (delete), **start**, **reboot**, and **Destroy all**. A running
+  **cost meter** shows the hourly total across all nodes.
+- **Cost safety:** a stopped Linode *still bills* — only destroying it stops the meter, and the
+  UI says so plainly. Kept/stopped nodes are recorded in a registry so the launch and pre-connect
+  orphan-sweep no longer reaps them, and there's a **max of 5 kept nodes** so a bug can't rack up
+  an unbounded bill.
+
+_Note: one tunnel is active at a time; running traffic through several nodes at once (multi-hop)
+is the next phase. Windows-first and experimental — the live Linode path can't be exercised in CI._
+
 ## [0.1.10] — 2026-07-19
 
 ### Security
@@ -116,6 +131,7 @@ that bumps the app version** — that's how "the changelog updates on every merg
   Releases). Local-first vault UI, command palette, generator, and health audit. VPN screen
   runs a built-in simulation until a Linode token is added.
 
+[0.1.11]: https://github.com/Taco406/vpn-password-manager-/releases/tag/v0.1.11
 [0.1.10]: https://github.com/Taco406/vpn-password-manager-/releases/tag/v0.1.10
 [0.1.9]: https://github.com/Taco406/vpn-password-manager-/releases/tag/v0.1.9
 [0.1.8]: https://github.com/Taco406/vpn-password-manager-/releases/tag/v0.1.8

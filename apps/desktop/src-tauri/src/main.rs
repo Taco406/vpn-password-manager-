@@ -35,7 +35,7 @@ fn main() {
                 .path()
                 .app_data_dir()
                 .unwrap_or_else(|_| std::env::temp_dir().join("sentinel"));
-            match state::AppState::new_persistent(data_dir) {
+            match state::AppState::new_persistent(data_dir.clone()) {
                 Ok(s) => {
                     app.manage(s);
                 }
@@ -44,8 +44,9 @@ fn main() {
                     app.manage(state::AppState::new_memory_fallback());
                 }
             }
-            // If real VPN is configured, reap any orphaned ephemeral nodes from a prior crash.
-            vpn::sweep_on_launch();
+            // If real VPN is configured, reap any orphaned ephemeral nodes from a prior crash
+            // (keeping any nodes the user deliberately kept — see the VPN node registry).
+            vpn::sweep_on_launch(data_dir);
             // Background poller: auto-connect on untrusted Wi-Fi (opt-in; self-gating each tick).
             vpn::spawn_autoconnect_poller(app.handle().clone());
             Ok(())
@@ -83,6 +84,11 @@ fn main() {
             vpn::net_status,
             vpn::net_set,
             vpn::killswitch_clear,
+            vpn::vpn_disconnect_keep,
+            vpn::vpn_nodes,
+            vpn::vpn_cost_summary,
+            vpn::vpn_node_action,
+            vpn::vpn_nodes_destroy_all,
             sync::sync_status,
             sync::sync_set_config,
             sync::auth_google_signin,

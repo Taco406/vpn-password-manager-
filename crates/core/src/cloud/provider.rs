@@ -14,6 +14,9 @@ pub enum InstanceState {
     Provisioning,
     Booting,
     Running,
+    /// Powered off but still existing (and still billing on Linode). Only a `delete` stops the
+    /// meter — a kept-but-stopped node is an intentional, opt-in choice, surfaced with its cost.
+    Stopped,
     Deleting,
     Gone,
 }
@@ -57,4 +60,11 @@ pub trait CloudProvider: Send + Sync {
     async fn regions(&self) -> Result<Vec<Region>>;
     /// Hourly USD price for an instance type.
     fn price_per_hour(&self, instance_type: &str) -> f64;
+
+    /// Power a node OFF but keep it (it keeps billing until `delete`). Opt-in node lifecycle.
+    async fn shutdown(&self, id: &str) -> Result<()>;
+    /// Power a stopped node back ON.
+    async fn boot(&self, id: &str) -> Result<()>;
+    /// Reboot a running node.
+    async fn reboot(&self, id: &str) -> Result<()>;
 }

@@ -157,6 +157,33 @@ impl CloudProvider for MockCloud {
             _ => 0.0075,
         }
     }
+
+    async fn shutdown(&self, id: &str) -> Result<()> {
+        let mut map = self.instances.lock().unwrap();
+        let mi = map
+            .get_mut(id)
+            .ok_or_else(|| CoreError::NotFound(format!("instance {id}")))?;
+        mi.inst.state = InstanceState::Stopped;
+        mi.boot_polls_left = 0;
+        Ok(())
+    }
+
+    async fn boot(&self, id: &str) -> Result<()> {
+        let mut map = self.instances.lock().unwrap();
+        let mi = map
+            .get_mut(id)
+            .ok_or_else(|| CoreError::NotFound(format!("instance {id}")))?;
+        mi.inst.state = InstanceState::Booting;
+        mi.boot_polls_left = self.boot_polls;
+        if self.boot_polls == 0 {
+            mi.inst.state = InstanceState::Running;
+        }
+        Ok(())
+    }
+
+    async fn reboot(&self, id: &str) -> Result<()> {
+        self.boot(id).await
+    }
 }
 
 #[cfg(test)]
@@ -201,5 +228,37 @@ mod tests {
         let cloud = MockCloud::new(0);
         cloud.set_fail_create(true);
         assert!(cloud.create(&spec()).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn shutdown_boot_reboot_transitions() {
+        let cloud = MockCloud::new(0);
+        let inst = cloud.create(&spec()).await.unwrap();
+        // running → stopped (still exists / still "billing")
+        cloud.shutdown(&inst.id).await.unwrap();
+        assert_eq!(
+            cloud.get(&inst.id).await.unwrap().state,
+            InstanceState::Stopped
+        );
+        assert!(cloud
+            .list_ephemeral()
+            .await
+            .unwrap()
+            .iter()
+            .any(|i| i.id == inst.id));
+        // stopped → running
+        cloud.boot(&inst.id).await.unwrap();
+        assert_eq!(
+            cloud.get(&inst.id).await.unwrap().state,
+            InstanceState::Running
+        );
+        // reboot keeps it running
+        cloud.reboot(&inst.id).await.unwrap();
+        assert_eq!(
+            cloud.get(&inst.id).await.unwrap().state,
+            InstanceState::Running
+        );
+        // power ops on a missing node error
+        assert!(cloud.shutdown("nope").await.is_err());
     }
 }

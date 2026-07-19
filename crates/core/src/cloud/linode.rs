@@ -43,6 +43,7 @@ fn map_state(status: &str) -> InstanceState {
         "provisioning" | "migrating" | "rebuilding" => InstanceState::Provisioning,
         "booting" | "rebooting" => InstanceState::Booting,
         "running" => InstanceState::Running,
+        "offline" | "stopped" => InstanceState::Stopped,
         "shutting_down" | "deleting" => InstanceState::Deleting,
         _ => InstanceState::Provisioning,
     }
@@ -193,5 +194,32 @@ impl CloudProvider for LinodeClient {
             "g6-dedicated-4" => 0.108,
             _ => 0.0075,
         }
+    }
+
+    async fn shutdown(&self, id: &str) -> Result<()> {
+        self.power(id, "shutdown").await
+    }
+
+    async fn boot(&self, id: &str) -> Result<()> {
+        self.power(id, "boot").await
+    }
+
+    async fn reboot(&self, id: &str) -> Result<()> {
+        self.power(id, "reboot").await
+    }
+}
+
+impl LinodeClient {
+    /// POST a power action (`boot`/`shutdown`/`reboot`) to a Linode instance.
+    async fn power(&self, id: &str, action: &str) -> Result<()> {
+        self.http
+            .post(format!("{API}/linode/instances/{id}/{action}"))
+            .bearer_auth(&self.token)
+            .send()
+            .await
+            .map_err(Self::net)?
+            .error_for_status()
+            .map_err(Self::net)?;
+        Ok(())
     }
 }
