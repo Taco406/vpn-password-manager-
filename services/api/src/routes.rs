@@ -3,7 +3,7 @@
 use crate::auth;
 use crate::error::{ApiError, ApiResult};
 use crate::state::{AppState, Auth, PendingAuth};
-use axum::extract::{Path, State};
+use axum::extract::{ConnectInfo, Path, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::routing::{get, post};
 use axum::{Json, Router};
@@ -12,6 +12,7 @@ use rand::RngCore;
 use sentinel_core::crypto::{self, Key32, Nonce24};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use std::net::SocketAddr;
 use std::time::Duration;
 use uuid::Uuid;
 
@@ -69,9 +70,10 @@ struct PendingResp {
 async fn auth_google(
     State(st): State<AppState>,
     headers: HeaderMap,
+    peer: PeerAddr,
     Json(req): Json<GoogleReq>,
 ) -> ApiResult<Json<PendingResp>> {
-    rate_limit(&st, &headers, "auth_google", 10, 60)?;
+    rate_limit(&st, &headers, peer.0, "auth_google", 10, 60)?;
     if req.device.name.len() > 64 || !valid_platform(&req.device.platform) {
         return Err(ApiError::BadRequest("invalid device".into()));
     }
@@ -205,10 +207,18 @@ struct TokensResp {
 async fn totp_verify(
     State(st): State<AppState>,
     headers: HeaderMap,
+    peer: PeerAddr,
     p: PendingAuth,
     Json(req): Json<TotpVerifyReq>,
 ) -> ApiResult<Json<TokensResp>> {
-    rate_limit(&st, &headers, &format!("totp:{}", p.account), 10, 60)?;
+    rate_limit(
+        &st,
+        &headers,
+        peer.0,
+        &format!("totp:{}", p.account),
+        10,
+        60,
+    )?;
 
     // Enforce lockout.
     let locked: Option<time::OffsetDateTime> =
@@ -600,10 +610,18 @@ async fn unlock_create(
     State(st): State<AppState>,
     a: Auth,
     headers: HeaderMap,
+    peer: PeerAddr,
     Json(req): Json<UnlockCreateReq>,
 ) -> ApiResult<Json<serde_json::Value>> {
     require_approved_device(&st, a.device).await?;
-    rate_limit(&st, &headers, &format!("unlock:{}", a.account), 5, 60)?;
+    rate_limit(
+        &st,
+        &headers,
+        peer.0,
+        &format!("unlock:{}", a.account),
+        5,
+        60,
+    )?;
     if req.kind != "unlock" && req.kind != "new_device" {
         return Err(ApiError::BadRequest("bad kind".into()));
     }
@@ -734,21 +752,57 @@ async fn push_register(
 
 // --- helpers --------------------------------------------------------------
 
+/// The peer socket address from the TCP connection, if the server was started with connection
+/// info (`into_make_service_with_connect_info`, i.e. production). `None` under the in-process
+/// test harness (`oneshot`). Infallible so it never blocks a request.
+pub struct PeerAddr(pub Option<SocketAddr>);
+
+impl<S: Send + Sync> axum::extract::FromRequestParts<S> for PeerAddr {
+    type Rejection = std::convert::Infallible;
+    async fn from_request_parts(
+        parts: &mut axum::http::request::Parts,
+        _state: &S,
+    ) -> Result<Self, Self::Rejection> {
+        Ok(PeerAddr(
+            parts
+                .extensions
+                .get::<ConnectInfo<SocketAddr>>()
+                .map(|c| c.0),
+        ))
+    }
+}
+
 fn rate_limit(
     st: &AppState,
     headers: &HeaderMap,
+    peer: Option<std::net::SocketAddr>,
     action: &str,
     max: usize,
     secs: u64,
 ) -> ApiResult<()> {
-    let ip = headers
-        .get("x-forwarded-for")
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("local");
-    let key = format!("{action}:{ip}");
+    let key = format!("{action}:{}", client_ip(st, headers, peer));
     if st.limiter.check(&key, max, Duration::from_secs(secs)) {
         Ok(())
     } else {
         Err(ApiError::RateLimited)
     }
+}
+
+/// The client's identity for rate limiting. By default this is the real peer IP (from the TCP
+/// connection), which a client cannot spoof. Only when explicitly configured to run behind a
+/// trusted proxy (`SENTINEL_TRUST_FORWARDED_FOR`) do we honor the first `X-Forwarded-For` hop.
+fn client_ip(st: &AppState, headers: &HeaderMap, peer: Option<std::net::SocketAddr>) -> String {
+    if st.config.trust_forwarded_for {
+        if let Some(fwd) = headers
+            .get("x-forwarded-for")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|s| s.split(',').next())
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+        {
+            return fwd.to_string();
+        }
+    }
+    peer.map(|p| p.ip().to_string())
+        .unwrap_or_else(|| "local".to_string())
 }

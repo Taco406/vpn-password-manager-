@@ -10,6 +10,17 @@ pub struct Config {
     pub google_client_id: Option<String>,
     /// 32-byte key that encrypts account TOTP secrets at rest (D8). Generated if unset.
     pub totp_enc_key: [u8; 32],
+    /// True when `SENTINEL_ENV=production`. In production the server refuses to boot with
+    /// insecure fallbacks (mock Google verifier, ephemeral JWT key, generated TOTP key).
+    pub production: bool,
+    /// Trust the `X-Forwarded-For` header for the client IP (only when behind a proxy that
+    /// sets it). Off by default; when off, rate limiting keys off the real peer address so a
+    /// client can't spoof its way past the limiter. Set `SENTINEL_TRUST_FORWARDED_FOR=1`.
+    pub trust_forwarded_for: bool,
+    /// Browser origins allowed by CORS in production (comma-separated
+    /// `SENTINEL_CORS_ALLOWED_ORIGINS`). Empty = allow no browser origin (the desktop app is a
+    /// native client and is unaffected by CORS).
+    pub cors_allowed_origins: Vec<String>,
 }
 
 /// The ES256 keypair used to sign/verify access JWTs (D18).
@@ -82,11 +93,96 @@ impl Config {
             }
         };
 
+        let production = std::env::var("SENTINEL_ENV")
+            .map(|v| v.eq_ignore_ascii_case("production"))
+            .unwrap_or(false);
+        let trust_forwarded_for = std::env::var("SENTINEL_TRUST_FORWARDED_FOR")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false);
+        let cors_allowed_origins = std::env::var("SENTINEL_CORS_ALLOWED_ORIGINS")
+            .ok()
+            .map(|v| {
+                v.split(',')
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect()
+            })
+            .unwrap_or_default();
+
         Ok(Config {
             bind,
             database_url,
             google_client_id,
             totp_enc_key,
+            production,
+            trust_forwarded_for,
+            cors_allowed_origins,
         })
+    }
+
+    /// In production, refuse to run on insecure dev fallbacks. `jwt_pem_set` / `totp_key_set`
+    /// report whether the corresponding secrets are present in the environment. Returns the
+    /// list of missing required secrets (empty = OK). A no-op outside production.
+    pub fn check_production_secrets(
+        &self,
+        jwt_pem_set: bool,
+        totp_key_set: bool,
+    ) -> Vec<&'static str> {
+        if !self.production {
+            return Vec::new();
+        }
+        [
+            ("SENTINEL_JWT_ES256_PEM", jwt_pem_set),
+            ("GOOGLE_OAUTH_CLIENT_ID", self.google_client_id.is_some()),
+            ("SENTINEL_TOTP_ENC_KEY", totp_key_set),
+        ]
+        .into_iter()
+        .filter_map(|(name, present)| if present { None } else { Some(name) })
+        .collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn cfg(production: bool, google: Option<&str>) -> Config {
+        Config {
+            bind: "127.0.0.1:0".into(),
+            database_url: "postgres://x".into(),
+            google_client_id: google.map(|s| s.to_string()),
+            totp_enc_key: [0u8; 32],
+            production,
+            trust_forwarded_for: false,
+            cors_allowed_origins: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn non_production_never_requires_secrets() {
+        assert!(cfg(false, None)
+            .check_production_secrets(false, false)
+            .is_empty());
+    }
+
+    #[test]
+    fn production_requires_all_three_secrets() {
+        let missing = cfg(true, None).check_production_secrets(false, false);
+        assert!(missing.contains(&"SENTINEL_JWT_ES256_PEM"));
+        assert!(missing.contains(&"GOOGLE_OAUTH_CLIENT_ID"));
+        assert!(missing.contains(&"SENTINEL_TOTP_ENC_KEY"));
+    }
+
+    #[test]
+    fn production_with_all_secrets_is_ok() {
+        assert!(cfg(true, Some("client-id"))
+            .check_production_secrets(true, true)
+            .is_empty());
+    }
+
+    #[test]
+    fn production_reports_only_the_missing_one() {
+        let missing = cfg(true, Some("client-id")).check_production_secrets(true, false);
+        assert_eq!(missing, vec!["SENTINEL_TOTP_ENC_KEY"]);
     }
 }

@@ -102,6 +102,11 @@ jobs:
           node-version: 22
           cache: pnpm
       - run: pnpm install --frozen-lockfile
-      - run: pnpm audit --prod || true
+      # Blocking: fail the build on any HIGH/CRITICAL advisory in production dependencies.
+      # (Moderate/low stay advisory to avoid churn from unfixable transitive notices.)
+      - name: pnpm audit (prod, high+)
+        run: pnpm audit --prod --audit-level high
+      - name: pnpm audit (all, advisory)
+        run: pnpm audit || true
       - name: plaintext-secret audit
         run: bash scripts/plaintext-audit.sh

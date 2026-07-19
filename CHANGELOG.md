@@ -8,6 +8,20 @@ The format follows [Keep a Changelog](https://keepachangelog.com/). Versions are
 [semantic](https://semver.org/). **Add a new `## [x.y.z]` section at the top in the same PR
 that bumps the app version** — that's how "the changelog updates on every merge."
 
+## [0.1.10] — 2026-07-19
+
+### Security
+- **Full security review** (see `docs/security-review-2026-07.md`). The crypto core came out
+  clean; the fixes below address dependency, server-hardening, and doc-integrity findings.
+- **Fixed a high-severity dependency advisory** (`@remix-run/router` XSS via open redirect,
+  GHSA-2w69-qvjg-hvjx) by pinning it to a patched version. CI now fails on any high/critical
+  advisory in production dependencies.
+- **Sync server (self-hosted) hardening:** with `SENTINEL_ENV=production` the server refuses to
+  boot on insecure dev fallbacks (mock Google verifier / ephemeral JWT key / missing TOTP key);
+  rate limiting now keys off the real client IP instead of a spoofable header; added CORS and
+  request-tracing layers.
+- Corrected `SECURITY.md` so every threat maps to a test/guard that actually exists.
+
 ## [0.1.9] — 2026-07-19
 
 ### Added
@@ -102,6 +116,7 @@ that bumps the app version** — that's how "the changelog updates on every merg
   Releases). Local-first vault UI, command palette, generator, and health audit. VPN screen
   runs a built-in simulation until a Linode token is added.
 
+[0.1.10]: https://github.com/Taco406/vpn-password-manager-/releases/tag/v0.1.10
 [0.1.9]: https://github.com/Taco406/vpn-password-manager-/releases/tag/v0.1.9
 [0.1.8]: https://github.com/Taco406/vpn-password-manager-/releases/tag/v0.1.8
 [0.1.7]: https://github.com/Taco406/vpn-password-manager-/releases/tag/v0.1.7

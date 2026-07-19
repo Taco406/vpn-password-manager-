@@ -28,8 +28,9 @@ and the invariants that make those guarantees hold — each mapped to an automat
 The shipped binary contains **no secrets** — no keys, tokens, or vault data are baked
 in. Configuration and the Linode token live in the OS keychain on the user's machine,
 never in the bundle.
-→ Test: `no_secrets_in_artifacts` greps built artifacts + source for key-shaped
-material; `platform::secrets` stores only in the keychain (mock = 0600 file, test-only).
+→ Guard: `scripts/plaintext-audit.sh` (CI, **blocking**) greps the tree for PEM private
+keys, Linode/Google secret patterns, and seeded plaintext canaries in any `vault.db`/`*.vault`
+artifact; `platform::secrets` stores only in the keychain (mock = in-memory, test-only).
 
 ### T2 — Attacker steals the vault file / app-data directory
 The local vault (`vault.db`) holds only per-item AEAD ciphertext. Without the vault key
@@ -37,7 +38,9 @@ The local vault (`vault.db`) holds only per-item AEAD ciphertext. Without the va
 the paired iPhone, or the recovery kit — nothing decrypts. Auto-lock + zeroize mean a
 grabbed-while-running memory image has a narrow window.
 → Tests: `vault::envelope` tamper/wrong-key tests (AEAD open fails); `keyring` wrap/
-unwrap round-trip proves the key is recoverable *only* with a wrapper; `zeroize_on_lock`.
+unwrap round-trip proves the key is recoverable *only* with a wrapper;
+`security_gate::locking_prevents_access` proves a locked session yields no plaintext, and
+`Key32`/`SecretBytes` are `ZeroizeOnDrop`.
 
 ### T3 — Full server database dump **plus** compromised Google account
 The brief's hard requirement. The server never holds any unwrap material. A dump gives
@@ -51,13 +54,16 @@ Neither yields the vault key.
 Autofill is offered only for entries whose saved URL matches the page's registrable
 domain (PSL), never cross-domain, never in cross-origin iframes, never auto-on-load
 (user gesture required), and https-saved entries never fill on http.
-→ Tests: `matching.spec` (30+ origin cases) + Playwright autofill e2e; desktop-side
-`origin_matches` is the authoritative check before any field is released.
+→ Tests: `apps/extension/src/matching.test.ts` (table-driven origin cases: subdomain,
+suffix-confusion, https-downgrade, ports, cross-origin iframe); desktop-side `origin_matches`
+is the authoritative check before any field is released (re-checked in `nmhost` for search /
+fields / totp).
 
 ### T5 — Locked desktop, attacker drives the extension / native channel
 When the desktop is locked, every `vault.*` native-messaging request returns
 `err: LOCKED` and the extension caches zero credential data.
-→ Test: extension e2e asserts the native host log carries no plaintext while locked.
+→ Test: `nmhost::credential_requests_are_locked_without_vault` asserts every credential
+request answers `LOCKED` with **no payload** when the vault can't be opened.
 
 ### T6 — MITM on VPN provisioning
 A fresh Linode presents its WireGuard pubkey over self-signed TLS; authenticity is an
@@ -73,13 +79,17 @@ sweep removes anything tagged `sentinel-ephemeral`; server-side dead-man `shutdo
 ### T8 — Secrets leak into logs
 No secret material is ever logged. `CoreError` Display never carries key/plaintext;
 `Key32`/`TotpSecret` Debug is redacted.
-→ Test: `log_hygiene` runs representative flows under a capturing tracing subscriber and
-asserts no base64 key or known password substring appears.
+→ Tests: `security_gate::debug_never_leaks_secrets` (redacted `Debug` for key/secret types)
+and `security_gate::errors_never_carry_plaintext` (`CoreError` Display carries no key/plaintext).
+Handlers log via `tracing` with no secret-valued fields.
 
 ### T9 — Brute force against the account / TOTP
-API endpoints are authenticated and rate-limited (tower_governor); TOTP verify has a
-per-account lockout after repeated failures; refresh tokens are stored hashed with
-rotation + reuse-detection (a replayed token revokes the whole chain).
+Sensitive endpoints are rate-limited by a sliding-window limiter (`services/api/ratelimit.rs`)
+keyed off the **real peer IP** (not a spoofable `X-Forwarded-For` header, unless the server is
+explicitly configured to trust a proxy — v0.1.10); TOTP verify has a per-account lockout after
+5 failures for 15 min; refresh tokens are stored SHA-256-hashed with rotation + reuse-detection
+(a replayed token revokes the whole chain).
+→ Tests: `ratelimit::allows_up_to_max_then_blocks`; `integration::refresh_reuse_revokes_chain`.
 
 ## Non-goals (v1)
 

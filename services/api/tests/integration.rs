@@ -59,6 +59,9 @@ async fn setup() -> (Router, PgPool) {
         database_url: database_url(),
         google_client_id: None,
         totp_enc_key: [7u8; 32],
+        production: false,
+        trust_forwarded_for: false,
+        cors_allowed_origins: Vec::new(),
     };
     let google: Arc<dyn GoogleVerifier> = Arc::new(MockGoogleVerifier);
     let app = sentinel_api::build_app(pool.clone(), JwtKeys::ephemeral(), config, google);
