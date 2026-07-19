@@ -205,6 +205,16 @@ export async function wgStatus(): Promise<WgStatusInfo> {
   return { ...fallback, ...s };
 }
 
+/**
+ * Emergency recovery: remove any leftover SENTINEL WireGuard tunnel and clear kill-switch rules,
+ * to restore internet if a failed connect left routing captured. Safe no-op if nothing is stuck.
+ */
+export async function vpnRepairTunnel(): Promise<void> {
+  if (!inTauri()) return;
+  const core = await import("@tauri-apps/api/core");
+  await core.invoke("vpn_repair_tunnel");
+}
+
 /** Open an http(s) URL in the default browser. */
 export async function openUrl(url: string): Promise<void> {
   if (!inTauri()) {

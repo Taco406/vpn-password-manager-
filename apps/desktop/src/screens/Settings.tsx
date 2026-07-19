@@ -23,6 +23,7 @@ import {
   vpnConnectMultihop,
   wgStatus,
   openUrl,
+  vpnRepairTunnel,
   logTail,
   logClear,
   logDirPath,
@@ -507,6 +508,7 @@ function AccountSync() {
 function WireGuardMonitor() {
   const [st, setSt] = useState<WgStatusInfo | null>(null);
   const [busy, setBusy] = useState(false);
+  const [repairMsg, setRepairMsg] = useState("");
 
   const refresh = async () => {
     setBusy(true);
@@ -516,6 +518,16 @@ function WireGuardMonitor() {
       /* ignore */
     }
     setBusy(false);
+  };
+
+  const repair = async () => {
+    setRepairMsg("Removing any stuck tunnel…");
+    try {
+      await vpnRepairTunnel();
+      setRepairMsg("Done — if internet was stuck, it should be back now.");
+    } catch (e) {
+      setRepairMsg(`Couldn't repair: ${e instanceof Error ? e.message : String(e)}`);
+    }
   };
 
   useEffect(() => {
@@ -576,7 +588,15 @@ function WireGuardMonitor() {
         <button onClick={() => void refresh()} disabled={busy} className="text-[var(--accent)] hover:underline">
           {busy ? "Checking…" : "Re-check"}
         </button>
+        <button onClick={() => void repair()} className="text-[var(--danger)] hover:underline">
+          Remove stuck tunnel (restore internet)
+        </button>
       </div>
+      {repairMsg && <p className="mt-2 text-xs text-[var(--text-muted)]">{repairMsg}</p>}
+      <p className="mt-2 text-[11px] text-[var(--text-muted)]">
+        If a failed Connect ever leaves you without internet, click <span className="font-medium">Remove stuck
+        tunnel</span> above — it deletes any leftover SENTINEL tunnel and clears firewall rules.
+      </p>
     </Card>
   );
 }
@@ -1298,7 +1318,7 @@ function Updates() {
   return (
     <Card>
       <div className="mb-2 flex items-center justify-between text-sm font-medium">
-        Updates <Badge tone="accent">v0.1.14</Badge>
+        Updates <Badge tone="accent">v0.1.15</Badge>
       </div>
       <p className="mb-3 text-xs text-[var(--text-secondary)]">
         SENTINEL checks for signed updates on launch and installs them automatically. You can also check now.

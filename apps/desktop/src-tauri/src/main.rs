@@ -93,6 +93,7 @@ fn main() {
             vpn::vpn_nodes_destroy_all,
             vpn::wg_status,
             vpn::open_url,
+            vpn::vpn_repair_tunnel,
             sync::sync_status,
             sync::sync_set_config,
             sync::auth_google_signin,

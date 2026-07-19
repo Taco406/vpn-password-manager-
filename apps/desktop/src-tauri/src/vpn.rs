@@ -387,6 +387,20 @@ pub fn open_url(url: String) -> std::result::Result<(), String> {
         .map_err(|e| format!("open url: {e}"))
 }
 
+/// Emergency recovery: remove any leftover SENTINEL WireGuard tunnel and clear kill-switch rules,
+/// to restore normal internet if a failed connect left the PC routing into a dead full-tunnel.
+/// Best-effort and safe to run any time — a no-op when nothing is stuck.
+#[tauri::command]
+pub async fn vpn_repair_tunnel() -> std::result::Result<(), String> {
+    let _ = SystemWgController::new().down().await;
+    killswitch_clear_all();
+    crate::applog::info(
+        "vpn.repair",
+        "removed leftover tunnel + cleared kill-switch rules",
+    );
+    Ok(())
+}
+
 /// Fail fast — before we create a paid Linode — if the local WireGuard prerequisites are missing,
 /// so the user fixes them instead of watching a node spin up and then die at the tunnel step.
 fn preflight_vpn() -> std::result::Result<(), String> {
@@ -467,15 +481,24 @@ impl WgController for SystemWgController {
             run("wg-quick", &["up", &path]).await?;
         }
 
-        // Consider the tunnel "up" only once a real handshake lands (so "Connected" never
-        // lies). Poll ~60s; on timeout return Err so the FSM tears the instance down.
-        for _ in 0..30 {
+        // Consider the tunnel "up" only once a real handshake lands (so "Connected" never lies).
+        // Poll ~120s — the server's wg0 + first handshake can take longer than a minute on a
+        // fresh node.
+        for _ in 0..60 {
             if self.latest_handshake().await > 0 {
                 return Ok(());
             }
             tokio::time::sleep(Duration::from_secs(2)).await;
         }
-        Err(wg_err("no WireGuard handshake within 60s"))
+        // CRITICAL: a full-tunnel config routes ALL traffic through this interface. If the
+        // handshake never lands we must remove the tunnel before returning, or the PC is left
+        // routing everything into a dead tunnel — i.e. no internet — until the user removes it
+        // by hand. Tear it down first, then fail.
+        let _ = self.down().await;
+        Err(wg_err(
+            "no WireGuard handshake within 120s — the exit node didn't answer. The tunnel was \
+             removed so your internet is restored; please try Connect again.",
+        ))
     }
 
     async fn down(&self) -> CoreResult<()> {
