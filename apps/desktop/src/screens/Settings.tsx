@@ -1,5 +1,5 @@
 import { useEffect, useState, type ReactElement, type ReactNode } from "react";
-import { Moon, Sun, Monitor, Globe, Cloud, LogIn, Download, RefreshCw, Trash2, Upload, Puzzle, Wifi, ShieldOff, Shield, X } from "lucide-react";
+import { Moon, Sun, Monitor, Globe, Cloud, LogIn, Download, RefreshCw, Trash2, Upload, Puzzle, Wifi, ShieldOff, Shield, Lock, KeyRound, Smartphone, X } from "lucide-react";
 import type { Settings as SettingsT } from "@sentinel/shared";
 import changelogRaw from "../../../../CHANGELOG.md?raw";
 import {
@@ -24,12 +24,21 @@ import {
   wgStatus,
   openUrl,
   vpnRepairTunnel,
+  lockStatus,
+  lockSetPassword,
+  lockChangePassword,
+  lockRemovePassword,
+  lockTotpEnroll,
+  lockTotpConfirm,
+  lockTotpDisable,
   logTail,
   logClear,
   logDirPath,
   type VpnNode,
   type VpnCostSummary,
   type WgStatusInfo,
+  type AppLockStatus,
+  type LockTotpEnroll,
   syncStatus,
   syncSetConfig,
   authGoogleSignin,
@@ -108,6 +117,8 @@ export function Settings() {
         <Toggle label="Kill switch on by default" checked={s.killSwitchDefault} onChange={(v) => patch({ killSwitchDefault: v })} />
         <HelloRow />
       </Card>
+
+      <AppLock />
 
       <ImportPasswords />
 
@@ -300,15 +311,15 @@ function AccountSync() {
     <Card className="mb-4">
       <div className="mb-2 flex items-center justify-between text-sm font-medium">
         <span className="flex items-center gap-2">
-          <Cloud size={15} /> Account &amp; Sync
+          <Cloud size={15} /> Cross-device sync <span className="text-[11px] font-normal text-[var(--text-muted)]">(advanced)</span>
         </span>
-        <Badge tone={signedIn ? "ok" : "accent"}>{signedIn ? "Signed in" : "Local-only"}</Badge>
+        <Badge tone={signedIn ? "ok" : "neutral"}>{signedIn ? "Signed in" : "Off · local-only"}</Badge>
       </div>
       <p className="mb-3 text-xs text-[var(--text-secondary)]">
-        Experimental and fully optional. Sign in with Google to sync your vault across devices
-        end-to-end encrypted — the server only ever stores ciphertext and never sees your keys.
-        Leave this untouched and SENTINEL stays entirely local. To enable it, point SENTINEL at
-        your own sync server and a Google OAuth client id.
+        This is <span className="font-medium">not</span> how you log into the app — that's <span className="font-medium">App lock</span> above.
+        This optional feature syncs your vault to your <span className="font-medium">own</span> self-hosted server (end-to-end
+        encrypted; the server only ever stores ciphertext). It needs a sync-server URL and a Google OAuth client id you
+        create, so the button below stays disabled until both are filled in. Leave it untouched and SENTINEL stays entirely local.
       </p>
 
       {/* server + client id config */}
@@ -619,9 +630,22 @@ function RealVpn() {
       const on = await vpnRealEnabled();
       setEnabled(on);
       setToken("");
+      // Nudge the user to secure the vault now that they're setting up the VPN — but only if
+      // they haven't already added a master password.
+      let tip = "";
+      if (on) {
+        try {
+          const lk = await lockStatus();
+          if (!lk.passwordProtected) {
+            tip = " Tip: add a master password under App lock above to protect your vault.";
+          }
+        } catch {
+          /* ignore */
+        }
+      }
       setStatus(
         on
-          ? "Saved. Connect will now spin up a real Linode exit node."
+          ? `Saved. Connect will now spin up a real Linode exit node.${tip}`
           : "Token cleared. VPN is back to the built-in simulation.",
       );
     } catch (e) {
@@ -1318,7 +1342,7 @@ function Updates() {
   return (
     <Card>
       <div className="mb-2 flex items-center justify-between text-sm font-medium">
-        Updates <Badge tone="accent">v0.1.15</Badge>
+        Updates <Badge tone="accent">v0.1.16</Badge>
       </div>
       <p className="mb-3 text-xs text-[var(--text-secondary)]">
         SENTINEL checks for signed updates on launch and installs them automatically. You can also check now.
@@ -1401,6 +1425,225 @@ function ImportPasswords() {
         </label>
       </div>
       {status && <p className="mt-2 text-xs text-[var(--text-muted)]">{status}</p>}
+    </Card>
+  );
+}
+
+function AppLock() {
+  const [lock, setLock] = useState<AppLockStatus | null>(null);
+  const [msg, setMsg] = useState("");
+  // password sub-forms
+  const [pwMode, setPwMode] = useState<"none" | "set" | "change" | "remove">("none");
+  const [pw1, setPw1] = useState("");
+  const [pw2, setPw2] = useState("");
+  const [oldPw, setOldPw] = useState("");
+  const [pwCode, setPwCode] = useState("");
+  // totp sub-flow
+  const [enroll, setEnroll] = useState<LockTotpEnroll | null>(null);
+  const [totpCode, setTotpCode] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  const refresh = async () => {
+    try {
+      setLock(await lockStatus());
+    } catch {
+      /* ignore */
+    }
+  };
+  useEffect(() => {
+    void refresh();
+  }, []);
+
+  const resetForms = () => {
+    setPwMode("none");
+    setPw1("");
+    setPw2("");
+    setOldPw("");
+    setPwCode("");
+    setEnroll(null);
+    setTotpCode("");
+  };
+
+  const run = async (fn: () => Promise<void>, ok: string) => {
+    setBusy(true);
+    setMsg("");
+    try {
+      await fn();
+      resetForms();
+      await refresh();
+      setMsg(ok);
+    } catch (e) {
+      setMsg(e instanceof Error ? e.message : String(e));
+    }
+    setBusy(false);
+  };
+
+  const codeArg = (c: string) => (lock?.totpEnabled ? c : undefined);
+  const input =
+    "w-full rounded-[10px] border border-[var(--border-strong)] bg-[var(--bg-inset)] px-3 py-2 text-sm outline-none focus:border-[var(--accent)]";
+
+  return (
+    <Card className="mb-4">
+      <div className="mb-2 flex items-center justify-between text-sm font-medium">
+        <span className="flex items-center gap-2">
+          <Lock size={15} /> App lock
+        </span>
+        <Badge tone={lock?.passwordProtected ? "ok" : "neutral"}>
+          {lock?.passwordProtected ? "Password set" : "Unlocked by default"}
+        </Badge>
+      </div>
+      <p className="mb-3 text-xs text-[var(--text-secondary)]">
+        SENTINEL opens without a login by default. Add a <span className="font-medium">master password</span>{" "}
+        to encrypt the vault behind it, and optionally require a code from your{" "}
+        <span className="font-medium">authenticator app</span> (Google Authenticator, Authy…) as a second step.
+      </p>
+
+      {/* Master password */}
+      <div className="rounded-[10px] border border-[var(--border-subtle)] p-3">
+        <div className="flex items-center gap-2 text-sm font-medium">
+          <KeyRound size={14} /> Master password
+        </div>
+
+        {!lock?.passwordProtected && pwMode === "none" && (
+          <button onClick={() => setPwMode("set")} className="mt-2 text-xs text-[var(--accent)] hover:underline">
+            Set a master password
+          </button>
+        )}
+        {lock?.passwordProtected && pwMode === "none" && (
+          <div className="mt-2 flex gap-3 text-xs">
+            <button onClick={() => setPwMode("change")} className="text-[var(--accent)] hover:underline">Change</button>
+            <button onClick={() => setPwMode("remove")} className="text-[var(--danger)] hover:underline">Remove</button>
+          </div>
+        )}
+
+        {pwMode === "set" && (
+          <div className="mt-2 space-y-2">
+            <input type="password" value={pw1} onChange={(e) => setPw1(e.target.value)} placeholder="New master password" className={input} />
+            <input type="password" value={pw2} onChange={(e) => setPw2(e.target.value)} placeholder="Confirm password" className={input} />
+            <div className="flex gap-2 text-xs">
+              <button
+                disabled={busy || pw1.length < 4 || pw1 !== pw2}
+                onClick={() => void run(() => lockSetPassword(pw1), "Master password set. You'll be asked for it next launch.")}
+                className="rounded-[8px] border border-[var(--border-strong)] px-3 py-1.5 hover:border-[var(--accent)]/50 disabled:opacity-50"
+              >
+                Save
+              </button>
+              <button onClick={resetForms} className="px-2 py-1.5 text-[var(--text-muted)] hover:underline">Cancel</button>
+            </div>
+            {pw1 && pw1 !== pw2 && <p className="text-[11px] text-[var(--danger)]">Passwords don't match.</p>}
+          </div>
+        )}
+
+        {pwMode === "change" && (
+          <div className="mt-2 space-y-2">
+            <input type="password" value={oldPw} onChange={(e) => setOldPw(e.target.value)} placeholder="Current password" className={input} />
+            <input type="password" value={pw1} onChange={(e) => setPw1(e.target.value)} placeholder="New password" className={input} />
+            {lock?.totpEnabled && (
+              <input inputMode="numeric" value={pwCode} onChange={(e) => setPwCode(e.target.value.replace(/[^0-9]/g, "").slice(0, 6))} placeholder="Authenticator code" className={`${input} mono tracking-widest`} />
+            )}
+            <div className="flex gap-2 text-xs">
+              <button
+                disabled={busy || pw1.length < 4 || !oldPw}
+                onClick={() => void run(() => lockChangePassword(oldPw, pw1, codeArg(pwCode)), "Password changed.")}
+                className="rounded-[8px] border border-[var(--border-strong)] px-3 py-1.5 hover:border-[var(--accent)]/50 disabled:opacity-50"
+              >
+                Change
+              </button>
+              <button onClick={resetForms} className="px-2 py-1.5 text-[var(--text-muted)] hover:underline">Cancel</button>
+            </div>
+          </div>
+        )}
+
+        {pwMode === "remove" && (
+          <div className="mt-2 space-y-2">
+            <input type="password" value={oldPw} onChange={(e) => setOldPw(e.target.value)} placeholder="Current password" className={input} />
+            {lock?.totpEnabled && (
+              <input inputMode="numeric" value={pwCode} onChange={(e) => setPwCode(e.target.value.replace(/[^0-9]/g, "").slice(0, 6))} placeholder="Authenticator code" className={`${input} mono tracking-widest`} />
+            )}
+            <p className="text-[11px] text-[var(--text-muted)]">Removing the password returns to unlocked-by-default (the key goes back to your OS keychain).</p>
+            <div className="flex gap-2 text-xs">
+              <button
+                disabled={busy || !oldPw}
+                onClick={() => void run(() => lockRemovePassword(oldPw, codeArg(pwCode)), "Master password removed.")}
+                className="rounded-[8px] border border-[var(--danger)]/60 px-3 py-1.5 text-[var(--danger)] hover:border-[var(--danger)] disabled:opacity-50"
+              >
+                Remove password
+              </button>
+              <button onClick={resetForms} className="px-2 py-1.5 text-[var(--text-muted)] hover:underline">Cancel</button>
+            </div>
+          </div>
+        )}
+      </div>
+
+      {/* Authenticator app */}
+      <div className="mt-3 rounded-[10px] border border-[var(--border-subtle)] p-3">
+        <div className="flex items-center justify-between">
+          <span className="flex items-center gap-2 text-sm font-medium">
+            <Smartphone size={14} /> Authenticator app
+          </span>
+          <Badge tone={lock?.totpEnabled ? "ok" : "neutral"}>{lock?.totpEnabled ? "On" : "Off"}</Badge>
+        </div>
+
+        {!lock?.totpEnabled && !enroll && (
+          <button
+            onClick={() => void run(async () => setEnroll(await lockTotpEnroll()), "")}
+            disabled={busy}
+            className="mt-2 text-xs text-[var(--accent)] hover:underline disabled:opacity-50"
+          >
+            Set up 2-step unlock
+          </button>
+        )}
+
+        {enroll && (
+          <div className="mt-3 flex flex-col items-center gap-2">
+            <div
+              className="rounded-[10px] bg-white p-2"
+              // eslint-disable-next-line react/no-danger
+              dangerouslySetInnerHTML={{ __html: enroll.qrSvg }}
+            />
+            <p className="text-[11px] text-[var(--text-muted)]">Scan in your authenticator app, or type the key:</p>
+            <code className="mono select-all text-[11px] text-[var(--text-secondary)]">{enroll.secret}</code>
+            <input
+              inputMode="numeric"
+              value={totpCode}
+              onChange={(e) => setTotpCode(e.target.value.replace(/[^0-9]/g, "").slice(0, 6))}
+              placeholder="Enter the 6-digit code"
+              className={`${input} mono mt-1 tracking-widest`}
+            />
+            <div className="flex gap-2 text-xs">
+              <button
+                disabled={busy || totpCode.length !== 6}
+                onClick={() => void run(() => lockTotpConfirm(totpCode), "Authenticator enabled — you'll enter a code at unlock.")}
+                className="rounded-[8px] border border-[var(--border-strong)] px-3 py-1.5 hover:border-[var(--accent)]/50 disabled:opacity-50"
+              >
+                Confirm
+              </button>
+              <button onClick={resetForms} className="px-2 py-1.5 text-[var(--text-muted)] hover:underline">Cancel</button>
+            </div>
+          </div>
+        )}
+
+        {lock?.totpEnabled && !enroll && (
+          <div className="mt-2 space-y-2">
+            <input
+              inputMode="numeric"
+              value={totpCode}
+              onChange={(e) => setTotpCode(e.target.value.replace(/[^0-9]/g, "").slice(0, 6))}
+              placeholder="Current code to turn off"
+              className={`${input} mono tracking-widest`}
+            />
+            <button
+              disabled={busy || totpCode.length !== 6}
+              onClick={() => void run(() => lockTotpDisable(totpCode), "Authenticator turned off.")}
+              className="text-xs text-[var(--danger)] hover:underline disabled:opacity-50"
+            >
+              Turn off authenticator
+            </button>
+          </div>
+        )}
+      </div>
+
+      {msg && <p className="mt-2 text-xs text-[var(--text-muted)]">{msg}</p>}
     </Card>
   );
 }

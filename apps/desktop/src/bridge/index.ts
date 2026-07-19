@@ -180,6 +180,93 @@ export async function openFolder(path: string): Promise<void> {
   await core.invoke("open_folder", { path });
 }
 
+// --- App lock: opt-in master password + authenticator-app (TOTP) unlock -----
+// The app is unlocked by default; these engage only once the user turns them on. Standalone
+// (not part of the SentinelBridge contract) — no-op / safe defaults in the browser demo.
+
+export interface AppLockStatus {
+  locked: boolean;
+  passwordProtected: boolean;
+  totpEnabled: boolean;
+  requireHello: boolean;
+}
+
+/** Current app-lock state (used to decide whether to show the Unlock screen). */
+export async function lockStatus(): Promise<AppLockStatus> {
+  const fallback: AppLockStatus = {
+    locked: false,
+    passwordProtected: false,
+    totpEnabled: false,
+    requireHello: false,
+  };
+  if (!inTauri()) return fallback;
+  const core = await import("@tauri-apps/api/core");
+  const s = (await core.invoke("auth_status")) as Partial<AppLockStatus>;
+  return { ...fallback, ...s };
+}
+
+/** Set a master password (wraps the vault key; the app now locks on launch). */
+export async function lockSetPassword(password: string): Promise<void> {
+  if (!inTauri()) throw new Error("Only available in the desktop app.");
+  const core = await import("@tauri-apps/api/core");
+  await core.invoke("auth_set_password", { password });
+}
+
+/** Unlock the vault with the master password (+ authenticator code if enabled). */
+export async function lockUnlockPassword(password: string, code?: string): Promise<void> {
+  if (!inTauri()) throw new Error("Only available in the desktop app.");
+  const core = await import("@tauri-apps/api/core");
+  await core.invoke("auth_unlock_password", { password, code: code ?? null });
+}
+
+export async function lockChangePassword(
+  oldPassword: string,
+  newPassword: string,
+  code?: string,
+): Promise<void> {
+  if (!inTauri()) throw new Error("Only available in the desktop app.");
+  const core = await import("@tauri-apps/api/core");
+  await core.invoke("auth_change_password", {
+    oldPassword,
+    newPassword,
+    code: code ?? null,
+  });
+}
+
+/** Remove the master password (back to unlocked-by-default). */
+export async function lockRemovePassword(password: string, code?: string): Promise<void> {
+  if (!inTauri()) throw new Error("Only available in the desktop app.");
+  const core = await import("@tauri-apps/api/core");
+  await core.invoke("auth_remove_password", { password, code: code ?? null });
+}
+
+export interface LockTotpEnroll {
+  otpauthUri: string;
+  secret: string;
+  qrSvg: string;
+}
+
+/** Begin authenticator-app enrollment — returns the QR (SVG) + typed secret. */
+export async function lockTotpEnroll(): Promise<LockTotpEnroll> {
+  if (!inTauri()) throw new Error("Only available in the desktop app.");
+  const core = await import("@tauri-apps/api/core");
+  return core.invoke("applock_totp_enroll") as Promise<LockTotpEnroll>;
+}
+
+/** Confirm authenticator enrollment with a code, enabling the 2-step unlock. */
+export async function lockTotpConfirm(code: string): Promise<void> {
+  if (!inTauri()) throw new Error("Only available in the desktop app.");
+  const core = await import("@tauri-apps/api/core");
+  await core.invoke("applock_totp_confirm", { code });
+}
+
+/** Turn off the authenticator-app requirement (verify a current code first). */
+export async function lockTotpDisable(code: string): Promise<void> {
+  if (!inTauri()) throw new Error("Only available in the desktop app.");
+  const core = await import("@tauri-apps/api/core");
+  await core.invoke("applock_totp_disable", { code });
+}
+
 // --- WireGuard prerequisite monitor (real-VPN) ------------------------------
 
 export interface WgStatusInfo {

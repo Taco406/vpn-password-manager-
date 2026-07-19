@@ -98,6 +98,20 @@ impl TotpSecret {
         period_ms - (unix_ms % period_ms)
     }
 
+    /// Verify a user-entered `code` against this secret at `unix`, allowing ±1 period of clock
+    /// skew (the standard tolerance). Constant-time compares the candidate codes.
+    pub fn verify_at(&self, code: &str, unix: u64) -> bool {
+        let code = code.trim();
+        let p = self.period as i64;
+        for step in [-1i64, 0, 1] {
+            let t = (unix as i64 + step * p).max(0) as u64;
+            if ct_eq(self.code_at(t).as_bytes(), code.as_bytes()) {
+                return true;
+            }
+        }
+        false
+    }
+
     fn hmac(&self, msg: &[u8]) -> Vec<u8> {
         match self.algo {
             TotpAlgo::Sha1 => {
@@ -117,6 +131,55 @@ impl TotpSecret {
             }
         }
     }
+}
+
+/// Constant-time byte-slice equality (length-independent short-circuit is fine — the code
+/// length isn't secret).
+fn ct_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for (x, y) in a.iter().zip(b.iter()) {
+        diff |= x ^ y;
+    }
+    diff == 0
+}
+
+/// Base32 (RFC 4648, no padding) encode — the format authenticator apps expect in a secret.
+pub fn base32_encode(data: &[u8]) -> String {
+    const ALPHABET: &[u8; 32] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
+    let mut out = String::new();
+    let mut buffer = 0u32;
+    let mut bits = 0u32;
+    for &b in data {
+        buffer = (buffer << 8) | b as u32;
+        bits += 8;
+        while bits >= 5 {
+            bits -= 5;
+            out.push(ALPHABET[((buffer >> bits) & 0x1f) as usize] as char);
+        }
+    }
+    if bits > 0 {
+        out.push(ALPHABET[((buffer << (5 - bits)) & 0x1f) as usize] as char);
+    }
+    out
+}
+
+/// Generate a fresh random base32 TOTP secret (160-bit / 20 bytes, SHA-1, 6 digits) for
+/// enrolling an authenticator app.
+pub fn generate_base32_secret() -> String {
+    use rand::RngCore;
+    let mut b = [0u8; 20];
+    rand::rngs::OsRng.fill_bytes(&mut b);
+    base32_encode(&b)
+}
+
+/// Build an `otpauth://totp/...` provisioning URI (for a QR code) from a base32 secret.
+pub fn otpauth_uri(secret_base32: &str, account: &str, issuer: &str) -> String {
+    format!(
+        "otpauth://totp/{issuer}:{account}?secret={secret_base32}&issuer={issuer}&algorithm=SHA1&digits=6&period=30"
+    )
 }
 
 fn base32_decode(s: &str) -> Result<Vec<u8>> {
@@ -193,5 +256,39 @@ mod tests {
         let s = format!("{t:?}");
         assert!(s.contains("<redacted>"));
         assert!(!s.contains("JBSWY3DP"));
+    }
+
+    #[test]
+    fn base32_round_trip() {
+        let data = b"12345678901234567890";
+        let enc = base32_encode(data);
+        assert_eq!(base32_decode(&enc).unwrap(), data);
+    }
+
+    #[test]
+    fn generated_secret_is_usable_and_verifies_with_skew() {
+        let secret = generate_base32_secret();
+        let t = TotpSecret::parse(&secret).unwrap();
+        let now = 1_700_000_000u64;
+        let code = t.code_at(now);
+        // Exact time + one period either side all verify; a wrong code doesn't.
+        assert!(t.verify_at(&code, now));
+        assert!(t.verify_at(&t.code_at(now - 30), now)); // client clock 30s behind
+        assert!(t.verify_at(&t.code_at(now + 30), now)); // client clock 30s ahead
+        assert!(!t.verify_at("000000", now.wrapping_add(10_000))); // far off
+    }
+
+    #[test]
+    fn otpauth_uri_parses_back_to_the_same_secret() {
+        let secret = generate_base32_secret();
+        let uri = otpauth_uri(&secret, "me@example.com", "SENTINEL");
+        assert!(uri.starts_with("otpauth://totp/SENTINEL:me@example.com?"));
+        let t = TotpSecret::parse(&uri).unwrap();
+        let now = 1_700_000_000u64;
+        // Same secret → same code as parsing the bare secret.
+        assert_eq!(
+            t.code_at(now),
+            TotpSecret::parse(&secret).unwrap().code_at(now)
+        );
     }
 }

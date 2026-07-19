@@ -5,6 +5,7 @@
 // Hide the console window on Windows in release.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod applock;
 mod applog;
 mod commands;
 mod hello;
@@ -61,6 +62,14 @@ fn main() {
             commands::unlock_recovery,
             commands::unlock_phone_begin,
             commands::unlock_phone_await,
+            applock::auth_status,
+            applock::auth_set_password,
+            applock::auth_unlock_password,
+            applock::auth_change_password,
+            applock::auth_remove_password,
+            applock::applock_totp_enroll,
+            applock::applock_totp_confirm,
+            applock::applock_totp_disable,
             commands::vault_list,
             commands::vault_get,
             commands::vault_reveal_field,

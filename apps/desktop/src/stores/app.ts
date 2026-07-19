@@ -3,7 +3,7 @@
 
 import { create } from "zustand";
 import type { ConnectState, Settings, VpnMetrics } from "@sentinel/shared";
-import { bridge } from "../bridge";
+import { bridge, lockStatus } from "../bridge";
 
 const MAX_SAMPLES = 90;
 
@@ -23,7 +23,9 @@ interface AppState {
 }
 
 export const useApp = create<AppState>((set, get) => ({
-  locked: true,
+  // Unlocked by default (personal-use tool). On launch we ask the backend whether the user has
+  // opted into a lock (master password / authenticator / Windows Hello) and lock only if so.
+  locked: false,
   connect: { stage: "idle" },
   metrics: null,
   rxHistory: [],
@@ -52,6 +54,10 @@ export const useApp = create<AppState>((set, get) => ({
   init: () => {
     if ((get() as unknown as { _subscribed?: boolean })._subscribed) return;
     set({ _subscribed: true } as Partial<AppState>);
+    // Reflect the real backend lock state: locked only if the user opted into protection.
+    void lockStatus()
+      .then((s) => set({ locked: s.locked }))
+      .catch(() => {});
     bridge.on((e) => {
       switch (e.type) {
         case "vpn:state":

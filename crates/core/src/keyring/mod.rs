@@ -32,6 +32,8 @@ pub enum WrapperType {
     Phone,
     /// Wrapper C — printed recovery kit (break-glass).
     Recovery,
+    /// Wrapper D — a user master password (Argon2id-derived KEK; the salt travels in `params`).
+    Password,
 }
 
 impl WrapperType {
@@ -40,6 +42,7 @@ impl WrapperType {
             WrapperType::Platform => 1,
             WrapperType::Phone => 2,
             WrapperType::Recovery => 3,
+            WrapperType::Password => 4,
         }
     }
 
@@ -48,6 +51,7 @@ impl WrapperType {
             1 => Ok(WrapperType::Platform),
             2 => Ok(WrapperType::Phone),
             3 => Ok(WrapperType::Recovery),
+            4 => Ok(WrapperType::Password),
             other => Err(CoreError::Format {
                 what: "wrapped blob",
                 detail: format!("unknown wrapper_type {other}"),

@@ -1,20 +1,26 @@
 import { useEffect, useState } from "react";
 import { motion } from "framer-motion";
-import { Shield, Fingerprint, Smartphone, KeyRound, Loader2 } from "lucide-react";
+import { Shield, Fingerprint, Smartphone, KeyRound, Loader2, Lock } from "lucide-react";
 import type { KeyringStatus } from "@sentinel/shared";
-import { bridge } from "../bridge";
+import { bridge, lockStatus, lockUnlockPassword, type AppLockStatus } from "../bridge";
 import { useApp } from "../stores/app";
 import { Button } from "../components/ui";
 
 export function Unlock() {
   const [status, setStatus] = useState<KeyringStatus | null>(null);
+  const [lock, setLock] = useState<AppLockStatus | null>(null);
   const [mode, setMode] = useState<"pick" | "phone" | "recovery">("pick");
   const [phoneState, setPhoneState] = useState<"idle" | "waiting">("idle");
   const [recoveryKey, setRecoveryKey] = useState("");
+  const [password, setPassword] = useState("");
+  const [code, setCode] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
   const setLocked = useApp((s) => s.setLocked);
 
   useEffect(() => {
     void bridge.keyringStatus().then(setStatus);
+    void lockStatus().then(setLock);
   }, []);
 
   const unlockBiometric = async () => {
@@ -33,6 +39,19 @@ export function Unlock() {
     await bridge.unlockRecovery(recoveryKey);
     setLocked(false);
   };
+  const unlockPassword = async () => {
+    setBusy(true);
+    setError("");
+    try {
+      await lockUnlockPassword(password, lock?.totpEnabled ? code : undefined);
+      setLocked(false);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    }
+    setBusy(false);
+  };
+
+  const passwordMode = !!lock?.passwordProtected;
 
   return (
     <div className="relative flex h-full items-center justify-center overflow-hidden">
@@ -53,10 +72,53 @@ export function Unlock() {
             <Shield className="text-accent" size={28} />
           </div>
           <h1 className="text-xl font-semibold">Vault locked</h1>
-          <p className="mt-1 text-sm text-[var(--text-secondary)]">Unlock to continue. No master password — your key is held by hardware.</p>
+          <p className="mt-1 text-sm text-[var(--text-secondary)]">
+            {passwordMode
+              ? lock?.totpEnabled
+                ? "Enter your master password and authenticator code."
+                : "Enter your master password to continue."
+              : "Unlock to continue. Your key is held by your device."}
+          </p>
         </div>
 
-        {mode === "pick" && (
+        {/* Master-password unlock (real factor) */}
+        {passwordMode && (
+          <form
+            className="flex flex-col gap-3"
+            onSubmit={(e) => {
+              e.preventDefault();
+              void unlockPassword();
+            }}
+          >
+            <div className="flex items-center gap-2 rounded-[10px] border border-[var(--border-strong)] bg-[var(--bg-inset)] px-3">
+              <Lock size={16} className="text-[var(--text-muted)]" />
+              <input
+                type="password"
+                autoFocus
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
+                placeholder="Master password"
+                className="flex-1 bg-transparent py-2.5 text-sm outline-none"
+              />
+            </div>
+            {lock?.totpEnabled && (
+              <input
+                inputMode="numeric"
+                value={code}
+                onChange={(e) => setCode(e.target.value.replace(/[^0-9]/g, "").slice(0, 6))}
+                placeholder="6-digit authenticator code"
+                className="mono rounded-[10px] border border-[var(--border-strong)] bg-[var(--bg-inset)] px-3 py-2.5 text-sm tracking-widest outline-none focus:border-[var(--accent)]"
+              />
+            )}
+            {error && <p className="text-xs text-[var(--danger)]">{error}</p>}
+            <Button type="submit" disabled={busy || !password} className="w-full">
+              {busy ? "Unlocking…" : "Unlock"}
+            </Button>
+          </form>
+        )}
+
+        {/* Legacy hardware paths (only when no master password is set) */}
+        {!passwordMode && mode === "pick" && (
           <div className="flex flex-col gap-2">
             <UnlockRow icon={<Fingerprint size={20} />} title="Touch ID" subtitle="This device" onClick={unlockBiometric} enrolled />
             <UnlockRow icon={<Smartphone size={20} />} title="Approve on iPhone" subtitle="iPhone 16 Pro" onClick={unlockPhone} enrolled={status?.wrappers.find((w) => w.type === "phone")?.enrolled} />
@@ -64,7 +126,7 @@ export function Unlock() {
           </div>
         )}
 
-        {mode === "phone" && (
+        {!passwordMode && mode === "phone" && (
           <div className="flex flex-col items-center gap-4 py-4">
             <div className="flex h-16 w-16 items-center justify-center rounded-2xl bg-[var(--accent)]/12">
               {phoneState === "waiting" ? <Loader2 className="animate-spin text-accent" size={28} /> : <Smartphone className="text-accent" size={28} />}
@@ -77,7 +139,7 @@ export function Unlock() {
           </div>
         )}
 
-        {mode === "recovery" && (
+        {!passwordMode && mode === "recovery" && (
           <div className="flex flex-col gap-3">
             <label className="text-sm text-[var(--text-secondary)]">Enter your recovery key</label>
             <input

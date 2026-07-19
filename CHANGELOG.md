@@ -8,6 +8,29 @@ The format follows [Keep a Changelog](https://keepachangelog.com/). Versions are
 [semantic](https://semver.org/). **Add a new `## [x.y.z]` section at the top in the same PR
 that bumps the app version** — that's how "the changelog updates on every merge."
 
+## [0.1.16] — 2026-07-19
+
+### Changed
+- **The app now opens unlocked by default.** SENTINEL is a personal-use tool, so there's no login
+  wall on launch anymore — it opens straight to your vault. You opt into a lock only if you want one.
+
+### Added
+- **Optional master password (real encryption).** Under **Settings → App lock** you can set a master
+  password. Unlike before, this genuinely protects the vault: your key is wrapped with Argon2id and
+  the plaintext copy is removed from the OS keychain, so the password becomes a real factor (not just
+  a screen lock). Change or remove it any time — removing it returns to unlocked-by-default. Nothing
+  in your vault is re-encrypted, so it's safe to turn on with data already saved.
+- **Sign in with your authenticator app (Google Authenticator, Authy, …).** Add a 6-digit
+  **2-step unlock** under **Settings → App lock**: scan the shown **QR code** into your authenticator
+  app (the code is now actually rendered), confirm once, and SENTINEL asks for a code at unlock. Fully
+  local — no Google account or server required.
+- A gentle nudge to add a master password when you set up the real VPN.
+
+### Fixed
+- **The Google sign-in that "looked fake" is clearer now.** The old "Sign in with Google" lives under
+  a relabeled **Cross-device sync (advanced)** card and is plainly marked as an optional,
+  self-hosted-server feature — *not* how you log into the app. Logging in is now App lock (above).
+
 ## [0.1.15] — 2026-07-19
 
 ### Fixed
@@ -206,6 +229,7 @@ is the next phase. Windows-first and experimental — the live Linode path can't
   Releases). Local-first vault UI, command palette, generator, and health audit. VPN screen
   runs a built-in simulation until a Linode token is added.
 
+[0.1.16]: https://github.com/Taco406/vpn-password-manager-/releases/tag/v0.1.16
 [0.1.15]: https://github.com/Taco406/vpn-password-manager-/releases/tag/v0.1.15
 [0.1.14]: https://github.com/Taco406/vpn-password-manager-/releases/tag/v0.1.14
 [0.1.13]: https://github.com/Taco406/vpn-password-manager-/releases/tag/v0.1.13
