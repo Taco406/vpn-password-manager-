@@ -116,6 +116,27 @@ Kept nodes are recorded locally so the launch/pre-connect orphan-sweep won't rea
 a **cap of 5 kept nodes** so a bug can't quietly run up an unbounded bill. Only one tunnel is active
 at a time; running traffic through several nodes at once (multi-hop) is a later addition.
 
+## Multi-hop "bounce" (experimental)
+
+**Settings → Multi-hop (bounce)** routes your traffic through **2–3 exit nodes in a row**
+(entry → exit) instead of one. Your device holds a single WireGuard tunnel to the *entry* node;
+each hop forwards to the next **server-side** (each runs a second WireGuard interface to the next
+hop), and only the **last** node egresses to the internet. So no single server sees both your home
+IP and your destination.
+
+- Pick a region per hop (entry first, exit last), then **Connect**. It provisions one node per hop
+  (a minute or two) and brings up the tunnel to the entry.
+- **Cost is N× a single node** and latency compounds with each hop — the UI says so, and chains are
+  capped at **3 hops**.
+- **Disconnect destroys every hop.** If any step of building the chain fails, all nodes provisioned
+  so far are destroyed automatically — a half-built chain never leaves paid servers running.
+- Keys for the whole chain are generated on your device, so the app wires every hop without a
+  network round-trip; the inter-hop links are authenticated by those keys.
+
+This is the newest and least-exercised feature: the config generation is covered by tests, but the
+live path (like the rest of the real VPN) hasn't been run against live Linode from CI — treat your
+first bounce as a test and watch your Linode billing page.
+
 ## Known limitations (this is a first cut)
 
 - **Windows-first.** The controller drives the official WireGuard app; macOS/Linux use `wg-quick`
