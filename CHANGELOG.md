@@ -8,6 +8,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/). Versions are
 [semantic](https://semver.org/). **Add a new `## [x.y.z]` section at the top in the same PR
 that bumps the app version** — that's how "the changelog updates on every merge."
 
+## [0.1.13] — 2026-07-19
+
+### Fixed
+- **VPN connect now tells you *why* it failed.** When Linode rejects a request (creating,
+  booting, or managing an exit node), the app used to show only a bare HTTP status. It now
+  surfaces Linode's actual reason — e.g. "Account must be activated", an invalid token scope, or
+  an unsupported region — so a failed **Connect** is diagnosable instead of silent.
+
 ## [0.1.12] — 2026-07-19
 
 ### Added
@@ -148,6 +156,7 @@ is the next phase. Windows-first and experimental — the live Linode path can't
   Releases). Local-first vault UI, command palette, generator, and health audit. VPN screen
   runs a built-in simulation until a Linode token is added.
 
+[0.1.13]: https://github.com/Taco406/vpn-password-manager-/releases/tag/v0.1.13
 [0.1.12]: https://github.com/Taco406/vpn-password-manager-/releases/tag/v0.1.12
 [0.1.11]: https://github.com/Taco406/vpn-password-manager-/releases/tag/v0.1.11
 [0.1.10]: https://github.com/Taco406/vpn-password-manager-/releases/tag/v0.1.10
