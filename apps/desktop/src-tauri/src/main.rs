@@ -97,6 +97,8 @@ fn main() {
             nmhost::autofill_status,
             nmhost::autofill_install,
             nmhost::autofill_uninstall,
+            nmhost::autofill_prepare,
+            nmhost::open_folder,
         ])
         .build(tauri::generate_context!())
         .expect("error while building SENTINEL")

@@ -65,7 +65,9 @@ Linux produces `.deb`/AppImage, Windows `.exe`/`.msi`, macOS `.dmg`/`.app`. Requ
 
 ## Note on the VPN
 
-The shipped desktop app currently uses the mock VPN/biometric wrappers — the vault is
-fully functional and browsable, but "Connect VPN" runs the simulator. Wiring a real
-Linode token + live WireGuard is a separate change (the real implementations already
-live in `crates/core`, behind feature flags).
+The VPN screen runs a built-in **simulation until a Linode API token is added**; once a token
+is saved (Settings → Real VPN), Connect provisions a real ephemeral Linode + WireGuard tunnel
+and destroys it on disconnect. See [`real-vpn.md`](./real-vpn.md). (Real VPN, real breach check,
+browser autofill, Windows Hello, and sync are all wired in the shipped app and gated per-feature;
+Windows-specific/live paths ship as documented experimental field-tests since headless CI can't
+exercise them.)

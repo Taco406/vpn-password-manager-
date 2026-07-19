@@ -33,15 +33,24 @@ The host serves: `hello` (`{caps, appVersion, locked}`), `vault.search`
 vault the app uses — DB at `<app_data_dir>/vault.db`, key from the OS keychain
 (`com.sentinel.desktop` / `vault-key`).
 
-## Two user steps
+## User steps (the app does the hard part)
 
-1. **Load the unpacked extension.** In Chrome or Edge: Extensions → enable **Developer
-   mode** → **Load unpacked** → select the app's **`apps/extension/dist`** folder. The
-   extension's id is pinned (via a fixed `"key"` in the manifest) to
-   `pbcngnmfielibgghcofedjmojogohcdf`, so it stays stable across reloads and the host can
-   allow-list exactly this extension.
-2. **Click Enable in the app.** Settings → **Browser autofill** → **Enable**. This writes
-   the host manifest and registers the binary as `com.sentinel.host`:
+The extension now **ships inside the installer** (bundled via `bundle.resources` in
+`tauri.conf.json`), so there's no repo checkout to find.
+
+1. **Settings → Browser autofill → "Get the extension."** The app copies the bundled
+   extension to a stable, writable folder — `<app_data_dir>/extension` (Windows:
+   `%APPDATA%\com.sentinel.desktop\extension`) — registers itself as the browser host, and
+   shows that folder path with **Copy path** and **Open folder** buttons.
+2. **Load it in the browser.** Open `chrome://extensions` (or `edge://extensions`) → enable
+   **Developer mode** → **Load unpacked** → select the folder from step 1. The extension's id
+   is pinned (via a fixed `"key"` in the manifest) to `pbcngnmfielibgghcofedjmojogohcdf`, so it
+   stays stable across reloads and the host allow-lists exactly this extension. (A Chrome Web
+   Store build — a true one-click install — is prepped in [`chrome-web-store.md`](./chrome-web-store.md);
+   the host already accepts both the unpacked and store ids.)
+
+The "Get the extension" step also writes the host manifest and registers the binary as
+`com.sentinel.host`:
    - **Windows:** `HKCU\Software\Google\Chrome\NativeMessagingHosts\com.sentinel.host`
      and `HKCU\Software\Microsoft\Edge\NativeMessagingHosts\com.sentinel.host` (default
      value = the manifest path).
@@ -49,10 +58,10 @@ vault the app uses — DB at `<app_data_dir>/vault.db`, key from the OS keychain
      `~/Library/Application Support/{Google/Chrome, Microsoft Edge, Chromium}/NativeMessagingHosts/`.
    - **Linux:** `~/.config/{google-chrome, chromium, microsoft-edge}/NativeMessagingHosts/com.sentinel.host.json`.
 
-   **Disable** removes those keys/files. The Enable/Disable state is read back with
+   **Disable** removes those keys/files. The installed state is read back with
    `autofill_status`.
 
-Restart the browser after enabling so it picks up the new host registration.
+Restart the browser after loading the extension so it picks up the new host registration.
 
 ## Safety — a site only ever gets its own credentials
 
@@ -74,6 +83,7 @@ while locked, because it touches no vault data.
 ## Scope / caveats
 
 - Experimental and Windows-first; treat macOS/Linux as best-effort.
-- The extension is loaded unpacked (Developer mode), not from the Web Store.
-- Enabling/disabling only registers or removes the OS host manifest; it does not install
-  or remove the browser extension itself (step 1 is manual).
+- The extension ships in the installer and is loaded unpacked (Developer mode). A Chrome Web
+  Store listing (one-click, no Developer mode) is prepped but not yet published.
+- "Get the extension" copies the files + registers the OS host manifest; the browser's
+  **Load unpacked** (step 2) is the one manual action that remains.

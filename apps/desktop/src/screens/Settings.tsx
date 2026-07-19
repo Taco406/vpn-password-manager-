@@ -11,6 +11,8 @@ import {
   autofillStatus,
   autofillInstall,
   autofillUninstall,
+  autofillPrepare,
+  openFolder,
   netStatus,
   netSet,
   killswitchClear,
@@ -52,6 +54,17 @@ export function Settings() {
   return (
     <div className="mx-auto max-w-2xl px-8 py-8">
       <SectionTitle>Settings</SectionTitle>
+
+      <button
+        onClick={() =>
+          void openFolder(
+            "https://github.com/Taco406/vpn-password-manager-/blob/main/docs/setup.md",
+          )
+        }
+        className="mb-4 text-xs text-[var(--accent)] hover:underline"
+      >
+        Setup &amp; required-downloads guide ↗
+      </button>
 
       <Card className="mb-4">
         <div className="mb-3 text-sm font-medium">Appearance</div>
@@ -714,6 +727,8 @@ function BrowserAutofill() {
   const [installed, setInstalled] = useState(false);
   const [busy, setBusy] = useState(false);
   const [status, setStatus] = useState("");
+  const [extPath, setExtPath] = useState("");
+  const [copied, setCopied] = useState(false);
 
   useEffect(() => {
     void autofillStatus()
@@ -721,26 +736,46 @@ function BrowserAutofill() {
       .catch(() => {});
   }, []);
 
-  const toggle = async () => {
+  // Step 1: unpack the bundled extension to a stable folder + register the host, so the only
+  // thing left for the user is the browser's one-time "Load unpacked".
+  const getExtension = async () => {
     setBusy(true);
     setStatus("");
     try {
-      if (installed) {
-        await autofillUninstall();
-      } else {
-        await autofillInstall();
-      }
+      const path = await autofillPrepare();
+      setExtPath(path);
+      if (!installed) await autofillInstall();
       const s = await autofillStatus();
       setInstalled(s.installed);
-      setStatus(
-        s.installed
-          ? "Enabled. Load the unpacked extension (below) if you haven't, then use the fill menu in Chrome or Edge."
-          : "Disabled. Chrome and Edge will no longer talk to SENTINEL.",
-      );
+      setStatus("Ready — now load the folder in your browser (steps below).");
     } catch (e) {
-      setStatus(`Couldn't ${installed ? "disable" : "enable"}: ${errMsg(e)}`);
+      setStatus(`Couldn't prepare: ${errMsg(e)}`);
     }
     setBusy(false);
+  };
+
+  const disable = async () => {
+    setBusy(true);
+    setStatus("");
+    try {
+      await autofillUninstall();
+      const s = await autofillStatus();
+      setInstalled(s.installed);
+      setStatus("Disabled. Chrome and Edge will no longer talk to SENTINEL.");
+    } catch (e) {
+      setStatus(`Couldn't disable: ${errMsg(e)}`);
+    }
+    setBusy(false);
+  };
+
+  const copyPath = async () => {
+    try {
+      await navigator.clipboard.writeText(extPath);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    } catch {
+      /* clipboard may be unavailable; the path is shown for manual copy */
+    }
   };
 
   return (
@@ -756,20 +791,52 @@ function BrowserAutofill() {
         the browser's native-messaging host itself — no extra program to install. A site only ever
         receives its own credentials, and nothing is available while the vault is locked.
       </p>
-      <ol className="mb-3 list-decimal space-y-1 pl-5 text-xs text-[var(--text-secondary)]">
-        <li>
-          Load the extension: Chrome/Edge → Extensions → enable{" "}
-          <span className="mono">Developer mode</span> → <span className="mono">Load unpacked</span>{" "}
-          → select the app's <span className="mono">apps/extension/dist</span> folder.
-        </li>
-        <li>Click Enable here to register SENTINEL as the browser host.</li>
-      </ol>
-      <div className="flex items-center gap-3">
-        <button onClick={toggle} disabled={busy} className={btnCls}>
-          {busy ? "Working…" : installed ? "Disable" : "Enable"}
+
+      <div className="mb-3 flex flex-wrap items-center gap-3">
+        <button onClick={getExtension} disabled={busy} className={btnCls}>
+          {busy ? "Working…" : installed ? "Re-copy extension files" : "Get the extension"}
         </button>
+        {installed && (
+          <button onClick={disable} disabled={busy} className={btnCls}>
+            Disable
+          </button>
+        )}
         {status && <span className="text-xs text-[var(--text-muted)]">{status}</span>}
       </div>
+
+      {extPath && (
+        <div className="mb-3 rounded-[10px] border border-[var(--border-strong)] p-3">
+          <div className="mb-2 text-xs text-[var(--text-secondary)]">
+            Extension folder (you'll select this in your browser):
+          </div>
+          <div className="mb-2 flex items-center gap-2">
+            <code className="mono flex-1 truncate rounded bg-[var(--bg-inset)] px-2 py-1 text-xs">
+              {extPath}
+            </code>
+            <button onClick={copyPath} className="text-xs text-[var(--accent)] hover:underline">
+              {copied ? "Copied" : "Copy path"}
+            </button>
+            <button
+              onClick={() => void openFolder(extPath)}
+              className="text-xs text-[var(--accent)] hover:underline"
+            >
+              Open folder
+            </button>
+          </div>
+          <ol className="list-decimal space-y-1 pl-5 text-xs text-[var(--text-secondary)]">
+            <li>
+              Open <span className="mono">chrome://extensions</span> (or{" "}
+              <span className="mono">edge://extensions</span>).
+            </li>
+            <li>
+              Turn on <span className="mono">Developer mode</span> (top-right).
+            </li>
+            <li>
+              Click <span className="mono">Load unpacked</span> and select the folder above.
+            </li>
+          </ol>
+        </div>
+      )}
     </Card>
   );
 }
@@ -851,7 +918,7 @@ function Updates() {
   return (
     <Card>
       <div className="mb-2 flex items-center justify-between text-sm font-medium">
-        Updates <Badge tone="accent">v0.1.8</Badge>
+        Updates <Badge tone="accent">v0.1.9</Badge>
       </div>
       <p className="mb-3 text-xs text-[var(--text-secondary)]">
         SENTINEL checks for signed updates on launch and installs them automatically. You can also check now.

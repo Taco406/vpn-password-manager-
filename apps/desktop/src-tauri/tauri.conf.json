@@ -1,13 +1,13 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "SENTINEL",
-  "version": "0.1.8",
+  "version": "0.1.9",
   "identifier": "com.sentinel.desktop",
   "build": {
     "frontendDist": "../dist",
     "devUrl": "http://localhost:5173",
     "beforeDevCommand": "pnpm dev",
-    "beforeBuildCommand": "pnpm build"
+    "beforeBuildCommand": "pnpm build && pnpm --filter @sentinel/extension build && node scripts/stage-extension.mjs"
   },
   "app": {
     "windows": [
@@ -29,6 +29,9 @@
     "active": true,
     "targets": "all",
     "createUpdaterArtifacts": true,
+    "resources": {
+      "resources/extension": "extension"
+    },
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
