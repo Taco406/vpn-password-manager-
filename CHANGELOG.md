@@ -17,6 +17,9 @@ that bumps the app version** — that's how "the changelog updates on every merg
   code**, paste, and it instantly connects to the same server and pulls your vault down. The code
   carries everything the new device needs (the server address, its pinned certificate, the login, and
   your vault key) so there's nothing to type by hand. Treat the code like a password — it's shown once.
+  Joining only ever runs on a fresh, empty vault so it can never overwrite what's already on a device,
+  and a device can **Reconnect** (finish an interrupted sign-in) or **Disconnect / forget the server**
+  at any time to start over cleanly.
 
 ### Fixed
 - **"I deployed a sync server but my vault isn't syncing."** A one-click deploy that finished creating

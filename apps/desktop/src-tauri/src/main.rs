@@ -131,6 +131,7 @@ fn main() {
             sync::sync_reconnect,
             sync::sync_pair_begin,
             sync::sync_pair_complete,
+            sync::sync_forget,
             nmhost::autofill_status,
             nmhost::autofill_install,
             nmhost::autofill_uninstall,

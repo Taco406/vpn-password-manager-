@@ -14,7 +14,7 @@
 //!   - secret tokens (access / refresh / pending) in the OS keychain, mirroring `vpn.rs`,
 //!   - a thin authed HTTP client that refreshes a rotating refresh token on 401.
 
-use crate::state::{load_or_create_key, AppState};
+use crate::state::AppState;
 use async_trait::async_trait;
 use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
 use base64::Engine as _;
@@ -61,7 +61,12 @@ fn http_client() -> reqwest::Client {
 /// TLS with no public CA or domain. For a manually-configured (real-CA) server this is the plain
 /// client. The Google token exchanger deliberately keeps the un-pinned `http_client()`.
 fn sync_http_client(cfg: &SyncConfig) -> reqwest::Client {
-    let mut b = reqwest::Client::builder().timeout(Duration::from_secs(30));
+    // A `connect_timeout` bounds the TCP/TLS connect so a dead/black-holing server (silent packet
+    // drop, no RST) fast-fails each attempt instead of blocking the full 30s request timeout — which
+    // otherwise turns a bounded "short retry" (reconnect/health probes) into minutes of hang.
+    let mut b = reqwest::Client::builder()
+        .timeout(Duration::from_secs(30))
+        .connect_timeout(Duration::from_secs(6));
     if let (Some(pem), Some(ip)) = (cfg.pinned_cert_pem.as_ref(), cfg.server_ip.as_ref()) {
         if let Ok(cert) = reqwest::Certificate::from_pem(pem.as_bytes()) {
             b = b.add_root_certificate(cert);
@@ -75,6 +80,22 @@ fn sync_http_client(cfg: &SyncConfig) -> reqwest::Client {
 
 fn data_dir(state: &State<'_, AppState>) -> PathBuf {
     state.inner.lock().unwrap().data_dir.clone()
+}
+
+/// The vault key from the LIVE unlocked session (cloned out of RAM). Never falls back to
+/// `load_or_create_key`, which would mint a spurious fresh key when a master password is set (the
+/// plaintext keychain key is deleted then, so re-reading it creates a new, wrong one). Errors
+/// cleanly if the vault is locked. Used by every path that must wrap/transfer the real vault key
+/// (backup, sync, device pairing).
+fn session_vault_key(state: &State<'_, AppState>) -> Result<VaultKey, String> {
+    state
+        .inner
+        .lock()
+        .unwrap()
+        .session
+        .vault_key()
+        .cloned()
+        .ok_or_else(|| "Unlock your vault first, then try again.".to_string())
 }
 
 /// RFC3339 for a unix timestamp (device list display).
@@ -885,7 +906,7 @@ pub async fn auth_logout(state: State<'_, AppState>) -> Result<(), String> {
 
 #[tauri::command]
 pub async fn sync_backup(state: State<'_, AppState>) -> Result<BackupOut, String> {
-    let vk = load_or_create_key()?;
+    let vk = session_vault_key(&state)?;
 
     // Wrap the vault key with a fresh recovery key (Wrapper C) and store it server-side.
     let rk = RecoveryKey::random();
@@ -912,7 +933,7 @@ pub async fn sync_backup(state: State<'_, AppState>) -> Result<BackupOut, String
 
 #[tauri::command]
 pub async fn sync_now(state: State<'_, AppState>) -> Result<SyncNowOut, String> {
-    let vk = load_or_create_key()?;
+    let vk = session_vault_key(&state)?;
     let api = api_for(&state)?;
 
     let mut pulled = false;
@@ -956,12 +977,18 @@ pub async fn sync_restore(
     let rk = recovery_kit::decode(recovery_code.trim()).map_err(estr)?;
     let vk = RecoveryWrapper::new(rk).unwrap(&blob).await.map_err(estr)?;
 
-    // Rebind this device's local vault key to the shared key, in the keychain and in RAM.
-    kc_set(KC_VAULT_KEY, &STANDARD.encode(vk.key().as_bytes()))?;
+    // Re-assert the vault is empty AND adopt the shared key in ONE locked section: an item saved
+    // during the network fetch/unwrap above would have been sealed under the old local key, and
+    // swapping keys now would orphan it (and propagate it on the next sync). Refuse instead.
     {
         let mut g = state.inner.lock().unwrap();
+        if !g.vault.list_envelopes().map_err(estr)?.is_empty() {
+            return Err("this device already has a vault".into());
+        }
         g.session = VaultSession::unlocked(vk.clone());
     }
+    // Persist the shared key to the keychain (survives restart).
+    kc_set(KC_VAULT_KEY, &STANDARD.encode(vk.key().as_bytes()))?;
 
     let mut restored = 0i64;
     if let Some((v, ct)) = api.get_vault().await? {
@@ -1438,8 +1465,10 @@ pub fn sync_pair_begin(state: State<AppState>) -> Result<PairCodeOut, String> {
         )?;
     let token = kc_get(KC_BOOTSTRAP)
         .ok_or("Missing this device's server login — reconnect to the sync server first.")?;
-    // The vault key device #2 needs to decrypt the shared, end-to-end-encrypted vault.
-    let vk = load_or_create_key()?;
+    // The vault key device #2 needs to decrypt the shared, end-to-end-encrypted vault. Taken from
+    // the live session (never load_or_create_key, which would mint a WRONG key under a master
+    // password) — so a locked vault gives a clean "unlock first" error, not a bad pairing code.
+    let vk = session_vault_key(&state)?;
     let vkey = STANDARD.encode(vk.key().as_bytes());
     let ts = now_unix();
     let bundle = JoinBundle {
@@ -1465,17 +1494,7 @@ pub async fn sync_pair_complete(
     state: State<'_, AppState>,
     code: String,
 ) -> Result<PairCompleteOut, String> {
-    // Never clobber an existing local vault (same guard as restore).
-    {
-        let g = state.inner.lock().unwrap();
-        if !g.vault.list_envelopes().map_err(estr)?.is_empty() {
-            return Err(
-                "This device already has a vault. Device pairing only works on a fresh \
-                 install with an empty vault, so it can't overwrite what's already here."
-                    .into(),
-            );
-        }
-    }
+    // Parse + validate the code first — no state changes on malformed/typo'd input.
     let body = code.trim().strip_prefix(JOIN_PREFIX).ok_or(
         "That doesn't look like a SENTINEL device code. Copy the whole code from the other device.",
     )?;
@@ -1501,7 +1520,28 @@ pub async fn sync_pair_complete(
         .map_err(|_| "The device code carried an invalid vault key.".to_string())?;
     let vk = VaultKey::from_key(Key32::from_bytes(arr));
 
-    // Wire the pinned server config (server_url is the fixed hostname the pinned client resolves).
+    // Refuse a non-empty vault AND adopt the shared key in ONE locked section, so that between the
+    // emptiness check and the key swap no concurrent vault_save can seal an item under this device's
+    // about-to-be-replaced local key — which would orphan it (a mismatched-key envelope that then
+    // propagates to every device on the next sync). The lock is held only for these in-memory ops.
+    {
+        let mut g = state.inner.lock().unwrap();
+        if !g.vault.list_envelopes().map_err(estr)?.is_empty() {
+            return Err(
+                "This device already has a vault. Device pairing only works on a fresh \
+                 install with an empty vault, so it can't overwrite what's already here."
+                    .into(),
+            );
+        }
+        g.session = VaultSession::unlocked(vk.clone());
+    }
+    // Persist the shared key to the keychain BEFORE sign-in, so an interruption can never leave a
+    // signed-in device operating on a stale local key (which could later push an empty/mis-keyed
+    // vault over the shared one). If sign-in below fails, the device is recoverable via Reconnect.
+    kc_set(KC_VAULT_KEY, &STANDARD.encode(vk.key().as_bytes()))?;
+
+    // Wire the pinned server config (server_url is the fixed hostname the pinned client resolves),
+    // store the bootstrap token, then sign in as another device on the same account.
     let dir = data_dir(&state);
     {
         let mut cfg = load_config(&dir);
@@ -1510,16 +1550,8 @@ pub async fn sync_pair_complete(
         cfg.server_ip = Some(bundle.ip.clone());
         save_config(&dir, &cfg)?;
     }
-    // Store the bootstrap token and sign in as another device on the same account.
     kc_set(KC_BOOTSTRAP, &bundle.token)?;
     bootstrap_signin(&dir).await?;
-
-    // Adopt the shared vault key (keychain + live session), mirroring sync_restore.
-    kc_set(KC_VAULT_KEY, &STANDARD.encode(vk.key().as_bytes()))?;
-    {
-        let mut g = state.inner.lock().unwrap();
-        g.session = VaultSession::unlocked(vk.clone());
-    }
 
     // Pull the shared vault down.
     let api = api_for(&state)?;
@@ -1536,4 +1568,26 @@ pub async fn sync_pair_complete(
         restored,
         server_ip: bundle.ip,
     })
+}
+
+/// Forget the sync server this device is pointed at: clear the pinned config + bootstrap token +
+/// session tokens, WITHOUT touching the local vault or its key or any deployed Linode. The escape
+/// hatch for a device that joined (or half-joined) a server that's since gone away or was wrong —
+/// afterward the device is plain local-only and can deploy or join fresh. NOT for the owner of a
+/// deployed server (they use Destroy, which also deletes the Linode).
+#[tauri::command]
+pub fn sync_forget(state: State<AppState>) -> Result<(), String> {
+    let dir = data_dir(&state);
+    let mut cfg = load_config(&dir);
+    cfg.server_url = None;
+    cfg.pinned_cert_pem = None;
+    cfg.server_ip = None;
+    cfg.google_client_id = None;
+    cfg.email = None;
+    save_config(&dir, &cfg)?;
+    kc_del(KC_BOOTSTRAP);
+    kc_del(KC_ACCESS);
+    kc_del(KC_REFRESH);
+    kc_del(KC_PENDING);
+    Ok(())
 }

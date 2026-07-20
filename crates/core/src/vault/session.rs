@@ -34,6 +34,15 @@ impl VaultSession {
         self.key.as_ref().ok_or(CoreError::State("vault is locked"))
     }
 
+    /// The live vault key while unlocked, or `None` if locked. Used by the sync/pairing layer to
+    /// wrap or transfer the key from RAM — it must NOT fall back to re-reading the OS keychain,
+    /// which would mint a spurious fresh key when a master password is set (the plaintext keychain
+    /// key is deleted then). Stays within the trusted app; the key is never serialized from here
+    /// except by the explicit, user-initiated backup/pairing flows.
+    pub fn vault_key(&self) -> Option<&VaultKey> {
+        self.key.as_ref()
+    }
+
     pub fn seal(&self, item: &Item) -> Result<ItemEnvelope> {
         seal_item(self.key()?, item)
     }

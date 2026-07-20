@@ -26,6 +26,7 @@ import {
   syncReconnect,
   syncPairBegin,
   syncPairComplete,
+  syncForget,
   authGoogleSignin,
   authTotpEnroll,
   authTotpVerify,
@@ -205,6 +206,11 @@ function SyncServer({ sync, onSyncChange }: { sync: SyncStatusInfo | null; onSyn
     } catch (e) {
       setProgress("");
       setMsg(e instanceof Error ? e.message : String(e));
+      // A deploy can fail AFTER the server record + billing exist (e.g. the first sign-in timed out
+      // while the box was still installing). Refresh so the running/billed server and its
+      // Destroy + Reconnect controls surface instead of leaving the card on "Not deployed".
+      await refresh();
+      await onSyncChange();
     }
     setBusy(false);
   };
@@ -265,9 +271,26 @@ function SyncServer({ sync, onSyncChange }: { sync: SyncStatusInfo | null; onSyn
     setBusy(false);
   };
 
-  // Layout branches.
+  const forget = async () => {
+    if (!window.confirm("Forget this sync server on this device? Your local vault stays; the server keeps running. You can deploy or join again afterward.")) return;
+    setBusy(true);
+    setMsg("");
+    try {
+      await syncForget();
+      setPairCode(null);
+      setMsg("Forgotten. This device is local-only again.");
+      await refresh();
+      await onSyncChange();
+    } catch (e) {
+      setMsg(errMsg(e));
+    }
+    setBusy(false);
+  };
+
+  // Layout branches. `configured` = this device is pointed at a one-click server (whether it
+  // deployed it or joined via a code). `deployed` = this device owns the server record (can Destroy).
   const deployed = !!st?.deployed;
-  const joined = signedIn && oneClick && !deployed; // signed in via a code, doesn't own the server
+  const configured = oneClick || deployed;
 
   return (
     <Card className="mb-4">
@@ -275,8 +298,16 @@ function SyncServer({ sync, onSyncChange }: { sync: SyncStatusInfo | null; onSyn
         <span className="flex items-center gap-2">
           <Cloud size={15} /> Sync server <span className="text-[11px] font-normal text-[var(--text-muted)]">(one-click)</span>
         </span>
-        <Badge tone={deployed || joined ? "ok" : "neutral"}>
-          {deployed ? (signedIn ? "Running · syncing" : "Running · not signed in") : joined ? "Connected" : "Not deployed"}
+        <Badge tone={signedIn ? "ok" : configured ? "warn" : "neutral"}>
+          {deployed
+            ? signedIn
+              ? "Running · syncing"
+              : "Running · not signed in"
+            : configured
+              ? signedIn
+                ? "Connected"
+                : "Not signed in"
+              : "Not deployed"}
         </Badge>
       </div>
       <p className="mb-3 text-xs text-[var(--text-secondary)]">
@@ -286,8 +317,8 @@ function SyncServer({ sync, onSyncChange }: { sync: SyncStatusInfo | null; onSyn
         here — no IP, cert, or login to type.
       </p>
 
-      {/* Fresh device: deploy a new server, or join one that already exists elsewhere. */}
-      {!deployed && !joined && (
+      {/* 1. Not pointed at any server yet: deploy a new one, or join an existing one with a code. */}
+      {!configured && (
         <>
           <div className="mb-2 rounded-[10px] border border-[var(--warn)]/30 bg-[var(--warn)]/10 p-2 text-[11px] text-[var(--text-secondary)]">
             Unlike the VPN, a sync server is <span className="font-medium">always on</span> and bills continuously
@@ -346,41 +377,65 @@ function SyncServer({ sync, onSyncChange }: { sync: SyncStatusInfo | null; onSyn
         </>
       )}
 
-      {/* Deployed on this device (this device owns the server). */}
-      {deployed && (
-        <div className="space-y-1.5 text-xs text-[var(--text-secondary)]">
-          <div>Server: <span className="mono">{st.ipv4}</span>{st.state ? ` · ${st.state}` : ""}</div>
-          <div>
-            Cost: <span className="font-medium">${st.monthlyUsd.toFixed(2)}/mo</span> (~${st.hourlyUsd.toFixed(3)}/hr) — billing until destroyed.
-          </div>
-
-          {/* Deployed but the initial sign-in never finished → offer a Reconnect. */}
-          {!signedIn && (
-            <div className="!mt-2 rounded-[10px] border border-[var(--warn)]/40 bg-[var(--warn)]/10 p-2.5">
-              <div className="text-[11px] text-[var(--text-secondary)]">
-                The server is running, but this device isn’t signed in yet (its first sign-in likely ran before the server
-                finished installing). Your vault is <span className="font-medium">not syncing yet</span>. Finish setup:
+      {/* 2. Pointed at a server but NOT signed in: finish/repair sign-in, or forget & start over.
+             Covers a deploy whose sign-in timed out AND a joined device that later signed out. */}
+      {configured && !signedIn && (
+        <div className="space-y-2 text-xs text-[var(--text-secondary)]">
+          {deployed && (
+            <>
+              <div>Server: <span className="mono">{st?.ipv4}</span>{st?.state ? ` · ${st.state}` : ""}</div>
+              <div>
+                Cost: <span className="font-medium">${st?.monthlyUsd?.toFixed(2)}/mo</span> (~${st?.hourlyUsd?.toFixed(3)}/hr) — billing until destroyed.
               </div>
-              <button onClick={() => void reconnect()} disabled={busy} className="mt-2 inline-flex items-center gap-1.5 rounded-[10px] border border-[var(--accent)]/50 px-3 py-1.5 text-sm text-[var(--accent)] hover:bg-[var(--accent)]/10 disabled:opacity-50">
-                <PlugZap size={14} /> {busy ? "Reconnecting…" : "Reconnect / finish setup"}
-              </button>
-            </div>
+            </>
           )}
-
-          {/* Signed in → can add more devices. */}
-          {signedIn && <AddDeviceBlock busy={busy} pairCode={pairCode} onAdd={() => void addDevice()} />}
-
-          <button onClick={() => void destroy()} disabled={busy} className="!mt-2 block text-[var(--danger)] hover:underline disabled:opacity-50">
-            Destroy sync server (stop billing)
-          </button>
+          <div className="!mt-2 rounded-[10px] border border-[var(--warn)]/40 bg-[var(--warn)]/10 p-2.5">
+            <div className="text-[11px] text-[var(--text-secondary)]">
+              This device is set up for a sync server but isn’t signed in yet
+              {deployed ? " (its first sign-in likely ran before the server finished installing)" : ""}. Your vault is
+              <span className="font-medium"> not syncing yet</span>. Finish setup:
+            </div>
+            <button onClick={() => void reconnect()} disabled={busy} className="mt-2 inline-flex items-center gap-1.5 rounded-[10px] border border-[var(--accent)]/50 px-3 py-1.5 text-sm text-[var(--accent)] hover:bg-[var(--accent)]/10 disabled:opacity-50">
+              <PlugZap size={14} /> {busy ? "Reconnecting…" : "Reconnect / finish setup"}
+            </button>
+          </div>
+          <div className="flex items-center gap-4 !mt-2">
+            {deployed ? (
+              <button onClick={() => void destroy()} disabled={busy} className="text-[var(--danger)] hover:underline disabled:opacity-50">
+                Destroy sync server (stop billing)
+              </button>
+            ) : (
+              <button onClick={() => void forget()} disabled={busy} className="text-[var(--text-muted)] hover:underline disabled:opacity-50">
+                Forget this server / start over
+              </button>
+            )}
+          </div>
         </div>
       )}
 
-      {/* Joined via a code (this device uses someone else's server). */}
-      {joined && (
+      {/* 3. Signed in: owner sees server info + Destroy; a joined device sees a connected note; both add devices. */}
+      {configured && signedIn && (
         <div className="space-y-2 text-xs text-[var(--text-secondary)]">
-          <div>This device is connected to your sync server as an added device. The server itself is managed on the computer that deployed it.</div>
+          {deployed ? (
+            <>
+              <div>Server: <span className="mono">{st?.ipv4}</span>{st?.state ? ` · ${st.state}` : ""}</div>
+              <div>
+                Cost: <span className="font-medium">${st?.monthlyUsd?.toFixed(2)}/mo</span> (~${st?.hourlyUsd?.toFixed(3)}/hr) — billing until destroyed.
+              </div>
+            </>
+          ) : (
+            <div>This device is connected to your sync server as an added device. The server itself is managed on the computer that deployed it.</div>
+          )}
           <AddDeviceBlock busy={busy} pairCode={pairCode} onAdd={() => void addDevice()} />
+          {deployed ? (
+            <button onClick={() => void destroy()} disabled={busy} className="!mt-2 block text-[var(--danger)] hover:underline disabled:opacity-50">
+              Destroy sync server (stop billing)
+            </button>
+          ) : (
+            <button onClick={() => void forget()} disabled={busy} className="!mt-2 block text-[var(--text-muted)] hover:underline disabled:opacity-50">
+              Disconnect this device from the server
+            </button>
+          )}
         </div>
       )}
 

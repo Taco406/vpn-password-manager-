@@ -493,3 +493,12 @@ export async function syncPairComplete(code: string): Promise<{ restored: number
   if (!inTauri()) throw new Error("Device pairing is only available in the desktop app.");
   return inv<{ restored: number; serverIp: string }>("sync_pair_complete", { code });
 }
+
+/**
+ * Forget the sync server this device points at (clears config + tokens, keeps the local vault and
+ * any deployed Linode). Escape hatch for a device stuck on a server that's gone away or was wrong.
+ */
+export async function syncForget(): Promise<void> {
+  if (!inTauri()) return;
+  await inv("sync_forget");
+}
