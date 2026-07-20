@@ -453,6 +453,8 @@ export async function helloSet(enabled: boolean): Promise<void> {
 export interface SyncStatusInfo {
   serverUrl: string | null;
   googleClientId: string | null;
+  /** Whether a Google client secret is saved on this device (never the value itself). */
+  googleSecretSet: boolean;
   signedIn: boolean;
   email: string | null;
 }
@@ -488,19 +490,21 @@ export async function syncServerStatus(): Promise<SyncServerStatus> {
 
 /**
  * Provision a durable Linode running the sync server and auto-configure the app. Long-running.
- * Pass a Google OAuth client id to deploy a Google-sign-in server (this device then finishes via
- * the Google + TOTP flow); omit it for the personal bootstrap server that signs in automatically.
+ * Pass a Google OAuth client id (+ its client secret — Google requires the secret in the desktop
+ * token exchange) to deploy a Google-sign-in server; omit for the personal bootstrap server.
  */
 export async function syncDeploy(
   region: string,
   instanceType?: string,
   googleClientId?: string,
+  googleClientSecret?: string,
 ): Promise<void> {
   if (!inTauri()) throw new Error("Deploying a sync server is only available in the desktop app.");
   await inv("sync_deploy", {
     region,
     instanceType: instanceType ?? null,
     googleClientId: googleClientId?.trim() ? googleClientId.trim() : null,
+    googleClientSecret: googleClientSecret?.trim() ? googleClientSecret.trim() : null,
   });
 }
 
@@ -520,8 +524,15 @@ export async function onSyncDeploy(
 }
 
 export async function syncStatus(): Promise<SyncStatusInfo> {
-  if (!inTauri()) return { serverUrl: null, googleClientId: null, signedIn: false, email: null };
+  if (!inTauri())
+    return { serverUrl: null, googleClientId: null, googleSecretSet: false, signedIn: false, email: null };
   return inv<SyncStatusInfo>("sync_status");
+}
+
+/** Save (or clear, with "") the Google OAuth client secret — required by Google for sign-in. */
+export async function syncSetGoogleSecret(secret: string): Promise<void> {
+  if (!inTauri()) return;
+  await inv("sync_set_google_secret", { secret: secret.trim() });
 }
 
 export async function syncSetConfig(
