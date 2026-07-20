@@ -112,6 +112,11 @@ function SyncServer({ sync, onSyncChange }: { sync: SyncStatusInfo | null; onSyn
   const [pending, setPending] = useState<{ email: string; totpRequired: boolean } | null>(null);
   const [enroll, setEnroll] = useState<{ otpauthUri: string; secret: string } | null>(null);
   const [code, setCode] = useState("");
+  // Switch an already-deployed built-in-login server over to Google sign-in (needs a redeploy).
+  const [showSwitch, setShowSwitch] = useState(false);
+  const [switchClientId, setSwitchClientId] = useState("");
+  const [switchRegion, setSwitchRegion] = useState("us-east");
+  const [switchGuide, setSwitchGuide] = useState(false);
 
   const signedIn = !!sync?.signedIn;
   const oneClick = sync?.serverUrl === ONE_CLICK_URL;
@@ -177,6 +182,43 @@ function SyncServer({ sync, onSyncChange }: { sync: SyncStatusInfo | null; onSyn
       await onSyncChange();
     } catch (e) {
       setMsg(errMsg(e));
+    }
+    setBusy(false);
+  };
+
+  // Switch a deployed built-in-login server to Google sign-in. The Google client id is baked into
+  // the server at boot, so there's no in-place reconfigure — we destroy and redeploy a fresh server
+  // (in the chosen region) with Google enabled. The local vault is untouched and re-uploads once
+  // this device signs in; other devices will need to re-join.
+  const enableGoogle = async () => {
+    const gcid = switchClientId.trim();
+    if (!gcid) {
+      setMsg("Enter your Google client ID first, or hide this to keep the built-in login.");
+      return;
+    }
+    if (
+      !window.confirm(
+        "Switch to Sign in with Google?\n\nThis destroys your current sync server and redeploys a fresh one with Google enabled. Your local vault is untouched and re-uploads after you sign in. Any other devices will need to re-join.",
+      )
+    )
+      return;
+    setBusy(true);
+    setProgress("Starting…");
+    setMsg("Switching to Google sign-in — destroying the old server and redeploying…");
+    try {
+      await syncServerDestroy();
+      await syncDeploy(switchRegion, undefined, gcid);
+      setProgress("");
+      setShowSwitch(false);
+      setSwitchClientId("");
+      setMsg("Redeployed with Google enabled. Click “Sign in with Google” below to finish.");
+      await refresh();
+      await onSyncChange();
+    } catch (e) {
+      setProgress("");
+      setMsg(errMsg(e));
+      await refresh();
+      await onSyncChange();
     }
     setBusy(false);
   };
@@ -345,14 +387,7 @@ function SyncServer({ sync, onSyncChange }: { sync: SyncStatusInfo | null; onSyn
                 <button onClick={() => setShowGuide((v) => !v)} className="text-xs text-[var(--accent)] hover:underline">
                   {showGuide ? "Hide setup steps" : "How do I get a Client ID? (~10 min, one-time)"}
                 </button>
-                {showGuide && (
-                  <ol className="list-decimal space-y-1 pl-4 text-[11px] text-[var(--text-secondary)]">
-                    <li>Open <span className="mono">console.cloud.google.com</span> and pick or create a project.</li>
-                    <li>APIs &amp; Services → OAuth consent screen → <span className="font-medium">External</span>; add your own email under Test users.</li>
-                    <li>APIs &amp; Services → Credentials → Create credentials → OAuth client ID → Application type <span className="font-medium">Desktop app</span>.</li>
-                    <li>Copy the Client ID (ends in <span className="mono">.apps.googleusercontent.com</span>) and paste it above — no client secret needed.</li>
-                  </ol>
-                )}
+                {showGuide && <GoogleGuideSteps />}
               </div>
             )}
           </div>
@@ -482,8 +517,81 @@ function SyncServer({ sync, onSyncChange }: { sync: SyncStatusInfo | null; onSyn
         </div>
       )}
 
+      {/* Owner of a built-in-login server: a discoverable path to switch to Google sign-in.
+          Shown whether or not this device is signed in, since the client id is fixed at the
+          server's boot — switching redeploys a fresh, Google-enabled server. */}
+      {deployed && !googleMode && !pending && (
+        <div className="mt-3 border-t border-[var(--border-subtle)] pt-3 text-xs text-[var(--text-secondary)]">
+          <div className="mb-1 flex items-center gap-1.5">
+            <LogIn size={13} /> Sign-in method: <span className="font-medium">built-in login</span>
+          </div>
+          {!showSwitch ? (
+            <button onClick={() => setShowSwitch(true)} className="text-[var(--accent)] hover:underline">
+              Switch to “Sign in with Google” instead
+            </button>
+          ) : (
+            <div className="mt-2 space-y-2 rounded-[10px] border border-[var(--border-subtle)] bg-[var(--bg-inset)] p-3">
+              <p className="text-[11px]">
+                The Google client id is set when the server is built, so switching redeploys a fresh
+                server with Google enabled. Your local vault is untouched and re-uploads after you sign
+                in; other devices will need to re-join.
+              </p>
+              <div>
+                <label className="mb-1 block text-[11px] text-[var(--text-muted)]">Redeploy in region</label>
+                <select
+                  value={switchRegion}
+                  onChange={(e) => setSwitchRegion(e.target.value)}
+                  className="w-full rounded-[10px] border border-[var(--border-strong)] bg-[var(--bg-inset)] px-3 py-2 text-sm outline-none focus:border-[var(--accent)]"
+                >
+                  {SYNC_REGIONS.map((r) => (
+                    <option key={r.id} value={r.id}>{r.label}</option>
+                  ))}
+                </select>
+              </div>
+              <input
+                value={switchClientId}
+                onChange={(e) => setSwitchClientId(e.target.value)}
+                placeholder="xxxxx.apps.googleusercontent.com"
+                className={`${inputCls} w-full`}
+              />
+              <button onClick={() => setSwitchGuide((v) => !v)} className="text-[11px] text-[var(--accent)] hover:underline">
+                {switchGuide ? "Hide setup steps" : "How do I get a Client ID? (~10 min, one-time)"}
+              </button>
+              {switchGuide && <GoogleGuideSteps />}
+              <div className="flex items-center gap-3">
+                <button onClick={() => void enableGoogle()} disabled={busy || !switchClientId.trim()} className={btnCls}>
+                  {busy ? "Working…" : "Destroy & redeploy with Google"}
+                </button>
+                <button
+                  onClick={() => {
+                    setShowSwitch(false);
+                    setSwitchClientId("");
+                  }}
+                  className="text-[11px] text-[var(--text-muted)] hover:underline"
+                >
+                  Cancel
+                </button>
+              </div>
+              {busy && progress && <p className="text-xs text-[var(--accent)]">{progress}</p>}
+            </div>
+          )}
+        </div>
+      )}
+
       {msg && <p className="mt-2 text-xs text-[var(--text-muted)]">{msg}</p>}
     </Card>
+  );
+}
+
+/** The one-time Google Cloud steps to get a Desktop-app OAuth Client ID (no client secret). */
+function GoogleGuideSteps() {
+  return (
+    <ol className="list-decimal space-y-1 pl-4 text-[11px] text-[var(--text-secondary)]">
+      <li>Open <span className="mono">console.cloud.google.com</span> and pick or create a project.</li>
+      <li>APIs &amp; Services → OAuth consent screen → <span className="font-medium">External</span>; add your own email under Test users.</li>
+      <li>APIs &amp; Services → Credentials → Create credentials → OAuth client ID → Application type <span className="font-medium">Desktop app</span>.</li>
+      <li>Copy the Client ID (ends in <span className="mono">.apps.googleusercontent.com</span>) and paste it above — no client secret needed.</li>
+    </ol>
   );
 }
 

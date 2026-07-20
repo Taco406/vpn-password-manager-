@@ -1,45 +1,105 @@
 import { useEffect, useState } from "react";
-import { AlertTriangle, Copy as CopyIcon, RefreshCw, Repeat, ShieldAlert, Clock, Flame } from "lucide-react";
+import {
+  AlertTriangle,
+  Copy as CopyIcon,
+  RefreshCw,
+  Repeat,
+  ShieldAlert,
+  Clock,
+  Flame,
+  Check,
+  ExternalLink,
+  Loader2,
+} from "lucide-react";
 import type { AuditReport, GeneratedPassword, ItemSummary } from "@sentinel/shared";
-import { bridge } from "../bridge";
+import { bridge, healthAuditFast, openUrl } from "../bridge";
 import { Card, SectionTitle, Button, Badge } from "../components/ui";
 
 export function Health() {
   const [report, setReport] = useState<AuditReport | null>(null);
   const [items, setItems] = useState<Record<string, ItemSummary>>({});
+  // The fast (local-only) audit lands first so the tab renders immediately; the full audit
+  // (which does the network HIBP breach check) arrives after and fills in the breach counts.
+  const [breachChecked, setBreachChecked] = useState(false);
 
   useEffect(() => {
-    void bridge.healthAudit().then(setReport);
+    // Render instantly from the local audit (reused / weak / old — no network)…
+    void healthAuditFast().then(setReport);
+    // …then replace with the breach-aware full audit once the HIBP check returns.
+    void bridge.healthAudit().then((full) => {
+      setReport(full);
+      setBreachChecked(true);
+    });
     void bridge.vaultList().then((list) => setItems(Object.fromEntries(list.map((i) => [i.id, i]))));
   }, []);
 
   const title = (id: string) => items[id]?.title ?? id;
+  const domainOf = (id: string) => items[id]?.faviconDomain;
+
+  // "Fix" a credential: mint a fresh strong password, copy it to the clipboard, and open the
+  // site's standard change-password page (/.well-known/change-password, which every major site
+  // redirects to its real reset form) so the user can paste the new one straight in.
+  const fixItem = async (id: string) => {
+    const pw = await bridge.generatorPassword({
+      length: 20,
+      lower: true,
+      upper: true,
+      digits: true,
+      symbols: true,
+      excludeAmbiguous: false,
+    });
+    await navigator.clipboard?.writeText(pw.value);
+    const domain = domainOf(id);
+    if (domain) await openUrl(`https://${domain}/.well-known/change-password`);
+  };
 
   return (
     <div className="mx-auto max-w-4xl px-8 py-8">
       <SectionTitle hint="reused · weak · old · breached">Vault health</SectionTitle>
 
-      {report && (
+      {!report ? (
+        <Card className="flex items-center gap-2 text-sm text-[var(--text-muted)]">
+          <Loader2 size={15} className="animate-spin" /> Analyzing your vault…
+        </Card>
+      ) : (
         <div className="grid grid-cols-[220px_1fr] gap-6">
           <ScoreRing score={report.score} />
           <div className="grid grid-cols-2 gap-3">
             <Metric icon={<Repeat size={15} />} tone="warn" n={report.reused.reduce((a, g) => a + g.itemIds.length, 0)} label="Reused" />
             <Metric icon={<ShieldAlert size={15} />} tone="warn" n={report.weak.length} label="Weak" />
             <Metric icon={<Clock size={15} />} tone="neutral" n={report.old.length} label="Old (>180d)" />
-            <Metric icon={<Flame size={15} />} tone="danger" n={report.breached.length} label="Breached" />
+            <Metric
+              icon={breachChecked ? <Flame size={15} /> : <Loader2 size={15} className="animate-spin" />}
+              tone="danger"
+              n={report.breached.length}
+              label={breachChecked ? "Breached" : "Checking…"}
+            />
           </div>
         </div>
       )}
 
-      {report && (
+      {report && (report.breached.length > 0 || report.reused.length > 0 || report.weak.length > 0) && (
         <div className="mt-6 flex flex-col gap-4">
+          <p className="text-xs text-[var(--text-muted)]">
+            <span className="text-[var(--text-secondary)]">Fix</span> copies a fresh strong password and opens that
+            site's password-change page so you can paste it in.
+          </p>
           {report.breached.length > 0 && (
             <Card>
               <div className="mb-3 flex items-center gap-2 text-sm font-medium text-[var(--danger)]">
                 <Flame size={15} /> Found in known breaches
               </div>
               {report.breached.map((b) => (
-                <Row key={b.itemId} title={title(b.itemId)} right={<Badge tone="danger">{b.count.toLocaleString()} hits</Badge>} />
+                <Row
+                  key={b.itemId}
+                  title={title(b.itemId)}
+                  right={
+                    <>
+                      <Badge tone="danger">{b.count.toLocaleString()} hits</Badge>
+                      <FixButton id={b.itemId} domain={domainOf(b.itemId)} onFix={fixItem} />
+                    </>
+                  }
+                />
               ))}
             </Card>
           )}
@@ -48,9 +108,20 @@ export function Health() {
               <div className="mb-3 flex items-center gap-2 text-sm font-medium text-[var(--warn)]">
                 <Repeat size={15} /> Reused across sites
               </div>
-              {report.reused.map((g, i) => (
-                <Row key={i} title={g.itemIds.map(title).join(", ")} right={<Badge tone="warn">{g.itemIds.length}×</Badge>} />
-              ))}
+              {report.reused.flatMap((g) =>
+                g.itemIds.map((id) => (
+                  <Row
+                    key={id}
+                    title={title(id)}
+                    right={
+                      <>
+                        <Badge tone="warn">{g.itemIds.length}×</Badge>
+                        <FixButton id={id} domain={domainOf(id)} onFix={fixItem} />
+                      </>
+                    }
+                  />
+                )),
+              )}
             </Card>
           )}
           {report.weak.length > 0 && (
@@ -59,7 +130,16 @@ export function Health() {
                 <AlertTriangle size={15} /> Weak passwords
               </div>
               {report.weak.map((w) => (
-                <Row key={w.itemId} title={title(w.itemId)} right={<Badge tone="warn">score {w.score}/4</Badge>} />
+                <Row
+                  key={w.itemId}
+                  title={title(w.itemId)}
+                  right={
+                    <>
+                      <Badge tone="warn">score {w.score}/4</Badge>
+                      <FixButton id={w.itemId} domain={domainOf(w.itemId)} onFix={fixItem} />
+                    </>
+                  }
+                />
               ))}
             </Card>
           )}
@@ -68,6 +148,32 @@ export function Health() {
 
       <Generator />
     </div>
+  );
+}
+
+function FixButton({ id, domain, onFix }: { id: string; domain?: string; onFix: (id: string) => Promise<void> }) {
+  const [done, setDone] = useState(false);
+  const click = async () => {
+    await onFix(id);
+    setDone(true);
+    window.setTimeout(() => setDone(false), 2500);
+  };
+  return (
+    <Button variant="ghost" onClick={click} className="!px-2.5 !py-1 text-xs">
+      {done ? (
+        <>
+          <Check size={13} /> Copied
+        </>
+      ) : domain ? (
+        <>
+          <ExternalLink size={13} /> Fix
+        </>
+      ) : (
+        <>
+          <CopyIcon size={13} /> New password
+        </>
+      )}
+    </Button>
   );
 }
 
@@ -102,9 +208,9 @@ function Metric({ icon, n, label, tone }: { icon: React.ReactNode; n: number; la
 
 function Row({ title, right }: { title: string; right: React.ReactNode }) {
   return (
-    <div className="flex items-center justify-between border-t border-[var(--border-subtle)] py-2 first:border-0">
+    <div className="flex items-center justify-between gap-3 border-t border-[var(--border-subtle)] py-2 first:border-0">
       <span className="truncate text-sm">{title}</span>
-      {right}
+      <div className="flex shrink-0 items-center gap-2">{right}</div>
     </div>
   );
 }

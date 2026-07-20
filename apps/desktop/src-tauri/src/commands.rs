@@ -5,7 +5,7 @@
 
 use crate::state::AppState;
 use sentinel_core::generator::{self, PassphraseSpec, PasswordSpec};
-use sentinel_core::health::{run_audit, RealHibp};
+use sentinel_core::health::{run_audit, HibpClient, NoHibp, RealHibp};
 use sentinel_core::totp::TotpSecret;
 use sentinel_core::vault::model::{Card, Identity, Item, ItemType, Login, UrlMatch, UrlMode};
 use sentinel_core::vault::VaultSession;
@@ -866,8 +866,10 @@ pub struct AuditOut {
     score: u8,
 }
 
-#[tauri::command]
-pub async fn health_audit(state: State<'_, AppState>) -> R<AuditOut> {
+/// Run the audit with a given HIBP client and shape it for the UI. Splitting the client out lets
+/// the Health tab render the *instant* local checks (reused/weak/old) first via `NoHibp`, then
+/// fill in the slow network breach check via `RealHibp` — so the tab no longer blocks on HIBP.
+async fn audit_with(state: &State<'_, AppState>, hibp: &dyn HibpClient) -> R<AuditOut> {
     let items = {
         let inner = state.inner.lock().unwrap();
         inner
@@ -877,9 +879,7 @@ pub async fn health_audit(state: State<'_, AppState>) -> R<AuditOut> {
             .filter_map(|e| inner.session.open(e).ok())
             .collect::<Vec<_>>()
     };
-    // Real Have-I-Been-Pwned breach check (k-anonymity; only a 5-char SHA-1 prefix leaves
-    // the device). Offline, breach_count errors are swallowed by run_audit → 0 breaches.
-    let report = run_audit(&items, now(), &RealHibp::default()).await;
+    let report = run_audit(&items, now(), hibp).await;
     Ok(AuditOut {
         reused: report
             .reused
@@ -916,6 +916,20 @@ pub async fn health_audit(state: State<'_, AppState>) -> R<AuditOut> {
             .collect(),
         score: report.score,
     })
+}
+
+/// Full audit including the live HIBP breach check (the breach part needs the network, so it may
+/// take a moment on first load).
+#[tauri::command]
+pub async fn health_audit(state: State<'_, AppState>) -> R<AuditOut> {
+    audit_with(&state, &RealHibp::default()).await
+}
+
+/// Instant local audit (reused / weak / old — no network). The Health tab renders this immediately,
+/// then swaps in `health_audit` once the breach check returns.
+#[tauri::command]
+pub async fn health_audit_fast(state: State<'_, AppState>) -> R<AuditOut> {
+    audit_with(&state, &NoHibp).await
 }
 
 // ---------------------------------------------------------------------------

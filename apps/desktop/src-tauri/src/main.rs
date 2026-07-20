@@ -92,6 +92,7 @@ fn main() {
             commands::generator_password,
             commands::generator_passphrase,
             commands::health_audit,
+            commands::health_audit_fast,
             commands::settings_get,
             commands::settings_set,
             vpn::vpn_config,
