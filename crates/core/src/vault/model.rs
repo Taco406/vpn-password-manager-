@@ -13,6 +13,7 @@ pub enum ItemType {
     Note,
     Card,
     Identity,
+    Passkey,
 }
 
 /// How a saved URL is matched against a page origin during autofill.
@@ -77,6 +78,34 @@ pub struct Identity {
     pub address: Option<String>,
 }
 
+/// A WebAuthn/FIDO2 passkey (discoverable credential). The private key is the account
+/// secret; it is stored inside the item plaintext and therefore sealed at rest by the
+/// per-item envelope like every other field. Minted by `vault::passkey::mint_passkey`;
+/// never hand-typed. `Eq` is derived to match the other sub-structs so `Item` keeps `Eq`.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Passkey {
+    /// Relying-party id, e.g. "example.com".
+    pub rp_id: String,
+    /// Human-readable relying-party name, if the site supplied one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rp_name: Option<String>,
+    /// Account name on the site (WebAuthn `user.name`).
+    pub user_name: String,
+    /// Human-readable account name (WebAuthn `user.displayName`), if supplied.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user_display_name: Option<String>,
+    /// base64url (no pad) of the opaque user handle bytes (WebAuthn `user.id`).
+    pub user_handle: String,
+    /// base64url (no pad) of the credential id.
+    pub credential_id: String,
+    /// base64 (std) of the 32-byte P-256 secret scalar — THE account secret.
+    pub private_key: String,
+    /// COSE algorithm identifier; -7 for ES256 (ECDSA P-256 + SHA-256).
+    pub algorithm: i32,
+    /// Signature counter (WebAuthn authenticator data). Starts at 0.
+    pub sign_count: u32,
+}
+
 /// A full vault item (plaintext).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Item {
@@ -98,6 +127,8 @@ pub struct Item {
     pub card: Option<Card>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub identity: Option<Identity>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub passkey: Option<Passkey>,
     pub created_at: i64,
     pub updated_at: i64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -118,6 +149,7 @@ impl Item {
             login: Some(Login::default()),
             card: None,
             identity: None,
+            passkey: None,
             created_at: now,
             updated_at: now,
             password_changed_at: Some(now),

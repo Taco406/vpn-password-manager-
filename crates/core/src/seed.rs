@@ -364,6 +364,7 @@ pub fn demo_bundle() -> DemoBundle {
                 ItemType::Note => "note",
                 ItemType::Card => "card",
                 ItemType::Identity => "identity",
+                ItemType::Passkey => "passkey",
             }
             .to_string(),
             username: it.username().map(|s| s.to_string()),

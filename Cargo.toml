@@ -40,7 +40,7 @@ subtle = "2.6"
 rand = "0.8"
 rand_core = "0.6"
 x25519-dalek = { version = "2", features = ["static_secrets", "getrandom"] }
-p256 = { version = "0.13", features = ["ecdh"] }
+p256 = { version = "0.13", features = ["ecdh", "ecdsa"] }
 base64 = "0.22"
 zstd = "0.13"
 

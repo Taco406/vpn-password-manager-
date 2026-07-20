@@ -2205,10 +2205,8 @@ pub async fn vpn_node_action(
         "reboot" => deps.cloud.reboot(&id).await.map_err(|e| e.to_string()),
         "stop" => {
             let r = deps.cloud.shutdown(&id).await.map_err(|e| e.to_string());
-            if r.is_ok() {
-                if kept_ids(&data_dir).len() < MAX_KEPT_NODES {
-                    kept_add(&data_dir, &id);
-                }
+            if r.is_ok() && kept_ids(&data_dir).len() < MAX_KEPT_NODES {
+                kept_add(&data_dir, &id);
             }
             r
         }

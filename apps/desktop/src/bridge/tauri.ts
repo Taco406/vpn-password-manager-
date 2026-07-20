@@ -85,6 +85,20 @@ export function createTauriBridge(): SentinelBridge {
     vaultRevealField: (id: string, field: string) =>
       invoke<string>("vault_reveal_field", { id, field }),
     vaultSave: (item: ItemInput) => invoke<string>("vault_save", { item }),
+    vaultPasskeyCreate: (
+      rpId: string,
+      rpName: string | undefined,
+      userName: string,
+      userDisplayName: string | undefined,
+      userHandleB64u: string,
+    ) =>
+      invoke<{ id: string; credentialId: string; publicKeyB64: string }>("vault_passkey_create", {
+        rpId,
+        rpName,
+        userName,
+        userDisplayName,
+        userHandleB64u,
+      }),
     vaultDelete: (id: string) => invoke<void>("vault_delete", { id }),
     vaultTotp: (id: string) => invoke<{ code: string; remainingMs: number }>("vault_totp", { id }),
     generatorPassword: (spec: PasswordSpec) =>

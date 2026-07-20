@@ -84,6 +84,7 @@ fn main() {
             commands::vault_get,
             commands::vault_reveal_field,
             commands::vault_save,
+            commands::vault_passkey_create,
             commands::vault_delete,
             commands::vault_totp,
             commands::vault_import,

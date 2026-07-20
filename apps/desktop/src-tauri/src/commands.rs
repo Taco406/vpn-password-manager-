@@ -67,6 +67,7 @@ fn type_str(t: ItemType) -> &'static str {
         ItemType::Note => "note",
         ItemType::Card => "card",
         ItemType::Identity => "identity",
+        ItemType::Passkey => "passkey",
     }
 }
 fn type_from_str(s: &str) -> ItemType {
@@ -74,6 +75,7 @@ fn type_from_str(s: &str) -> ItemType {
         "note" => ItemType::Note,
         "card" => ItemType::Card,
         "identity" => ItemType::Identity,
+        "passkey" => ItemType::Passkey,
         _ => ItemType::Login,
     }
 }
@@ -322,6 +324,21 @@ struct IdentityOut {
     #[serde(skip_serializing_if = "Option::is_none")]
     phone: Option<String>,
 }
+/// Passkey projection — SAFE fields only. The private key is deliberately absent and is
+/// never serialized to the UI by any command.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PasskeyOut {
+    rp_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    rp_name: Option<String>,
+    user_name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    user_display_name: Option<String>,
+    credential_id: String,
+    algorithm: i32,
+    sign_count: u32,
+}
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -347,6 +364,8 @@ pub struct ItemDetail {
     card: Option<CardOut>,
     #[serde(skip_serializing_if = "Option::is_none")]
     identity: Option<IdentityOut>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    passkey: Option<PasskeyOut>,
 }
 
 #[tauri::command]
@@ -378,6 +397,16 @@ pub fn vault_get(state: State<AppState>, id: String) -> R<ItemDetail> {
         email: d.email.clone(),
         phone: d.phone.clone(),
     });
+    // Passkey projection: safe metadata only. `private_key` is never included.
+    let passkey = it.passkey.as_ref().map(|p| PasskeyOut {
+        rp_id: p.rp_id.clone(),
+        rp_name: p.rp_name.clone(),
+        user_name: p.user_name.clone(),
+        user_display_name: p.user_display_name.clone(),
+        credential_id: p.credential_id.clone(),
+        algorithm: p.algorithm,
+        sign_count: p.sign_count,
+    });
     Ok(ItemDetail {
         id: s.id,
         kind: s.kind,
@@ -408,6 +437,7 @@ pub fn vault_get(state: State<AppState>, id: String) -> R<ItemDetail> {
             .collect(),
         card,
         identity,
+        passkey,
     })
 }
 
@@ -590,6 +620,16 @@ pub fn vault_save(state: State<AppState>, item: ItemInput) -> R<String> {
             )
         }
         ItemType::Note => (None, None, None, None),
+        // Passkeys are minted, never hand-typed: a save only carries title/tags/notes edits.
+        ItemType::Passkey => (None, None, None, None),
+    };
+
+    // Never fabricate key material on save. Only when editing an existing passkey item do we
+    // carry its sealed sub-object forward (so title/tags/notes can be edited); otherwise None.
+    let passkey = if matches!(kind, ItemType::Passkey) {
+        prior.as_ref().and_then(|p| p.passkey.clone())
+    } else {
+        None
     };
 
     let built = Item {
@@ -603,6 +643,7 @@ pub fn vault_save(state: State<AppState>, item: ItemInput) -> R<String> {
         login,
         card,
         identity,
+        passkey,
         created_at,
         updated_at: ts,
         password_changed_at,
@@ -611,6 +652,77 @@ pub fn vault_save(state: State<AppState>, item: ItemInput) -> R<String> {
     let env = inner.session.seal(&built)?;
     inner.vault.upsert(&env)?;
     Ok(uid.to_string())
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PasskeyCreated {
+    id: String,
+    credential_id: String,
+    /// base64 (std) of the 65-byte uncompressed SEC1 public point. The private key is
+    /// never returned.
+    public_key_b64: String,
+}
+
+/// Mint an ES256 passkey, seal it into a new Passkey vault item, and return the ids the
+/// caller needs. This is the seam Stage B's browser registration flow calls; the returned
+/// public key gets COSE-encoded there. The private key stays sealed in the vault and is
+/// never exposed by this (or any) command.
+#[tauri::command]
+pub fn vault_passkey_create(
+    state: State<AppState>,
+    rp_id: String,
+    rp_name: Option<String>,
+    user_name: String,
+    user_display_name: Option<String>,
+    user_handle_b64u: String,
+) -> R<PasskeyCreated> {
+    use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
+    use base64::Engine as _;
+
+    let user_handle = URL_SAFE_NO_PAD
+        .decode(user_handle_b64u.as_bytes())
+        .map_err(|_| err("bad_handle", "user handle is not base64url"))?;
+
+    let pk = sentinel_core::vault::mint_passkey(
+        &rp_id,
+        rp_name,
+        &user_name,
+        user_display_name,
+        &user_handle,
+    );
+    // Derive the public key before the key material is moved into the item.
+    let public_key = sentinel_core::vault::public_key_sec1(&pk)?;
+    let credential_id = pk.credential_id.clone();
+
+    let ts = now();
+    let item = Item {
+        id: uuid::Uuid::new_v4(),
+        item_type: ItemType::Passkey,
+        title: format!("{user_name} @ {rp_id}"),
+        tags: vec![],
+        urls: vec![],
+        notes: None,
+        custom_fields: vec![],
+        login: None,
+        card: None,
+        identity: None,
+        passkey: Some(pk),
+        created_at: ts,
+        updated_at: ts,
+        password_changed_at: None,
+    };
+    let id = item.id.to_string();
+
+    let inner = state.inner.lock().unwrap();
+    let env = inner.session.seal(&item)?;
+    inner.vault.upsert(&env)?;
+
+    Ok(PasskeyCreated {
+        id,
+        credential_id,
+        public_key_b64: STANDARD.encode(public_key),
+    })
 }
 
 #[tauri::command]

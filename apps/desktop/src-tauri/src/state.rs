@@ -6,6 +6,7 @@
 //!   - The 256-bit *vault key* lives ONLY in the OS keychain (Windows Credential Manager /
 //!     macOS Keychain / Secret Service). It is never written next to the vault, so a stolen
 //!     `vault.db` on its own is opaque ciphertext.
+//!
 //! On launch we read (or, on first run, create + store) the key and open the session
 //! unlocked — the security boundary is the OS login that guards the keychain.
 
