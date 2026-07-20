@@ -8,6 +8,23 @@ The format follows [Keep a Changelog](https://keepachangelog.com/). Versions are
 [semantic](https://semver.org/). **Add a new `## [x.y.z]` section at the top in the same PR
 that bumps the app version** — that's how "the changelog updates on every merge."
 
+## [0.1.27] — 2026-07-20
+
+### Fixed
+- **The sync server now actually starts.** This is the real reason a one-click sync server would
+  show *Running* but never sign this device in (so Reconnect could never finish): the server was
+  started in production mode **without one of its required secrets** (the TOTP encryption key), so it
+  refused to boot and the container crash-looped forever — nothing ever answered the health check.
+  Redeploying couldn't help because every deploy hit the same missing secret. The deploy now generates
+  and passes that key (like it already does for the others), so a freshly deployed server comes up
+  healthy and this device signs in on its own. **If you have a stuck server, Destroy it and Deploy
+  once more** — the new one will work.
+- **The Devices page no longer shows fake demo content.** The device list and the "Pair a new iPhone"
+  card at the top were leftover placeholders wired to sample data (there's no iOS companion app behind
+  them), which made the whole page look broken. They're removed — the page now shows only the real
+  sync server and vault-sync controls, and your actual signed-in devices already appear under **Vault
+  sync → Signed-in devices**.
+
 ## [0.1.26] — 2026-07-20
 
 ### Fixed

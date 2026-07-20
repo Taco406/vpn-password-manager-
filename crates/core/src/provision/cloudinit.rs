@@ -317,6 +317,7 @@ write_files:
         -e SENTINEL_ENV=production \
         -e SENTINEL_API_BIND=0.0.0.0:8787 \
         -e SENTINEL_BOOTSTRAP_TOKEN={{ bootstrap_token }} \
+        -e SENTINEL_TOTP_ENC_KEY={{ totp_enc_key }} \
         -e SENTINEL_TLS_CERT_PEM=/tls/cert.pem \
         -e SENTINEL_TLS_KEY_PEM=/tls/key.pem \
         -e SENTINEL_JWT_ES256_PEM=/tls/jwt.pem \
@@ -346,6 +347,10 @@ pub struct SyncServerParams {
     pub tls_cert_b64: String,
     /// Base64 of the matching private key PEM.
     pub tls_key_b64: String,
+    /// Base64 of the 32-byte TOTP encryption key. REQUIRED: with `SENTINEL_ENV=production` the
+    /// server refuses to boot (and `--restart=always` crash-loops it) unless this is set, so the
+    /// container would never serve `/healthz` and the deploy could never sign in. Kept on-box only.
+    pub totp_enc_key: String,
 }
 
 /// Render the sync-server cloud-init YAML.
@@ -363,6 +368,7 @@ pub fn render_sync(params: &SyncServerParams) -> Result<String> {
         db_password => params.db_password,
         tls_cert_b64 => params.tls_cert_b64,
         tls_key_b64 => params.tls_key_b64,
+        totp_enc_key => params.totp_enc_key,
     })
     .map_err(|e| CoreError::Provision {
         stage: "render",
@@ -478,6 +484,7 @@ mod tests {
             db_password: "pgpasswd123".into(),
             tls_cert_b64: "Q0VSVA==".into(),
             tls_key_b64: "S0VZ".into(),
+            totp_enc_key: "dG90cGtleWJhc2U2NA==".into(),
         }
     }
 
@@ -490,6 +497,9 @@ mod tests {
         assert!(yaml.contains("SENTINEL_BOOTSTRAP_TOKEN=deadbeefcafe"));
         assert!(yaml.contains("SENTINEL_AUTO_MIGRATE=1"));
         assert!(yaml.contains("SENTINEL_ENV=production"));
+        // The TOTP key MUST be set — without it the server refuses to boot under
+        // SENTINEL_ENV=production and crash-loops, so /healthz never answers.
+        assert!(yaml.contains("SENTINEL_TOTP_ENC_KEY=dG90cGtleWJhc2U2NA=="));
         // TLS cert/key are decoded on-box; HTTPS is served (host 443 → container 8787).
         assert!(yaml.contains("Q0VSVA==")); // tls_cert_b64
         assert!(yaml.contains("SENTINEL_TLS_CERT_PEM=/tls/cert.pem"));
