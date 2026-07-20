@@ -1,0 +1,64 @@
+name: VPN live test
+
+# Manual, on-demand END-TO-END test of the real VPN against a live Linode.
+# It runs the app's built-in `--vpn-selftest` (apps/desktop/src-tauri/src/vpn.rs):
+# spin up a throwaway Linode, bring up a minimal-routing WireGuard tunnel, verify a
+# real handshake, then destroy the node — exiting 0 on success, 1 on failure.
+#
+# ── One-time setup (see docs/vpn-testing.md) ────────────────────────────────
+#   * A SELF-HOSTED Windows runner labelled `self-hosted` + `windows`, with:
+#       - WireGuard for Windows installed (https://www.wireguard.com/install/)
+#       - the runner running with Administrator rights (creating a tunnel is privileged)
+#     (Hosted GitHub Windows runners can't install the WireGuard tun driver, which is
+#      why this has to be self-hosted.)
+#   * A repo secret `SENTINEL_LINODE_TOKEN` — a Linode PAT with Read/Write on Linodes.
+#     Each run costs a few cents of Linode time; the node is always destroyed afterward.
+
+on:
+  workflow_dispatch:
+    inputs:
+      region:
+        description: "Linode region to test (e.g. us-east, eu-central, ap-south)"
+        required: false
+        default: "us-east"
+
+jobs:
+  vpn-selftest:
+    runs-on: [self-hosted, windows]
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install JS deps
+        run: pnpm install --frozen-lockfile
+      - name: Build frontend (embedded by the desktop binary)
+        run: pnpm --filter @sentinel/desktop build
+      - name: Build sentinel-desktop (release)
+        run: cargo build --release -p sentinel-desktop
+      - name: Run the VPN self-test against a live Linode
+        shell: pwsh
+        env:
+          SENTINEL_LINODE_TOKEN: ${{ secrets.SENTINEL_LINODE_TOKEN }}
+        run: |
+          if (-not $env:SENTINEL_LINODE_TOKEN) {
+            Write-Error "SENTINEL_LINODE_TOKEN secret is not set — add a Linode PAT (Read/Write on Linodes) in repo Settings → Secrets."
+            exit 1
+          }
+          # The desktop binary is a GUI-subsystem app, so launch it via Start-Process and
+          # redirect its output to files (reliable capture regardless of subsystem), then
+          # surface the report and propagate the exit code.
+          $p = Start-Process -FilePath ".\target\release\sentinel-desktop.exe" `
+            -ArgumentList "--vpn-selftest", "${{ inputs.region }}" `
+            -Wait -PassThru -RedirectStandardOutput selftest-out.txt -RedirectStandardError selftest-err.txt
+          if (Test-Path selftest-out.txt) { Get-Content selftest-out.txt }
+          if (Test-Path selftest-err.txt) { Get-Content selftest-err.txt }
+          if ($p.ExitCode -ne 0) {
+            Write-Error "VPN self-test FAILED (exit $($p.ExitCode)) — see the report above."
+            exit 1
+          }
+          Write-Host "✓ VPN self-test PASSED — a real WireGuard handshake landed end-to-end."
