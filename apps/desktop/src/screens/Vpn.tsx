@@ -1,12 +1,22 @@
 import { useEffect, useState } from "react";
 import { motion } from "framer-motion";
-import { Power, Zap, Cpu, MemoryStick, Activity, DollarSign, Gauge } from "lucide-react";
+import { Power, Zap, Cpu, MemoryStick, Activity, DollarSign, Gauge, Cloud } from "lucide-react";
 import type { InstanceType, Region } from "@sentinel/shared";
-import { bridge } from "../bridge";
+import {
+  bridge,
+  vpnRealEnabled,
+  vpnNodes,
+  vpnCostSummary,
+  vpnNodeAction,
+  vpnNodesDestroyAll,
+  type VpnNode,
+  type VpnCostSummary,
+} from "../bridge";
 import { useApp } from "../stores/app";
 import { Globe } from "../components/globe/Globe";
 import { ThroughputChart, fmtRate, fmtBytes } from "../components/charts/ThroughputChart";
 import { Card, Button, Badge } from "../components/ui";
+import { errMsg, btnCls } from "../components/kit";
 
 export function Vpn() {
   const [regions, setRegions] = useState<Region[]>([]);
@@ -82,6 +92,7 @@ export function Vpn() {
         {stage === "idle" ? (
           <>
             <RegionPicker regions={regions} selected={selectedRegion} onSelect={setSelectedRegion} />
+            <VpnNodes />
             <InstancePicker types={types} selected={selectedType} onSelect={setSelectedType} />
             <Button onClick={doConnect} className="w-full py-3">
               <Power size={17} /> Connect
@@ -206,5 +217,127 @@ function Gauge2({ icon, label, pct }: { icon: React.ReactNode; label: string; pc
         <div className="h-full rounded-full transition-all" style={{ width: `${pct}%`, background: tone }} />
       </div>
     </div>
+  );
+}
+
+function VpnNodes() {
+  const [enabled, setEnabled] = useState(false);
+  const [nodes, setNodes] = useState<VpnNode[]>([]);
+  const [cost, setCost] = useState<VpnCostSummary | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState("");
+
+  const refresh = async () => {
+    setBusy(true);
+    setMsg("");
+    try {
+      const on = await vpnRealEnabled();
+      setEnabled(on);
+      if (on) {
+        const [n, c] = await Promise.all([vpnNodes(), vpnCostSummary()]);
+        setNodes(n);
+        setCost(c);
+      }
+    } catch (e) {
+      setMsg(`Couldn't load nodes: ${errMsg(e)}`);
+    }
+    setBusy(false);
+  };
+
+  useEffect(() => {
+    void refresh();
+  }, []);
+
+  const act = async (id: string, action: "start" | "stop" | "reboot" | "delete") => {
+    if (action === "delete" && !confirm("Destroy this node? This permanently deletes it (and stops its billing).")) return;
+    setBusy(true);
+    setMsg("");
+    try {
+      await vpnNodeAction(id, action);
+      await refresh();
+    } catch (e) {
+      setMsg(`Action failed: ${errMsg(e)}`);
+      setBusy(false);
+    }
+  };
+
+  const destroyAll = async () => {
+    if (!confirm("Destroy ALL exit nodes? This stops all billing and disconnects you.")) return;
+    setBusy(true);
+    setMsg("");
+    try {
+      const n = await vpnNodesDestroyAll();
+      setMsg(`Destroyed ${n} node${n === 1 ? "" : "s"}.`);
+      await refresh();
+    } catch (e) {
+      setMsg(`Couldn't destroy all: ${errMsg(e)}`);
+      setBusy(false);
+    }
+  };
+
+  if (!enabled) return null; // only meaningful in real-VPN (Linode) mode
+
+  return (
+    <Card className="mb-4">
+      <div className="mb-2 flex items-center justify-between text-sm font-medium">
+        <span className="flex items-center gap-2">
+          <Cloud size={15} /> VPN exit nodes
+        </span>
+        <button onClick={() => void refresh()} disabled={busy} className="text-xs text-[var(--accent)] hover:underline">
+          {busy ? "…" : "Refresh"}
+        </button>
+      </div>
+
+      {cost && cost.nodeCount > 0 && (
+        <div className="mb-3 rounded-[10px] border border-[var(--border-strong)] p-3 text-xs">
+          <div className="flex items-center justify-between">
+            <span className="text-[var(--text-secondary)]">
+              {cost.nodeCount} node{cost.nodeCount === 1 ? "" : "s"} · {cost.running} running · {cost.stopped} stopped
+            </span>
+            <span className="font-medium">~${cost.hourlyUsd.toFixed(4)}/hr</span>
+          </div>
+          <p className="mt-1 text-[var(--text-muted)]">
+            A stopped node still bills — only <span className="font-medium">Destroy</span> stops the meter.
+          </p>
+        </div>
+      )}
+
+      {nodes.length === 0 ? (
+        <p className="text-xs text-[var(--text-secondary)]">
+          No exit nodes right now. Connecting on the VPN screen creates one; use “Disconnect &amp; keep” to power one
+          off without destroying it.
+        </p>
+      ) : (
+        <div className="space-y-2">
+          {nodes.map((n) => (
+            <div key={n.id} className="flex flex-wrap items-center gap-2 rounded-[10px] border border-[var(--border-subtle)] p-2 text-xs">
+              <span className="mono">{n.region}</span>
+              <Badge tone={n.state === "running" ? "ok" : n.state === "stopped" ? "neutral" : "accent"}>{n.state}</Badge>
+              {n.current && <Badge tone="accent">connected</Badge>}
+              {n.kept && <Badge tone="neutral">kept</Badge>}
+              <span className="text-[var(--text-muted)]">~${n.hourlyUsd.toFixed(4)}/hr</span>
+              <span className="ml-auto flex gap-2">
+                {n.state === "stopped" ? (
+                  <button onClick={() => void act(n.id, "start")} disabled={busy} className="text-[var(--accent)] hover:underline">Start</button>
+                ) : (
+                  <button onClick={() => void act(n.id, "stop")} disabled={busy} className="text-[var(--accent)] hover:underline">Stop</button>
+                )}
+                <button onClick={() => void act(n.id, "reboot")} disabled={busy} className="text-[var(--accent)] hover:underline">Reboot</button>
+                <button onClick={() => void act(n.id, "delete")} disabled={busy} className="text-[var(--danger)] hover:underline">Destroy</button>
+              </span>
+            </div>
+          ))}
+        </div>
+      )}
+
+      <div className="mt-3 flex items-center gap-3">
+        {nodes.length > 0 && (
+          <button onClick={() => void destroyAll()} disabled={busy} className={btnCls}>
+            Destroy all nodes
+          </button>
+        )}
+        {msg && <span className="text-xs text-[var(--text-muted)]">{msg}</span>}
+      </div>
+    </Card>
   );
 }
