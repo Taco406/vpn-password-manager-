@@ -109,4 +109,30 @@ mod tests {
             .iter()
             .all(|i| i.id != sync.id));
     }
+
+    #[tokio::test]
+    async fn durable_persistent_vpn_node_is_never_reaped() {
+        // An always-on VPN node tagged `sentinel-vpn-persistent` (not ephemeral) must be invisible
+        // to the sweep, even the "keep nothing" destroy-all variant — it's meant to stay up until
+        // the user explicitly destroys it.
+        let cloud = MockCloud::new(0);
+        let spec = crate::cloud::InstanceSpec {
+            region: "us-east".into(),
+            instance_type: "g6-nanode-1".into(),
+            user_data: String::new(),
+            label: "always-on".into(),
+            tags: vec![crate::cloud::PERSISTENT_VPN_TAG.into()],
+        };
+        let node = cloud.create(&spec).await.unwrap();
+        let reaped = orphan_sweep_keeping(&cloud, &HashSet::new()).await.unwrap();
+        assert!(reaped.contains(&"orphan-666".to_string()));
+        assert!(!reaped.contains(&node.id));
+        assert!(cloud.get(&node.id).await.is_ok());
+        assert!(cloud
+            .list_ephemeral()
+            .await
+            .unwrap()
+            .iter()
+            .all(|i| i.id != node.id));
+    }
 }

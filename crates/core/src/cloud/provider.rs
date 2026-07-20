@@ -14,6 +14,12 @@ pub const EPHEMERAL_TAG: &str = "sentinel-ephemeral";
 /// or destroys it — the sync server is meant to stay up.
 pub const SYNC_TAG: &str = "sentinel-sync";
 
+/// The tag a durable **always-on VPN exit node** carries. Like [`SYNC_TAG`], it deliberately does
+/// NOT include [`EPHEMERAL_TAG`], so the orphan sweep never lists or destroys it — an always-on
+/// node stays up until the user explicitly destroys it (there is no dead-man switch on it). It is
+/// otherwise the same WireGuard exit node as an ephemeral connect.
+pub const PERSISTENT_VPN_TAG: &str = "sentinel-vpn-persistent";
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum InstanceState {
     Provisioning,

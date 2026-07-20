@@ -9,8 +9,14 @@ import {
   vpnCostSummary,
   vpnNodeAction,
   vpnNodesDestroyAll,
+  vpnPersistentStatus,
+  vpnPersistentDeploy,
+  vpnPersistentConnect,
+  vpnPersistentDestroy,
+  onVpnPersistent,
   type VpnNode,
   type VpnCostSummary,
+  type PersistentVpnStatus,
 } from "../bridge";
 import { useApp } from "../stores/app";
 import { Globe } from "../components/globe/Globe";
@@ -28,6 +34,15 @@ export function Vpn() {
   const connect = useApp((s) => s.connect);
   const metrics = useApp((s) => s.metrics);
   const rxHistory = useApp((s) => s.rxHistory);
+  const [persistS, setPersistS] = useState<PersistentVpnStatus | null>(null);
+
+  const refreshPersist = async () => {
+    try {
+      setPersistS(await vpnPersistentStatus());
+    } catch {
+      /* ignore */
+    }
+  };
 
   useEffect(() => {
     void bridge.vpnRegions().then(setRegions);
@@ -43,8 +58,11 @@ export function Vpn() {
   }, []);
 
   useEffect(() => {
-    const poll = () => bridge.vpnCostEstimate().then(setCost);
-    void poll();
+    const poll = () => {
+      void bridge.vpnCostEstimate().then(setCost);
+      void refreshPersist();
+    };
+    poll();
     const frozen = document.documentElement.getAttribute("data-freeze") === "1";
     if (frozen) return;
     const t = setInterval(poll, 2000);
@@ -55,8 +73,21 @@ export function Vpn() {
     connect.stage === "idle" ? "idle" : connect.stage === "connected" ? "connected" : "connecting";
   const busy = stage === "connecting";
 
+  // True when the live tunnel is to the durable always-on node — a normal Disconnect then keeps
+  // the node running (only "Destroy" tears it down), so the button relabels accordingly.
+  const persistentConnected = !!persistS?.connected;
+
   const doConnect = () => bridge.vpnConnect(selectedRegion, selectedType);
   const doDisconnect = () => bridge.vpnDisconnect();
+  const doDestroyPersistent = async () => {
+    if (!window.confirm("Destroy the always-on VPN node? This deletes the server and stops billing.")) return;
+    try {
+      await vpnPersistentDestroy(); // also drops the tunnel when connected to this node
+    } catch (e) {
+      window.alert(e instanceof Error ? e.message : String(e));
+    }
+    await refreshPersist();
+  };
 
   const down = fmtRate(metrics?.rx ?? 0);
   const up = fmtRate(metrics?.tx ?? 0);
@@ -105,6 +136,7 @@ export function Vpn() {
             <Button onClick={doConnect} className="w-full py-3">
               <Power size={17} /> Connect
             </Button>
+            <AlwaysOnVpn status={persistS} regions={regions} types={types} onChange={refreshPersist} />
           </>
         ) : (
           <>
@@ -144,9 +176,26 @@ export function Vpn() {
               </div>
             )}
 
-            <Button variant="danger" onClick={doDisconnect} className="w-full py-3">
-              <Power size={17} /> Disconnect &amp; destroy
-            </Button>
+            {persistentConnected ? (
+              <div className="flex flex-col gap-2">
+                <Button variant="danger" onClick={doDisconnect} className="w-full py-3">
+                  <Power size={17} /> Disconnect (keep always-on node)
+                </Button>
+                <button
+                  onClick={() => void doDestroyPersistent()}
+                  className="text-xs text-[var(--danger)] hover:underline"
+                >
+                  Destroy the always-on node (stop billing)
+                </button>
+                <p className="text-[11px] text-[var(--text-muted)]">
+                  You're on your always-on node — disconnecting leaves it running (and billing) for next time.
+                </p>
+              </div>
+            ) : (
+              <Button variant="danger" onClick={doDisconnect} className="w-full py-3">
+                <Power size={17} /> Disconnect &amp; destroy
+              </Button>
+            )}
           </>
         )}
       </div>
@@ -213,6 +262,150 @@ function InstancePicker({ types, selected, onSelect }: { types: InstanceType[]; 
   );
 }
 
+function AlwaysOnVpn({
+  status,
+  regions,
+  types,
+  onChange,
+}: {
+  status: PersistentVpnStatus | null;
+  regions: Region[];
+  types: InstanceType[];
+  onChange: () => Promise<void>;
+}) {
+  const [enabled, setEnabled] = useState(false);
+  const [region, setRegion] = useState("us-east");
+  const [type, setType] = useState("g6-nanode-1");
+  const [busy, setBusy] = useState(false);
+  const [progress, setProgress] = useState("");
+  const [msg, setMsg] = useState("");
+
+  useEffect(() => {
+    void vpnRealEnabled().then(setEnabled);
+    let un: (() => void) | undefined;
+    void onVpnPersistent((e) => setProgress(e.detail)).then((fn) => (un = fn));
+    return () => un?.();
+  }, []);
+
+  if (!enabled) return null;
+
+  const deployed = !!status?.deployed;
+  const connected = !!status?.connected;
+
+  const deploy = async () => {
+    setBusy(true);
+    setMsg("");
+    setProgress("Starting…");
+    try {
+      await vpnPersistentDeploy(region, type);
+      setProgress("");
+      setMsg("Always-on node is up and connected.");
+      await onChange();
+    } catch (e) {
+      setProgress("");
+      setMsg(errMsg(e));
+    }
+    setBusy(false);
+  };
+  const connectNode = async () => {
+    setBusy(true);
+    setMsg("Connecting…");
+    try {
+      await vpnPersistentConnect();
+      setMsg("Connected.");
+      await onChange();
+    } catch (e) {
+      setMsg(errMsg(e));
+    }
+    setBusy(false);
+  };
+  const destroy = async () => {
+    if (!window.confirm("Destroy the always-on VPN node? This deletes the server and stops billing.")) return;
+    setBusy(true);
+    setMsg("");
+    try {
+      await vpnPersistentDestroy();
+      setMsg("Destroyed.");
+      await onChange();
+    } catch (e) {
+      setMsg(errMsg(e));
+    }
+    setBusy(false);
+  };
+
+  return (
+    <Card className="!p-4">
+      <div className="mb-2 flex items-center justify-between text-sm font-medium">
+        <span className="flex items-center gap-2">
+          <Cloud size={15} /> Always-on VPN <span className="text-[11px] font-normal text-[var(--text-muted)]">(advanced)</span>
+        </span>
+        <Badge tone={connected ? "ok" : deployed ? "accent" : "neutral"}>
+          {connected ? "Connected" : deployed ? "Running" : "Off"}
+        </Badge>
+      </div>
+      <p className="mb-3 text-[11px] text-[var(--text-secondary)]">
+        A dedicated exit node you leave running for a <span className="font-medium">stable</span> connection — the opposite of the
+        disposable per-session VPN above. Its IP stays the same and it <span className="font-medium">bills continuously</span> until
+        you destroy it (like the sync server). Different privacy tradeoff: the IP isn't rotated and is tied to this setup.
+      </p>
+
+      {!deployed ? (
+        <div className="space-y-2">
+          <div className="grid grid-cols-2 gap-2">
+            <select
+              value={region}
+              onChange={(e) => setRegion(e.target.value)}
+              className="rounded-[10px] border border-[var(--border-strong)] bg-[var(--bg-inset)] px-2 py-1.5 text-xs outline-none focus:border-[var(--accent)]"
+            >
+              {regions.map((r) => (
+                <option key={r.id} value={r.id}>{r.label}</option>
+              ))}
+            </select>
+            <select
+              value={type}
+              onChange={(e) => setType(e.target.value)}
+              className="rounded-[10px] border border-[var(--border-strong)] bg-[var(--bg-inset)] px-2 py-1.5 text-xs outline-none focus:border-[var(--accent)]"
+            >
+              {types.map((t) => (
+                <option key={t.id} value={t.id}>{t.label} (${t.hourlyUsd}/hr)</option>
+              ))}
+            </select>
+          </div>
+          <button onClick={() => void deploy()} disabled={busy} className={`${btnCls} w-full justify-center`}>
+            {busy ? "Deploying…" : "Deploy always-on node"}
+          </button>
+          {busy && progress && <p className="text-[11px] text-[var(--accent)]">{progress}</p>}
+        </div>
+      ) : (
+        <div className="space-y-1.5 text-[11px] text-[var(--text-secondary)]">
+          <div>
+            Node: <span className="mono">{status?.ipv4}</span>
+            {status?.region ? ` · ${status.region}` : ""}
+            {status?.state ? ` · ${status.state}` : ""}
+          </div>
+          <div>
+            Cost: <span className="font-medium">${status?.monthlyUsd?.toFixed(2)}/mo</span> (~${status?.hourlyUsd?.toFixed(3)}/hr) — billing until destroyed.
+          </div>
+          {!connected && (
+            <button onClick={() => void connectNode()} disabled={busy} className={`${btnCls} !mt-2`}>
+              <Power size={13} /> {busy ? "Connecting…" : "Connect to always-on node"}
+            </button>
+          )}
+          {connected && <div className="!mt-1 text-[var(--accent)]">Connected — manage the live tunnel above.</div>}
+          <button
+            onClick={() => void destroy()}
+            disabled={busy}
+            className="!mt-2 block text-[var(--danger)] hover:underline disabled:opacity-50"
+          >
+            Destroy always-on node (stop billing)
+          </button>
+        </div>
+      )}
+      {msg && <p className="mt-2 text-[11px] text-[var(--text-muted)]">{msg}</p>}
+    </Card>
+  );
+}
+
 function Gauge2({ icon, label, pct }: { icon: React.ReactNode; label: string; pct: number }) {
   const tone = pct > 85 ? "var(--warn)" : "var(--accent)";
   return (
@@ -270,7 +463,7 @@ function VpnNodes() {
   };
 
   const destroyAll = async () => {
-    if (!confirm("Destroy ALL exit nodes? This stops all billing and disconnects you.")) return;
+    if (!confirm("Destroy ALL disposable exit nodes and disconnect? (Your always-on VPN node, if you have one, is separate — destroy it from the Always-on VPN card.)")) return;
     setBusy(true);
     setMsg("");
     try {

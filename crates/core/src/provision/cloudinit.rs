@@ -123,7 +123,7 @@ write_files:
       Restart=on-failure
       [Install]
       WantedBy=multi-user.target
-
+{% if deadman_secs %}
   - path: /etc/systemd/system/sentinel-deadman.service
     content: |
       [Unit]
@@ -141,6 +141,7 @@ write_files:
       OnUnitActiveSec=60
       [Install]
       WantedBy=timers.target
+{% endif %}
 
 runcmd:
   - systemctl disable ssh || true
@@ -163,7 +164,9 @@ runcmd:
 {% endif %}
   - systemctl daemon-reload
   - systemctl enable --now sentinel-callback.service
+{% if deadman_secs %}
   - systemctl enable --now sentinel-deadman.timer
+{% endif %}
 "#;
 
 /// The downstream link for a chained (multi-hop) node: this node runs a `wg1` client to the
@@ -406,6 +409,20 @@ mod tests {
         assert!(yaml.contains("gt 900"));
         // No SaveConfig persistence.
         assert!(yaml.contains("SaveConfig = false"));
+    }
+
+    #[test]
+    fn deadman_switch_is_omitted_when_zero() {
+        // An always-on node passes deadman_secs = 0 so it never powers itself off.
+        let mut p = params();
+        p.deadman_secs = 0;
+        let yaml = render(&p).unwrap();
+        assert!(!yaml.contains("sentinel-deadman"));
+        assert!(!yaml.contains("dead-man"));
+        // The rest of the hardened node is unaffected.
+        assert!(yaml.contains("PrivateKey = SPRIV"));
+        assert!(yaml.contains("oifname != \"wg0\" masquerade"));
+        assert!(yaml.contains("sentinel-callback.service"));
     }
 
     #[test]
