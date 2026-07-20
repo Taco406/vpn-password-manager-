@@ -12,7 +12,7 @@
 
 use crate::state::AppState;
 use async_trait::async_trait;
-use sentinel_core::cloud::{InstanceSpec, InstanceState, LinodeClient};
+use sentinel_core::cloud::{InstanceSpec, InstanceState, LinodeClient, PERSISTENT_VPN_TAG};
 use sentinel_core::error::{CoreError, Result as CoreResult};
 use sentinel_core::provision::{
     render_base64, verify_callback, CallbackBody, CloudInitParams, NextHop,
@@ -23,7 +23,7 @@ use sentinel_core::vpn::{
 };
 use sentinel_core::vpn::{CostTicker, HistoryStore, SessionRecord};
 use sentinel_core::wg::{render_client_conf, ClientConf, WgController, WgCounters, WgKeypair};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -620,6 +620,11 @@ pub struct VpnActive {
     pub egress_ip: Option<String>,
     pub started_at: i64,
     pub stop: Arc<AtomicBool>,
+    /// True when the tunnel connects to a durable **always-on** node (persistent tag). A manual
+    /// disconnect then only drops the local tunnel and KEEPS the node running — it is destroyed
+    /// solely via the explicit "destroy always-on node" command. False for ephemeral connects,
+    /// whose disconnect deletes the node.
+    pub persistent: bool,
 }
 
 fn now_secs() -> i64 {
@@ -1273,6 +1278,12 @@ async fn autoconnect_tick(app: &AppHandle) {
     if ssid_is_trusted(&ssid, &cfg.trusted) {
         return; // trusted network — leave it alone
     }
+    // If the user runs a durable always-on node, reconnect to THAT instead of provisioning a fresh
+    // throwaway — otherwise auto-connect would spin up (and bill) a second node alongside it.
+    if load_persistent_record(&data_dir).is_some() {
+        let _ = persistent_connect_impl(app.clone(), &state).await;
+        return;
+    }
     // Untrusted Wi-Fi and idle: connect to the default region on the cheapest node.
     let _ = connect_real(
         app.clone(),
@@ -1534,6 +1545,7 @@ pub async fn connect_real(
         egress_ip: conn.instance.ipv4.clone(),
         started_at,
         stop: stop.clone(),
+        persistent: false,
     };
     state.inner.lock().unwrap().vpn = Some(active);
 
@@ -1613,6 +1625,446 @@ fn spawn_metrics_loop(
             tokio::time::sleep(Duration::from_secs(2)).await;
         }
     });
+}
+
+// ---------------------------------------------------------------------------
+// Always-on (persistent) VPN node — a durable exit node you provision once and leave running.
+//
+// Distinct from BOTH the ephemeral connect (throwaway node destroyed on disconnect) AND the
+// durable SYNC server (a different box). It's a WireGuard exit node tagged PERSISTENT_VPN_TAG so
+// the orphan sweep never touches it, provisioned with NO dead-man switch so it stays up, and
+// billed until the user destroys it (its cost + a Destroy button are always shown). It reuses the
+// exact ephemeral bring-up (same fixed-NAT cloud-init) and lives in the same `state.vpn` slot with
+// `persistent = true`, so a normal Disconnect drops only the local tunnel and keeps the node.
+//
+// The tunnel must survive an app restart, so the non-secret record (node id, IP, server pubkey,
+// port, client tunnel IP) is persisted to `vpn-persistent.json`; the CLIENT PRIVATE KEY — the one
+// secret — lives in the OS keychain, never a plaintext file, matching the vault-key/token model.
+// ---------------------------------------------------------------------------
+
+/// Keychain account for the always-on node's client WireGuard private key.
+const KC_PERSIST_WG: &str = "vpn-persistent-clientkey";
+
+/// Non-secret record of the deployed always-on node (the client private key is in the keychain).
+#[derive(Serialize, Deserialize, Default, Clone)]
+struct PersistentVpnRecord {
+    instance_id: String,
+    ipv4: String,
+    instance_type: String,
+    region: String,
+    created_at: i64,
+    /// The app-generated server public key `wg0` runs, pinned by the client.
+    server_pubkey: String,
+    /// The client's tunnel address (e.g. "10.66.0.2").
+    client_ip: String,
+    /// The node's WireGuard listen port.
+    listen_port: u16,
+}
+
+fn persistent_record_path(dir: &Path) -> PathBuf {
+    dir.join("vpn-persistent.json")
+}
+fn load_persistent_record(dir: &Path) -> Option<PersistentVpnRecord> {
+    std::fs::read_to_string(persistent_record_path(dir))
+        .ok()
+        .and_then(|t| serde_json::from_str(&t).ok())
+}
+fn save_persistent_record(
+    dir: &Path,
+    rec: &PersistentVpnRecord,
+) -> std::result::Result<(), String> {
+    std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+    std::fs::write(
+        persistent_record_path(dir),
+        serde_json::to_string_pretty(rec).map_err(|e| e.to_string())?,
+    )
+    .map_err(|e| e.to_string())
+}
+fn delete_persistent_record(dir: &Path) {
+    let _ = std::fs::remove_file(persistent_record_path(dir));
+}
+
+fn persist_wg_key_store(privkey: &str) -> std::result::Result<(), String> {
+    keyring::Entry::new(KC_SERVICE, KC_PERSIST_WG)
+        .map_err(|e| e.to_string())?
+        .set_password(privkey)
+        .map_err(|e| e.to_string())
+}
+fn persist_wg_key_load() -> Option<String> {
+    keyring::Entry::new(KC_SERVICE, KC_PERSIST_WG)
+        .ok()?
+        .get_password()
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+fn persist_wg_key_del() {
+    if let Ok(e) = keyring::Entry::new(KC_SERVICE, KC_PERSIST_WG) {
+        let _ = e.delete_credential();
+    }
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PersistentStatusOut {
+    deployed: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    ipv4: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    region: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    state: Option<String>,
+    /// True when the local tunnel is currently up TO this always-on node.
+    connected: bool,
+    hourly_usd: f64,
+    monthly_usd: f64,
+}
+
+/// Install a persistent tunnel as the live session (`state.vpn`, `persistent = true`) + metrics.
+fn set_persistent_active(
+    app: &AppHandle,
+    state: &AppState,
+    deps: ConnectDeps,
+    rec: &PersistentVpnRecord,
+) {
+    let stop = Arc::new(AtomicBool::new(false));
+    let started_at = now_secs();
+    spawn_metrics_loop(app.clone(), deps.wg.clone(), stop.clone(), started_at);
+    let active = VpnActive {
+        deps,
+        instance_id: rec.instance_id.clone(),
+        chain: vec![rec.instance_id.clone()],
+        region: rec.region.clone(),
+        instance_type: rec.instance_type.clone(),
+        egress_ip: Some(rec.ipv4.clone()),
+        started_at,
+        stop,
+        persistent: true,
+    };
+    state.inner.lock().unwrap().vpn = Some(active);
+    let _ = app.emit(
+        "vpn:state",
+        state_json(
+            &ConnectState::Connected {
+                instance_id: rec.instance_id.clone(),
+                egress_ip: Some(rec.ipv4.clone()),
+            },
+            &rec.region,
+            &rec.instance_type,
+        ),
+    );
+}
+
+/// Build the client tunnel config for a persistent node and bring the local tunnel up.
+async fn bring_up_persistent_tunnel(
+    deps: &ConnectDeps,
+    rec: &PersistentVpnRecord,
+    client_privkey: &str,
+    allowed_ips: Vec<String>,
+) -> std::result::Result<(), String> {
+    let conf = ClientConf {
+        client_private_key: client_privkey.to_string(),
+        client_address: format!("{}/32", rec.client_ip),
+        dns: "1.1.1.1".into(),
+        server_public_key: rec.server_pubkey.clone(),
+        server_endpoint: format!("{}:{}", rec.ipv4, rec.listen_port),
+        allowed_ips,
+        keepalive: 25,
+    };
+    let _ = render_client_conf(&conf); // parity with connect_inner; the controller renders too
+    deps.wg.up(&conf).await.map_err(|e| e.to_string())
+}
+
+/// Wait for a freshly created persistent node to reach Running and pass its readiness callback.
+async fn provision_persistent_ready(
+    deps: &ConnectDeps,
+    instance: &sentinel_core::cloud::Instance,
+    callback_token: &str,
+    callback_hmac_key: &str,
+    app: &AppHandle,
+) -> std::result::Result<String, String> {
+    let _ = app.emit(
+        "vpn:persistent",
+        json!({ "stage": "booting", "detail": "waiting for the node to boot…" }),
+    );
+    let mut running = instance.clone();
+    for _ in 0..deps.max_boot_polls {
+        if deps.poll_interval_ms > 0 {
+            tokio::time::sleep(Duration::from_millis(deps.poll_interval_ms)).await;
+        }
+        if let Ok(cur) = deps.cloud.get(&instance.id).await {
+            if cur.state == InstanceState::Running {
+                running = cur;
+                break;
+            }
+        }
+    }
+    if running.state != InstanceState::Running {
+        return Err("the node did not boot in time".into());
+    }
+    let ip = running
+        .ipv4
+        .clone()
+        .ok_or_else(|| "the node never reported an IP".to_string())?;
+    let _ = app.emit(
+        "vpn:persistent",
+        json!({ "stage": "provisioning", "detail": "waiting for the server to finish installing…" }),
+    );
+    deps.fetcher
+        .fetch(&ip, callback_token, callback_hmac_key)
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(ip)
+}
+
+/// Deploy a durable always-on VPN exit node and connect to it. Destroys the node if provisioning
+/// fails BEFORE the record is saved (no hidden paid orphan); after that, failures leave a
+/// recoverable node (reachable via Connect/Destroy).
+async fn persistent_deploy_impl(
+    app: AppHandle,
+    state: &AppState,
+    region: String,
+    instance_type: String,
+) -> std::result::Result<(), String> {
+    if CONNECTING.swap(true, Ordering::SeqCst) {
+        return Err("a connection attempt is already in progress".into());
+    }
+    let _connecting = ConnectingGuard;
+
+    let dir = { state.inner.lock().unwrap().data_dir.clone() };
+    if load_persistent_record(&dir).is_some() {
+        return Err("an always-on VPN node is already set up — destroy it first.".into());
+    }
+    if state.inner.lock().unwrap().vpn.is_some() {
+        return Err("disconnect the current VPN before deploying an always-on node.".into());
+    }
+    preflight_vpn()?;
+    let token = get_token().ok_or_else(|| "no Linode token configured".to_string())?;
+    let deps = live_deps(token);
+    // Reap ephemeral orphans (never touches the persistent-tagged node we're about to create).
+    let _ = orphan_sweep_keeping(&*deps.cloud, &kept_ids(&dir)).await;
+
+    // Key material + provisioning secrets, mirroring the ephemeral connect_inner.
+    let client_kp = WgKeypair::generate();
+    let server_kp = WgKeypair::generate();
+    let callback_token = rand_hex(32);
+    let callback_hmac_key = rand_hex(32);
+    let client_ip = "10.66.0.2";
+    let listen_port: u16 = 51820;
+    let cloud_init = render_base64(&CloudInitParams::single(
+        server_kp.private_base64(),
+        client_kp.public_base64(),
+        client_ip.into(),
+        listen_port,
+        callback_token.clone(),
+        callback_hmac_key.clone(),
+        0, // NO dead-man switch: an always-on node must never power itself off.
+    ))
+    .map_err(|e| e.to_string())?;
+
+    let _ = app.emit(
+        "vpn:persistent",
+        json!({ "stage": "creating", "detail": "creating the node…" }),
+    );
+    let spec = InstanceSpec {
+        region: region.clone(),
+        instance_type: instance_type.clone(),
+        user_data: cloud_init,
+        label: "sentinel-vpn".into(),
+        tags: vec![PERSISTENT_VPN_TAG.to_string()],
+    };
+    let instance = deps.cloud.create(&spec).await.map_err(|e| e.to_string())?;
+    let id = instance.id.clone();
+
+    // Until the record is saved, destroy the node on any error (no paid orphan).
+    let ip = match provision_persistent_ready(
+        &deps,
+        &instance,
+        &callback_token,
+        &callback_hmac_key,
+        &app,
+    )
+    .await
+    {
+        Ok(ip) => ip,
+        Err(e) => {
+            let _ = deps.cloud.delete(&id).await;
+            return Err(e);
+        }
+    };
+
+    // Persist the record + client key BEFORE the tunnel comes up, so a crash leaves a node the
+    // user can see / connect to / destroy — never a hidden paid box.
+    persist_wg_key_store(&client_kp.private_base64())?;
+    let rec = PersistentVpnRecord {
+        instance_id: id,
+        ipv4: ip,
+        instance_type,
+        region,
+        created_at: now_secs(),
+        server_pubkey: server_kp.public_base64(),
+        client_ip: client_ip.into(),
+        listen_port,
+    };
+    save_persistent_record(&dir, &rec)?;
+
+    let _ = app.emit(
+        "vpn:persistent",
+        json!({ "stage": "connecting", "detail": "starting the tunnel…" }),
+    );
+    let allowed = resolve_allowed_ips(&dir);
+    bring_up_persistent_tunnel(&deps, &rec, &client_kp.private_base64(), allowed).await?;
+    set_persistent_active(&app, state, deps, &rec);
+    let _ = app.emit(
+        "vpn:persistent",
+        json!({ "stage": "ready", "detail": "always-on VPN ready" }),
+    );
+    Ok(())
+}
+
+/// Connect (or reconnect) to the already-deployed always-on node. Boots it first if it was stopped.
+async fn persistent_connect_impl(
+    app: AppHandle,
+    state: &AppState,
+) -> std::result::Result<(), String> {
+    if CONNECTING.swap(true, Ordering::SeqCst) {
+        return Err("a connection attempt is already in progress".into());
+    }
+    let _connecting = ConnectingGuard;
+    if state.inner.lock().unwrap().vpn.is_some() {
+        return Err("already connected".into());
+    }
+    preflight_vpn()?;
+    let dir = { state.inner.lock().unwrap().data_dir.clone() };
+    let rec = load_persistent_record(&dir)
+        .ok_or_else(|| "no always-on VPN node is set up — deploy one first.".to_string())?;
+    let privkey = persist_wg_key_load().ok_or_else(|| {
+        "the always-on node's tunnel key is missing — destroy and redeploy it.".to_string()
+    })?;
+    let token = get_token().ok_or_else(|| "no Linode token configured".to_string())?;
+    let deps = live_deps(token);
+
+    // Ensure the node is up (boot it if it was powered off).
+    let inst = deps.cloud.get(&rec.instance_id).await.map_err(|e| {
+        format!("could not reach the always-on node ({e}) — it may have been destroyed.")
+    })?;
+    if inst.state != InstanceState::Running {
+        let _ = deps.cloud.boot(&rec.instance_id).await;
+        for _ in 0..deps.max_boot_polls {
+            if deps.poll_interval_ms > 0 {
+                tokio::time::sleep(Duration::from_millis(deps.poll_interval_ms)).await;
+            }
+            if let Ok(cur) = deps.cloud.get(&rec.instance_id).await {
+                if cur.state == InstanceState::Running {
+                    break;
+                }
+            }
+        }
+    }
+
+    let allowed = resolve_allowed_ips(&dir);
+    bring_up_persistent_tunnel(&deps, &rec, &privkey, allowed).await?;
+    set_persistent_active(&app, state, deps, &rec);
+    Ok(())
+}
+
+/// Destroy the always-on node (stops billing) + clear its record/key. Drops the local tunnel first
+/// only if it's currently connected to THIS node (never touches an ephemeral tunnel).
+async fn persistent_destroy_impl(state: &AppState) -> std::result::Result<(), String> {
+    let dir = { state.inner.lock().unwrap().data_dir.clone() };
+    let active = {
+        let mut g = state.inner.lock().unwrap();
+        if g.vpn.as_ref().map(|v| v.persistent).unwrap_or(false) {
+            g.vpn.take()
+        } else {
+            None
+        }
+    };
+    if let Some(a) = active {
+        a.stop.store(true, Ordering::Relaxed);
+        let _ = a.deps.wg.down().await;
+    }
+    if let Some(rec) = load_persistent_record(&dir) {
+        if let Some(token) = get_token() {
+            let _ = live_deps(token).cloud.delete(&rec.instance_id).await;
+        }
+    }
+    delete_persistent_record(&dir);
+    persist_wg_key_del();
+    Ok(())
+}
+
+// --- Tauri command wrappers -------------------------------------------------
+
+#[tauri::command]
+pub async fn vpn_persistent_deploy(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    region: String,
+    instance_type: String,
+) -> std::result::Result<(), String> {
+    let r = persistent_deploy_impl(app, &state, region.clone(), instance_type).await;
+    if let Err(e) = &r {
+        crate::applog::error("vpn.persistent.deploy", &format!("region {region}: {e}"));
+    }
+    r
+}
+
+#[tauri::command]
+pub async fn vpn_persistent_connect(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> std::result::Result<(), String> {
+    persistent_connect_impl(app, &state).await
+}
+
+#[tauri::command]
+pub async fn vpn_persistent_destroy(state: State<'_, AppState>) -> std::result::Result<(), String> {
+    persistent_destroy_impl(&state).await
+}
+
+#[tauri::command]
+pub async fn vpn_persistent_status(
+    state: State<'_, AppState>,
+) -> std::result::Result<PersistentStatusOut, String> {
+    let dir = { state.inner.lock().unwrap().data_dir.clone() };
+    let Some(rec) = load_persistent_record(&dir) else {
+        return Ok(PersistentStatusOut {
+            deployed: false,
+            ipv4: None,
+            region: None,
+            state: None,
+            connected: false,
+            hourly_usd: 0.0,
+            monthly_usd: 0.0,
+        });
+    };
+    let connected = {
+        let g = state.inner.lock().unwrap();
+        g.vpn
+            .as_ref()
+            .map(|v| v.persistent && v.instance_id == rec.instance_id)
+            .unwrap_or(false)
+    };
+    let hourly = hourly_for(&rec.instance_type);
+    let live_state = match get_token() {
+        Some(token) => live_deps(token)
+            .cloud
+            .get(&rec.instance_id)
+            .await
+            .ok()
+            .map(|i| format!("{:?}", i.state).to_lowercase()),
+        None => None,
+    };
+    Ok(PersistentStatusOut {
+        deployed: true,
+        ipv4: Some(rec.ipv4),
+        region: Some(rec.region),
+        state: live_state,
+        connected,
+        hourly_usd: hourly,
+        monthly_usd: hourly * 24.0 * 30.0,
+    })
 }
 
 /// Connect through a CHAIN of exit nodes (multi-hop "bounce"). `regions` is entry→exit
@@ -1816,6 +2268,7 @@ async fn multihop_run(
         egress_ip: exit_ip.clone(),
         started_at,
         stop,
+        persistent: false,
     };
     state.inner.lock().unwrap().vpn = Some(active);
     emit(
@@ -1865,6 +2318,33 @@ pub async fn vpn_disconnect(
     let mut emit = move |s: ConnectState| {
         let _ = apph.emit("vpn:state", state_json(&s, &r, &it));
     };
+
+    // Always-on node: drop ONLY the local tunnel and KEEP the node running. It is destroyed
+    // solely via `vpn_persistent_destroy`, so an ordinary Disconnect never nukes a node the user
+    // is paying to keep up. We still record the session for history/cost.
+    if active.persistent {
+        let _ = active.deps.wg.down().await;
+        emit(ConnectState::Idle);
+        let ended = now_secs();
+        let hourly = hourly_for(&active.instance_type);
+        if let Ok(store) = history_store(&state) {
+            let _ = store.insert(&SessionRecord {
+                id: active.instance_id.clone(),
+                region: active.region.clone(),
+                instance_type: active.instance_type.clone(),
+                started_at: active.started_at,
+                ended_at: ended,
+                bytes_rx: last.rx_bytes as i64,
+                bytes_tx: last.tx_bytes as i64,
+                cost_usd: CostTicker::new(hourly, active.started_at).accrued(ended),
+                peak_cpu_pct: 0,
+                down_mbps: 0,
+                up_mbps: 0,
+            });
+        }
+        return Ok(());
+    }
+
     // Bring the tunnel down and destroy the ENTRY node. core_disconnect does wg.down + delete.
     let res = core_disconnect(&active.deps, &active.instance_id, &mut emit).await;
     // Destroy every other hop in the chain too (multi-hop) — never leave a paid orphan behind.

@@ -296,6 +296,50 @@ export async function wgStatus(): Promise<WgStatusInfo> {
  * Emergency recovery: remove any leftover SENTINEL WireGuard tunnel and clear kill-switch rules,
  * to restore internet if a failed connect left routing captured. Safe no-op if nothing is stuck.
  */
+// --- Always-on (persistent) VPN node ---------------------------------------
+
+export interface PersistentVpnStatus {
+  deployed: boolean;
+  ipv4?: string;
+  region?: string;
+  state?: string;
+  connected: boolean;
+  hourlyUsd: number;
+  monthlyUsd: number;
+}
+
+export async function vpnPersistentStatus(): Promise<PersistentVpnStatus> {
+  if (!inTauri()) return { deployed: false, connected: false, hourlyUsd: 0, monthlyUsd: 0 };
+  return inv<PersistentVpnStatus>("vpn_persistent_status");
+}
+
+/** Provision a durable always-on VPN node and connect to it. Long-running. */
+export async function vpnPersistentDeploy(region: string, instanceType: string): Promise<void> {
+  if (!inTauri()) throw new Error("The always-on VPN is only available in the desktop app.");
+  await inv("vpn_persistent_deploy", { region, instanceType });
+}
+
+/** Connect (or reconnect) to the already-deployed always-on node. */
+export async function vpnPersistentConnect(): Promise<void> {
+  if (!inTauri()) throw new Error("The always-on VPN is only available in the desktop app.");
+  await inv("vpn_persistent_connect");
+}
+
+/** Destroy the always-on node (stops billing) and clear its local record. */
+export async function vpnPersistentDestroy(): Promise<void> {
+  if (!inTauri()) return;
+  await inv("vpn_persistent_destroy");
+}
+
+/** Subscribe to always-on deploy progress; returns an unsubscribe fn. */
+export async function onVpnPersistent(
+  cb: (e: { stage: string; detail: string }) => void,
+): Promise<() => void> {
+  if (!inTauri()) return () => {};
+  const { listen } = await import("@tauri-apps/api/event");
+  return listen<{ stage: string; detail: string }>("vpn:persistent", (ev) => cb(ev.payload));
+}
+
 export async function vpnRepairTunnel(): Promise<void> {
   if (!inTauri()) return;
   const core = await import("@tauri-apps/api/core");

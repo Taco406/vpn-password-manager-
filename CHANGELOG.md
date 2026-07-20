@@ -8,6 +8,22 @@ The format follows [Keep a Changelog](https://keepachangelog.com/). Versions are
 [semantic](https://semver.org/). **Add a new `## [x.y.z]` section at the top in the same PR
 that bumps the app version** — that's how "the changelog updates on every merge."
 
+## [0.1.26] — 2026-07-20
+
+### Added
+- **Always-on VPN (optional).** Alongside the disposable per-session VPN, you can now deploy a
+  **dedicated exit node that stays running** for a stable connection — find it under **VPN → Always-on
+  VPN**. Pick a region and size, **Deploy**, and it provisions its own WireGuard node (with the same
+  exit-node fixes as the regular VPN), connects, and — unlike a throwaway node — **keeps running**
+  when you disconnect, so reconnecting is instant and your exit IP stays the same. It survives an app
+  restart (the tunnel key is stored in your OS keychain, never on disk in the clear), and if
+  auto-connect-on-untrusted-Wi-Fi is on it reconnects to *this* node instead of spinning up a second
+  one. It's a **different privacy tradeoff** from the default VPN (the IP is stable, not rotated, and
+  tied to this box) and it **bills continuously** until you **Destroy** it — its live cost and a
+  Destroy button are always shown. A normal **Disconnect** now clearly says it *keeps* the always-on
+  node; only **Destroy** tears it down. Like the sync server, it's excluded from the automatic
+  cleanup that reaps leftover throwaway nodes, so it's never destroyed behind your back.
+
 ## [0.1.25] — 2026-07-20
 
 ### Added
