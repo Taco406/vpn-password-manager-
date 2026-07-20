@@ -8,6 +8,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com/). Versions are
 [semantic](https://semver.org/). **Add a new `## [x.y.z]` section at the top in the same PR
 that bumps the app version** — that's how "the changelog updates on every merge."
 
+## [0.1.34] — 2026-07-20
+
+### Fixed
+- **"Sign in with Google" opened File Explorer instead of your browser.** On Windows the app
+  launched URLs via `explorer`, which handles plain links but silently opens a File Explorer
+  window for any URL with a query string — and the Google sign‑in URL is exactly that. All links
+  the app opens (Google sign‑in, password‑reset pages, download links) now go through a launcher
+  that passes the full URL to your default browser intact.
+
 ## [0.1.33] — 2026-07-20
 
 ### Added

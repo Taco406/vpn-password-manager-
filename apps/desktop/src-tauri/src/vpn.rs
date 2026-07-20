@@ -365,19 +365,24 @@ pub fn wg_status() -> WgStatus {
     }
 }
 
-/// Open an http(s) URL in the default browser (the "Download WireGuard" button).
+/// Open an http(s) URL in the default browser (download links, reset pages, OAuth sign-in).
 #[tauri::command]
 pub fn open_url(url: String) -> std::result::Result<(), String> {
     if !url.starts_with("https://") && !url.starts_with("http://") {
         return Err("refusing to open a non-http URL".into());
     }
+    // Windows: NOT `explorer <url>` — it opens bare URLs fine but silently rejects any URL with a
+    // query string (?a=b&c=d) and opens a File Explorer window instead, which broke the Google
+    // sign-in URL. rundll32's FileProtocolHandler hands the raw argument to the default browser
+    // with no shell metacharacter parsing at all, so `&`/`?`/`%` survive intact.
     #[cfg(target_os = "windows")]
-    let cmd = "explorer";
+    let (cmd, pre_args): (&str, &[&str]) = ("rundll32", &["url.dll,FileProtocolHandler"]);
     #[cfg(target_os = "macos")]
-    let cmd = "open";
+    let (cmd, pre_args): (&str, &[&str]) = ("open", &[]);
     #[cfg(all(unix, not(target_os = "macos")))]
-    let cmd = "xdg-open";
+    let (cmd, pre_args): (&str, &[&str]) = ("xdg-open", &[]);
     std::process::Command::new(cmd)
+        .args(pre_args)
         .arg(&url)
         .spawn()
         .map(|_| ())
