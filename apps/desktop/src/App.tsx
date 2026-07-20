@@ -12,6 +12,7 @@ import { ItemEditor } from "./screens/ItemEditor";
 import { Vpn } from "./screens/Vpn";
 import { Health } from "./screens/Health";
 import { Devices } from "./screens/Devices";
+import { Tools } from "./screens/Tools";
 import { Experimental } from "./screens/Experimental";
 import { Settings } from "./screens/Settings";
 import { Report } from "./screens/Report";
@@ -42,6 +43,7 @@ export function App() {
             <Route path="/vpn" element={<Vpn />} />
             <Route path="/health" element={<Health />} />
             <Route path="/devices" element={<Devices />} />
+            <Route path="/tools" element={<Tools />} />
             <Route path="/experimental" element={<Experimental />} />
             <Route path="/settings" element={<Settings />} />
             <Route path="/report/:ym" element={<Report />} />

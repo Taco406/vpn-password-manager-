@@ -8,6 +8,18 @@ The format follows [Keep a Changelog](https://keepachangelog.com/). Versions are
 [semantic](https://semver.org/). **Add a new `## [x.y.z]` section at the top in the same PR
 that bumps the app version** — that's how "the changelog updates on every merge."
 
+## [0.1.32] — 2026-07-20
+
+### Added
+- **Network tools** (new **Tools** tab):
+  - **My IP & location** — shows the public IP and rough location the internet currently sees you
+    at. With the VPN connected it should read your *exit server's* location, not your real one — the
+    fastest way to confirm the tunnel is actually working. (Uses a public HTTPS geo‑IP service;
+    nothing from your vault is sent.)
+  - **Ping** — round‑trip latency to any host, measured by timing a TCP connection (no admin rights
+    or raw sockets needed, so it behaves the same everywhere).
+  - **DNS lookup** — resolve a hostname to its IP addresses.
+
 ## [0.1.31] — 2026-07-20
 
 ### Added
