@@ -6,6 +6,7 @@ import { Layout } from "./components/Layout";
 import { CommandPalette } from "./components/palette/CommandPalette";
 import { Unlock } from "./screens/Unlock";
 import { Onboarding } from "./screens/Onboarding";
+import { SetupWizard } from "./screens/SetupWizard";
 import { Vault } from "./screens/Vault";
 import { ItemEditor } from "./screens/ItemEditor";
 import { Vpn } from "./screens/Vpn";
@@ -31,6 +32,7 @@ export function App() {
       <Routes>
         <Route path="/unlock" element={<Unlock />} />
         <Route path="/onboarding" element={<Onboarding />} />
+        <Route path="/setup" element={<SetupWizard />} />
         <Route element={<Gate />}>
           <Route element={<Layout />}>
             <Route path="/vault" element={<Vault />} />
@@ -57,6 +59,7 @@ export function App() {
 function Gate() {
   const locked = useApp((s) => s.locked);
   const setLocked = useApp((s) => s.setLocked);
+  const settings = useApp((a) => a.settings);
   const wantsUnlocked = new URLSearchParams(window.location.search).get("unlocked") === "1";
 
   useEffect(() => {
@@ -66,6 +69,12 @@ function Gate() {
 
   if (locked && !wantsUnlocked) {
     return <Unlock />;
+  }
+  // First-run: once settings have loaded, send users who haven't finished (or skipped) the setup
+  // wizard to it. Wait for `settings` to load (avoid a flash), and let the screenshot/demo
+  // `?unlocked=1` escape hatch bypass onboarding entirely.
+  if (settings && !settings.onboardingComplete && !wantsUnlocked) {
+    return <Navigate to="/setup" replace />;
   }
   return <OutletProxy />;
 }
