@@ -19,6 +19,7 @@ use async_trait::async_trait;
 use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
 use base64::Engine as _;
 use sentinel_core::auth::{BrowserOpener, GoogleAuth, PkceParams, TokenExchanger, TokenSet};
+use sentinel_core::crypto::Key32;
 use sentinel_core::error::{CoreError, Result as CoreResult};
 use sentinel_core::keyring::recovery::RecoveryWrapper;
 use sentinel_core::keyring::{KeyWrapper, VaultKey, WrappedBlob, WrapperType};
@@ -1309,4 +1310,230 @@ pub async fn sync_server_destroy(state: State<'_, AppState>) -> Result<(), Strin
     kc_del(KC_REFRESH);
     kc_del(KC_PENDING);
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Reconnect + device pairing.
+//
+// `sync_deploy` saves the server record + pinned config + bootstrap token BEFORE the health
+// wait and the initial sign-in, so a deploy whose sign-in step timed out (first boot installs
+// Docker + pulls the image + migrates, which can exceed the wait) leaves a "server up but this
+// device not signed in" state with no way to finish. `sync_reconnect` re-runs just the client
+// sign-in against the already-configured server — no destroy/redeploy, no lost billing.
+//
+// Device pairing lets a SECOND machine join a one-click server without any manual URL/cert/token
+// entry: device #1 mints a one-shot "join code" carrying the server IP, the pinned cert, the
+// (reusable, same-account) bootstrap token, and the vault key; device #2 pastes it to configure
+// the pinned client, sign in as another device on the same account, adopt the shared vault key,
+// and pull the vault. The code is a full-access secret (like the recovery kit) — shown once.
+// ---------------------------------------------------------------------------
+
+/// Prefix identifying a SENTINEL device-join code (version 1).
+const JOIN_PREFIX: &str = "SNTL1.";
+
+/// The payload packed into a device-join code. base64url(JSON) of this, behind `JOIN_PREFIX`.
+#[derive(Serialize, Deserialize)]
+struct JoinBundle {
+    /// Format version (1).
+    v: u8,
+    /// The deployed server's IPv4 (the pinned client resolves `sentinel-sync` to it).
+    ip: String,
+    /// The server's self-signed cert PEM to pin.
+    cert: String,
+    /// The reusable bootstrap token — every bootstrap device maps to the one shared account.
+    token: String,
+    /// base64 (std) of the 32-byte vault key device #2 needs to decrypt the synced vault.
+    vkey: String,
+    /// Unix timestamp the code was minted (for staleness display only).
+    ts: i64,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SyncReconnectOut {
+    signed_in: bool,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PairCodeOut {
+    code: String,
+    created_at: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PairCompleteOut {
+    restored: i64,
+    server_ip: String,
+}
+
+/// Finish (or repair) sign-in to an already-configured one-click server. Idempotent: if this
+/// device is already signed in it returns success without contacting the server.
+#[tauri::command]
+pub async fn sync_reconnect(state: State<'_, AppState>) -> Result<SyncReconnectOut, String> {
+    let dir = data_dir(&state);
+    let cfg = load_config(&dir);
+    if cfg.server_url.as_deref().unwrap_or("").is_empty()
+        || cfg.pinned_cert_pem.is_none()
+        || cfg.server_ip.is_none()
+    {
+        return Err(
+            "No one-click sync server is set up on this device yet — deploy one first, \
+             or join an existing server with a device code."
+                .into(),
+        );
+    }
+    if kc_get(KC_BOOTSTRAP).is_none() {
+        return Err(
+            "This device has no saved server login — destroy the server and redeploy, \
+             or re-join it with a device code."
+                .into(),
+        );
+    }
+    // Already signed in — nothing to do.
+    if kc_get(KC_ACCESS).is_some() {
+        return Ok(SyncReconnectOut { signed_in: true });
+    }
+    // Probe health over the pinned client (user-initiated retry → short budget).
+    let client = sync_http_client(&cfg);
+    let health_url = format!("https://{SYNC_HOST}/healthz");
+    let mut healthy = false;
+    for _ in 0..10 {
+        if let Ok(resp) = client.get(&health_url).send().await {
+            if resp.status().is_success() {
+                healthy = true;
+                break;
+            }
+        }
+        tokio::time::sleep(Duration::from_secs(3)).await;
+    }
+    if !healthy {
+        return Err(
+            "Your sync server is running but its app hasn't answered yet. If you just \
+             deployed it, give it another minute (first boot installs everything) and try again. \
+             If this keeps happening, Destroy it and redeploy."
+                .into(),
+        );
+    }
+    bootstrap_signin(&dir).await?;
+    Ok(SyncReconnectOut { signed_in: true })
+}
+
+/// Mint a one-shot device-join code for another machine to join THIS device's sync server.
+/// Requires a configured one-click server (pinned cert + IP + bootstrap token) on this device.
+#[tauri::command]
+pub fn sync_pair_begin(state: State<AppState>) -> Result<PairCodeOut, String> {
+    let dir = data_dir(&state);
+    let cfg = load_config(&dir);
+    let ip = cfg.server_ip.clone().filter(|s| !s.is_empty()).ok_or(
+        "This device isn't connected to a one-click sync server, so there's nothing to pair to.",
+    )?;
+    let cert = cfg
+        .pinned_cert_pem
+        .clone()
+        .filter(|s| !s.is_empty())
+        .ok_or(
+            "Missing the server certificate — reconnect this device to the sync server first.",
+        )?;
+    let token = kc_get(KC_BOOTSTRAP)
+        .ok_or("Missing this device's server login — reconnect to the sync server first.")?;
+    // The vault key device #2 needs to decrypt the shared, end-to-end-encrypted vault.
+    let vk = load_or_create_key()?;
+    let vkey = STANDARD.encode(vk.key().as_bytes());
+    let ts = now_unix();
+    let bundle = JoinBundle {
+        v: 1,
+        ip,
+        cert,
+        token,
+        vkey,
+        ts,
+    };
+    let json = serde_json::to_vec(&bundle).map_err(estr)?;
+    let code = format!("{JOIN_PREFIX}{}", URL_SAFE_NO_PAD.encode(json));
+    Ok(PairCodeOut {
+        code,
+        created_at: iso(ts),
+    })
+}
+
+/// Join the sync server described by a device-join code from another machine. Only runs on a
+/// fresh install with an empty local vault (so it can never overwrite existing items).
+#[tauri::command]
+pub async fn sync_pair_complete(
+    state: State<'_, AppState>,
+    code: String,
+) -> Result<PairCompleteOut, String> {
+    // Never clobber an existing local vault (same guard as restore).
+    {
+        let g = state.inner.lock().unwrap();
+        if !g.vault.list_envelopes().map_err(estr)?.is_empty() {
+            return Err(
+                "This device already has a vault. Device pairing only works on a fresh \
+                 install with an empty vault, so it can't overwrite what's already here."
+                    .into(),
+            );
+        }
+    }
+    let body = code.trim().strip_prefix(JOIN_PREFIX).ok_or(
+        "That doesn't look like a SENTINEL device code. Copy the whole code from the other device.",
+    )?;
+    let json = URL_SAFE_NO_PAD.decode(body.as_bytes()).map_err(|_| {
+        "The device code is malformed or was cut off. Copy the whole thing and try again."
+            .to_string()
+    })?;
+    let bundle: JoinBundle = serde_json::from_slice(&json).map_err(|_| {
+        "The device code is malformed. Copy the whole thing and try again.".to_string()
+    })?;
+    if bundle.v != 1 {
+        return Err(
+            "This device code is from a newer version of SENTINEL. Update this app and try again."
+                .into(),
+        );
+    }
+    let key_bytes = STANDARD
+        .decode(bundle.vkey.as_bytes())
+        .map_err(|_| "The device code carried an invalid vault key.".to_string())?;
+    let arr: [u8; 32] = key_bytes
+        .as_slice()
+        .try_into()
+        .map_err(|_| "The device code carried an invalid vault key.".to_string())?;
+    let vk = VaultKey::from_key(Key32::from_bytes(arr));
+
+    // Wire the pinned server config (server_url is the fixed hostname the pinned client resolves).
+    let dir = data_dir(&state);
+    {
+        let mut cfg = load_config(&dir);
+        cfg.server_url = Some(format!("https://{SYNC_HOST}"));
+        cfg.pinned_cert_pem = Some(bundle.cert);
+        cfg.server_ip = Some(bundle.ip.clone());
+        save_config(&dir, &cfg)?;
+    }
+    // Store the bootstrap token and sign in as another device on the same account.
+    kc_set(KC_BOOTSTRAP, &bundle.token)?;
+    bootstrap_signin(&dir).await?;
+
+    // Adopt the shared vault key (keychain + live session), mirroring sync_restore.
+    kc_set(KC_VAULT_KEY, &STANDARD.encode(vk.key().as_bytes()))?;
+    {
+        let mut g = state.inner.lock().unwrap();
+        g.session = VaultSession::unlocked(vk.clone());
+    }
+
+    // Pull the shared vault down.
+    let api = api_for(&state)?;
+    let mut restored = 0i64;
+    if let Some((v, ct)) = api.get_vault().await? {
+        let doc = decode_sync_blob(&vk, &ct, v as u64).map_err(estr)?;
+        let report = {
+            let g = state.inner.lock().unwrap();
+            g.vault.merge(&doc).map_err(estr)?
+        };
+        restored = report.added as i64;
+    }
+    Ok(PairCompleteOut {
+        restored,
+        server_ip: bundle.ip,
+    })
 }
