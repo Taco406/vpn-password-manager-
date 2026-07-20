@@ -105,9 +105,18 @@ function SyncServer({ sync, onSyncChange }: { sync: SyncStatusInfo | null; onSyn
   const [pairCode, setPairCode] = useState<{ code: string; createdAt: string } | null>(null);
   const [joinCode, setJoinCode] = useState("");
   const [showJoin, setShowJoin] = useState(false);
+  // Google sign-in: deploy-time client id + the interactive finish-sign-in state.
+  const [useGoogle, setUseGoogle] = useState(false);
+  const [gClientId, setGClientId] = useState("");
+  const [showGuide, setShowGuide] = useState(false);
+  const [pending, setPending] = useState<{ email: string; totpRequired: boolean } | null>(null);
+  const [enroll, setEnroll] = useState<{ otpauthUri: string; secret: string } | null>(null);
+  const [code, setCode] = useState("");
 
   const signedIn = !!sync?.signedIn;
   const oneClick = sync?.serverUrl === ONE_CLICK_URL;
+  // The deployed server validates real Google tokens ⇒ finish sign-in with Google, not bootstrap.
+  const googleMode = !!sync?.googleClientId;
 
   const refresh = async () => {
     try {
@@ -128,9 +137,20 @@ function SyncServer({ sync, onSyncChange }: { sync: SyncStatusInfo | null; onSyn
     setMsg("");
     setProgress("Starting…");
     try {
-      await syncDeploy(region);
+      const gcid = useGoogle ? gClientId.trim() : "";
+      if (useGoogle && !gcid) {
+        setProgress("");
+        setMsg("Enter your Google client ID, or turn off “Sign in with Google”.");
+        setBusy(false);
+        return;
+      }
+      await syncDeploy(region, undefined, gcid || undefined);
       setProgress("");
-      setMsg("Sync server is up and this device is signed in. Use “Add a device” below to connect another computer.");
+      setMsg(
+        gcid
+          ? "Sync server is up. Click “Sign in with Google” below to finish signing this device in."
+          : "Sync server is up and this device is signed in. Use “Add a device” below to connect another computer.",
+      );
       await refresh();
       await onSyncChange();
     } catch (e) {
@@ -168,6 +188,41 @@ function SyncServer({ sync, onSyncChange }: { sync: SyncStatusInfo | null; onSyn
       await syncReconnect();
       setMsg("Reconnected. This device is now signed in and syncing.");
       await onSyncChange();
+    } catch (e) {
+      setMsg(errMsg(e));
+    }
+    setBusy(false);
+  };
+
+  // Google finish-sign-in for a Google-mode server: browser PKCE → TOTP (enroll on the first
+  // device, or enter the existing code on later ones) → session.
+  const signinGoogle = async () => {
+    setBusy(true);
+    setMsg("Opening your browser — finish Google sign-in there, then come back.");
+    setEnroll(null);
+    setCode("");
+    try {
+      const p = await authGoogleSignin();
+      setPending(p);
+      setMsg(p.totpRequired ? "Scan the QR in your authenticator, then enter the 6-digit code." : "Enter your 6-digit authenticator code.");
+      if (p.totpRequired) setEnroll(await authTotpEnroll());
+    } catch (e) {
+      setMsg(errMsg(e));
+    }
+    setBusy(false);
+  };
+
+  const verifyGoogle = async () => {
+    setBusy(true);
+    setMsg("");
+    try {
+      await authTotpVerify(code.trim());
+      setPending(null);
+      setEnroll(null);
+      setCode("");
+      await refresh();
+      await onSyncChange();
+      setMsg("Signed in with Google. Your vault is syncing.");
     } catch (e) {
       setMsg(errMsg(e));
     }
@@ -274,6 +329,34 @@ function SyncServer({ sync, onSyncChange }: { sync: SyncStatusInfo | null; onSyn
           </div>
           {busy && progress && <p className="mt-2 text-xs text-[var(--accent)]">{progress}</p>}
 
+          <div className="mt-3">
+            <label className="flex items-center gap-2 text-xs text-[var(--text-secondary)]">
+              <input type="checkbox" checked={useGoogle} onChange={(e) => setUseGoogle(e.target.checked)} />
+              <span className="flex items-center gap-1.5"><LogIn size={13} /> Sign in with Google instead of the built-in login</span>
+            </label>
+            {useGoogle && (
+              <div className="mt-2 space-y-2">
+                <input
+                  value={gClientId}
+                  onChange={(e) => setGClientId(e.target.value)}
+                  placeholder="xxxxx.apps.googleusercontent.com"
+                  className={`${inputCls} w-full`}
+                />
+                <button onClick={() => setShowGuide((v) => !v)} className="text-xs text-[var(--accent)] hover:underline">
+                  {showGuide ? "Hide setup steps" : "How do I get a Client ID? (~10 min, one-time)"}
+                </button>
+                {showGuide && (
+                  <ol className="list-decimal space-y-1 pl-4 text-[11px] text-[var(--text-secondary)]">
+                    <li>Open <span className="mono">console.cloud.google.com</span> and pick or create a project.</li>
+                    <li>APIs &amp; Services → OAuth consent screen → <span className="font-medium">External</span>; add your own email under Test users.</li>
+                    <li>APIs &amp; Services → Credentials → Create credentials → OAuth client ID → Application type <span className="font-medium">Desktop app</span>.</li>
+                    <li>Copy the Client ID (ends in <span className="mono">.apps.googleusercontent.com</span>) and paste it above — no client secret needed.</li>
+                  </ol>
+                )}
+              </div>
+            )}
+          </div>
+
           <div className="mt-3 border-t border-[var(--border-subtle)] pt-3">
             {!showJoin ? (
               <button onClick={() => setShowJoin(true)} className="inline-flex items-center gap-1.5 text-xs text-[var(--accent)] hover:underline">
@@ -325,9 +408,39 @@ function SyncServer({ sync, onSyncChange }: { sync: SyncStatusInfo | null; onSyn
               {deployed ? " (its first sign-in likely ran before the server finished installing)" : ""}. Your vault is
               <span className="font-medium"> not syncing yet</span>. Finish setup:
             </div>
-            <button onClick={() => void reconnect()} disabled={busy} className="mt-2 inline-flex items-center gap-1.5 rounded-[10px] border border-[var(--accent)]/50 px-3 py-1.5 text-sm text-[var(--accent)] hover:bg-[var(--accent)]/10 disabled:opacity-50">
-              <PlugZap size={14} /> {busy ? "Reconnecting…" : "Reconnect / finish setup"}
-            </button>
+            {googleMode ? (
+              <div className="mt-2 space-y-2">
+                <button onClick={() => void signinGoogle()} disabled={busy} className="inline-flex items-center gap-1.5 rounded-[10px] border border-[var(--accent)]/50 px-3 py-1.5 text-sm text-[var(--accent)] hover:bg-[var(--accent)]/10 disabled:opacity-50">
+                  <LogIn size={14} /> {busy && !pending ? "Working…" : "Sign in with Google"}
+                </button>
+                {pending && (
+                  <div className="space-y-2">
+                    {enroll && (
+                      <div className="text-[11px] text-[var(--text-secondary)]">
+                        First device: add this secret to Google Authenticator (or any TOTP app), then enter the 6-digit code.
+                        <div className="mono mt-1 break-all rounded bg-[var(--bg-inset)] p-1.5 text-[var(--text-primary)]">{enroll.secret}</div>
+                      </div>
+                    )}
+                    <div className="flex items-center gap-2">
+                      <input
+                        value={code}
+                        onChange={(e) => setCode(e.target.value)}
+                        inputMode="numeric"
+                        placeholder="123456"
+                        className={`${inputCls} w-28`}
+                      />
+                      <button onClick={() => void verifyGoogle()} disabled={busy || code.trim().length < 6} className={btnCls}>
+                        {busy ? "Verifying…" : "Verify & finish"}
+                      </button>
+                    </div>
+                  </div>
+                )}
+              </div>
+            ) : (
+              <button onClick={() => void reconnect()} disabled={busy} className="mt-2 inline-flex items-center gap-1.5 rounded-[10px] border border-[var(--accent)]/50 px-3 py-1.5 text-sm text-[var(--accent)] hover:bg-[var(--accent)]/10 disabled:opacity-50">
+                <PlugZap size={14} /> {busy ? "Reconnecting…" : "Reconnect / finish setup"}
+              </button>
+            )}
           </div>
           <div className="flex items-center gap-4 !mt-2">
             {deployed ? (

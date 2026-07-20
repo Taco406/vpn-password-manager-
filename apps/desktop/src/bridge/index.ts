@@ -433,10 +433,22 @@ export async function syncServerStatus(): Promise<SyncServerStatus> {
   return inv<SyncServerStatus>("sync_server_status");
 }
 
-/** Provision a durable Linode running the sync server and auto-configure the app. Long-running. */
-export async function syncDeploy(region: string, instanceType?: string): Promise<void> {
+/**
+ * Provision a durable Linode running the sync server and auto-configure the app. Long-running.
+ * Pass a Google OAuth client id to deploy a Google-sign-in server (this device then finishes via
+ * the Google + TOTP flow); omit it for the personal bootstrap server that signs in automatically.
+ */
+export async function syncDeploy(
+  region: string,
+  instanceType?: string,
+  googleClientId?: string,
+): Promise<void> {
   if (!inTauri()) throw new Error("Deploying a sync server is only available in the desktop app.");
-  await inv("sync_deploy", { region, instanceType: instanceType ?? null });
+  await inv("sync_deploy", {
+    region,
+    instanceType: instanceType ?? null,
+    googleClientId: googleClientId?.trim() ? googleClientId.trim() : null,
+  });
 }
 
 /** Destroy the deployed sync server (stops billing) and clear local sync state. */

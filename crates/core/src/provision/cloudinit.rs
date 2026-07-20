@@ -324,6 +324,7 @@ write_files:
         -e SENTINEL_API_BIND=0.0.0.0:8787 \
         -e SENTINEL_BOOTSTRAP_TOKEN={{ bootstrap_token }} \
         -e SENTINEL_TOTP_ENC_KEY={{ totp_enc_key }} \
+        -e GOOGLE_OAUTH_CLIENT_ID={{ google_client_id }} \
         -e SENTINEL_TLS_CERT_PEM=/tls/cert.pem \
         -e SENTINEL_TLS_KEY_PEM=/tls/key.pem \
         -e SENTINEL_JWT_ES256_PEM=/tls/jwt.pem \
@@ -357,6 +358,10 @@ pub struct SyncServerParams {
     /// server refuses to boot (and `--restart=always` crash-loops it) unless this is set, so the
     /// container would never serve `/healthz` and the deploy could never sign in. Kept on-box only.
     pub totp_enc_key: String,
+    /// Google OAuth client id (`*.apps.googleusercontent.com`). When non-empty the server
+    /// validates real Google id_tokens (so "Sign in with Google" works); empty keeps the
+    /// bootstrap-token-only personal server. Public value, not a secret.
+    pub google_client_id: String,
 }
 
 /// Render the sync-server cloud-init YAML.
@@ -375,6 +380,7 @@ pub fn render_sync(params: &SyncServerParams) -> Result<String> {
         tls_cert_b64 => params.tls_cert_b64,
         tls_key_b64 => params.tls_key_b64,
         totp_enc_key => params.totp_enc_key,
+        google_client_id => params.google_client_id,
     })
     .map_err(|e| CoreError::Provision {
         stage: "render",
@@ -509,6 +515,7 @@ mod tests {
             tls_cert_b64: "Q0VSVA==".into(),
             tls_key_b64: "S0VZ".into(),
             totp_enc_key: "dG90cGtleWJhc2U2NA==".into(),
+            google_client_id: String::new(),
         }
     }
 
@@ -532,6 +539,19 @@ mod tests {
         assert!(yaml.contains("postgres:16"));
         assert!(yaml.contains("/opt/sentinel/pgdata"));
         assert!(yaml.contains("systemctl mask ssh.service"));
+    }
+
+    #[test]
+    fn sync_cloud_init_threads_the_google_client_id() {
+        // Empty client id → the env var is present but blank; the server filters empty and
+        // runs bootstrap-only (a personal server with no Google sign-in).
+        let yaml = render_sync(&sync_params()).unwrap();
+        assert!(yaml.contains("GOOGLE_OAUTH_CLIENT_ID="));
+        // A real client id is passed so the server validates real Google id_tokens.
+        let mut p = sync_params();
+        p.google_client_id = "123-abc.apps.googleusercontent.com".into();
+        let yaml = render_sync(&p).unwrap();
+        assert!(yaml.contains("GOOGLE_OAUTH_CLIENT_ID=123-abc.apps.googleusercontent.com"));
     }
 
     #[test]
