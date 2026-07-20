@@ -81,8 +81,11 @@ export function Vpn() {
   const doDisconnect = () => bridge.vpnDisconnect();
   const doDestroyPersistent = async () => {
     if (!window.confirm("Destroy the always-on VPN node? This deletes the server and stops billing.")) return;
-    await vpnPersistentDestroy();
-    await bridge.vpnDisconnect();
+    try {
+      await vpnPersistentDestroy(); // also drops the tunnel when connected to this node
+    } catch (e) {
+      window.alert(e instanceof Error ? e.message : String(e));
+    }
     await refreshPersist();
   };
 
@@ -460,7 +463,7 @@ function VpnNodes() {
   };
 
   const destroyAll = async () => {
-    if (!confirm("Destroy ALL exit nodes? This stops all billing and disconnects you.")) return;
+    if (!confirm("Destroy ALL disposable exit nodes and disconnect? (Your always-on VPN node, if you have one, is separate — destroy it from the Always-on VPN card.)")) return;
     setBusy(true);
     setMsg("");
     try {

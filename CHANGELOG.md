@@ -29,7 +29,12 @@ that bumps the app version** — that's how "the changelog updates on every merg
   tied to this box) and it **bills continuously** until you **Destroy** it — its live cost and a
   Destroy button are always shown. A normal **Disconnect** now clearly says it *keeps* the always-on
   node; only **Destroy** tears it down. Like the sync server, it's excluded from the automatic
-  cleanup that reaps leftover throwaway nodes, so it's never destroyed behind your back.
+  cleanup that reaps leftover throwaway nodes, so it's never destroyed behind your back. Money-safety
+  is careful throughout: the node is recorded the instant it's created so it's always visible with a
+  Destroy button (never a hidden billing box), **Destroy only reports success once Linode confirms the
+  node is gone** (if your token is missing or the call fails it keeps the node listed so you can retry,
+  rather than silently orphaning it), and if you turned on the kill switch it now protects the
+  always-on tunnel too.
 
 ## [0.1.25] — 2026-07-20
 

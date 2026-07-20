@@ -1746,6 +1746,15 @@ fn set_persistent_active(
     deps: ConnectDeps,
     rec: &PersistentVpnRecord,
 ) {
+    // Kill switch (opt-in, Windows-only): engage now the tunnel is up so a later drop of the
+    // long-lived always-on tunnel can't leak — matching the ephemeral connect path. Non-fatal.
+    let dir = { state.inner.lock().unwrap().data_dir.clone() };
+    if killswitch_enabled(&dir) {
+        if let Err(e) = killswitch_engage_for(&rec.ipv4) {
+            eprintln!("SENTINEL: kill switch engage failed ({e}); clearing to stay fail-safe");
+            killswitch_clear_all();
+        }
+    }
     let stop = Arc::new(AtomicBool::new(false));
     let started_at = now_secs();
     spawn_metrics_loop(app.clone(), deps.wg.clone(), stop.clone(), started_at);
@@ -1836,9 +1845,10 @@ async fn provision_persistent_ready(
     Ok(ip)
 }
 
-/// Deploy a durable always-on VPN exit node and connect to it. Destroys the node if provisioning
-/// fails BEFORE the record is saved (no hidden paid orphan); after that, failures leave a
-/// recoverable node (reachable via Connect/Destroy).
+/// Deploy a durable always-on VPN exit node and connect to it. The node is recorded on disk the
+/// instant it's created, so it is ALWAYS visible + destroyable from its card afterward; any later
+/// failure either tears it down (delete confirmed → record cleared) or, if the delete can't be
+/// confirmed, leaves it recorded and destroyable — never a hidden paid orphan.
 async fn persistent_deploy_impl(
     app: AppHandle,
     state: &AppState,
@@ -1881,6 +1891,9 @@ async fn persistent_deploy_impl(
     ))
     .map_err(|e| e.to_string())?;
 
+    // Store the tunnel key FIRST — before spending any money — so a keychain failure costs nothing.
+    persist_wg_key_store(&client_kp.private_base64())?;
+
     let _ = app.emit(
         "vpn:persistent",
         json!({ "stage": "creating", "detail": "creating the node…" }),
@@ -1892,10 +1905,38 @@ async fn persistent_deploy_impl(
         label: "sentinel-vpn".into(),
         tags: vec![PERSISTENT_VPN_TAG.to_string()],
     };
-    let instance = deps.cloud.create(&spec).await.map_err(|e| e.to_string())?;
+    let instance = match deps.cloud.create(&spec).await {
+        Ok(i) => i,
+        Err(e) => {
+            persist_wg_key_del(); // no node created — don't leave a stray key
+            return Err(e.to_string());
+        }
+    };
     let id = instance.id.clone();
 
-    // Until the record is saved, destroy the node on any error (no paid orphan).
+    // Record the node IMMEDIATELY (id known) so it is ALWAYS visible + destroyable from here on —
+    // even if a later step, or a crash, prevents finishing. The IP is filled in after boot. This is
+    // the money-safety invariant: a created node must never exist without a local record.
+    let mut rec = PersistentVpnRecord {
+        instance_id: id.clone(),
+        ipv4: instance.ipv4.clone().unwrap_or_default(),
+        instance_type: instance_type.clone(),
+        region: region.clone(),
+        created_at: now_secs(),
+        server_pubkey: server_kp.public_base64(),
+        client_ip: client_ip.into(),
+        listen_port,
+    };
+    if let Err(e) = save_persistent_record(&dir, &rec) {
+        // Can't even record it — delete the node so it can never bill invisibly, and drop the key.
+        let _ = deps.cloud.delete(&id).await;
+        persist_wg_key_del();
+        return Err(e);
+    }
+
+    // Wait for boot + the readiness callback. On failure, tear the node down — but because it's
+    // recorded, if the delete itself fails the node stays visible + destroyable from its card
+    // (never a hidden paid orphan).
     let ip = match provision_persistent_ready(
         &deps,
         &instance,
@@ -1907,31 +1948,20 @@ async fn persistent_deploy_impl(
     {
         Ok(ip) => ip,
         Err(e) => {
-            let _ = deps.cloud.delete(&id).await;
+            cleanup_failed_persistent(&deps, &dir, &id).await;
             return Err(e);
         }
     };
-
-    // Persist the record + client key BEFORE the tunnel comes up, so a crash leaves a node the
-    // user can see / connect to / destroy — never a hidden paid box.
-    persist_wg_key_store(&client_kp.private_base64())?;
-    let rec = PersistentVpnRecord {
-        instance_id: id,
-        ipv4: ip,
-        instance_type,
-        region,
-        created_at: now_secs(),
-        server_pubkey: server_kp.public_base64(),
-        client_ip: client_ip.into(),
-        listen_port,
-    };
-    save_persistent_record(&dir, &rec)?;
+    rec.ipv4 = ip;
+    let _ = save_persistent_record(&dir, &rec); // fill in the IP (the record already exists)
 
     let _ = app.emit(
         "vpn:persistent",
         json!({ "stage": "connecting", "detail": "starting the tunnel…" }),
     );
     let allowed = resolve_allowed_ips(&dir);
+    // If the tunnel doesn't come up, KEEP the node — it's recorded, so the user can retry via
+    // Connect or remove it via Destroy (both on the always-on card).
     bring_up_persistent_tunnel(&deps, &rec, &client_kp.private_base64(), allowed).await?;
     set_persistent_active(&app, state, deps, &rec);
     let _ = app.emit(
@@ -1939,6 +1969,24 @@ async fn persistent_deploy_impl(
         json!({ "stage": "ready", "detail": "always-on VPN ready" }),
     );
     Ok(())
+}
+
+/// Best-effort teardown of a persistent node whose provisioning failed. Deletes the cloud node;
+/// clears the local record + key ONLY if the delete is confirmed (success, or a 404 meaning it's
+/// already gone). If the delete fails otherwise, the record is KEPT so the node stays visible and
+/// destroyable from its card — never a hidden paid orphan.
+async fn cleanup_failed_persistent(deps: &ConnectDeps, dir: &Path, id: &str) {
+    match deps.cloud.delete(id).await {
+        Ok(()) => {
+            delete_persistent_record(dir);
+            persist_wg_key_del();
+        }
+        Err(e) if e.to_string().contains("404") => {
+            delete_persistent_record(dir);
+            persist_wg_key_del();
+        }
+        Err(_) => { /* keep the record so the node stays destroyable from the always-on card */ }
+    }
 }
 
 /// Connect (or reconnect) to the already-deployed always-on node. Boots it first if it was stopped.
@@ -1989,8 +2037,24 @@ async fn persistent_connect_impl(
 
 /// Destroy the always-on node (stops billing) + clear its record/key. Drops the local tunnel first
 /// only if it's currently connected to THIS node (never touches an ephemeral tunnel).
+///
+/// Money-safety invariant: the local record + key are cleared ONLY when the cloud node is CONFIRMED
+/// gone (a successful delete, or a 404 meaning it's already gone). If there's no Linode token, or
+/// the delete fails transiently, the record is KEPT and an error is returned — so a paid node is
+/// never silently orphaned (invisible + un-destroyable) while the UI falsely reports success.
 async fn persistent_destroy_impl(state: &AppState) -> std::result::Result<(), String> {
+    // Serialize against an in-flight connect/deploy so a destroy can't race one into a phantom
+    // "connected to a deleted node" state. (When merely connected, CONNECTING is false, so this
+    // passes.)
+    if CONNECTING.swap(true, Ordering::SeqCst) {
+        return Err(
+            "a VPN connection attempt is in progress — try Destroy again in a moment.".into(),
+        );
+    }
+    let _connecting = ConnectingGuard;
+
     let dir = { state.inner.lock().unwrap().data_dir.clone() };
+    // Drop the local tunnel first, but only if it's THIS persistent node (never an ephemeral one).
     let active = {
         let mut g = state.inner.lock().unwrap();
         if g.vpn.as_ref().map(|v| v.persistent).unwrap_or(false) {
@@ -2002,15 +2066,37 @@ async fn persistent_destroy_impl(state: &AppState) -> std::result::Result<(), St
     if let Some(a) = active {
         a.stop.store(true, Ordering::Relaxed);
         let _ = a.deps.wg.down().await;
+        killswitch_clear_all();
     }
-    if let Some(rec) = load_persistent_record(&dir) {
-        if let Some(token) = get_token() {
-            let _ = live_deps(token).cloud.delete(&rec.instance_id).await;
+
+    let Some(rec) = load_persistent_record(&dir) else {
+        persist_wg_key_del(); // nothing recorded — clear any stray key and we're done
+        return Ok(());
+    };
+    // Never wipe the record without a confirmed delete — otherwise a missing token or a transient
+    // API error would orphan a node that bills forever with no in-app way to find or destroy it.
+    let token = get_token().ok_or_else(|| {
+        "Add your Linode token back (Settings → Real VPN) to destroy the always-on node. Nothing \
+         was deleted and its details are kept, so you can retry."
+            .to_string()
+    })?;
+    match live_deps(token).cloud.delete(&rec.instance_id).await {
+        Ok(()) => {
+            delete_persistent_record(&dir);
+            persist_wg_key_del();
+            Ok(())
         }
+        // Already gone on Linode (404) — treat as destroyed so the card doesn't get stuck.
+        Err(e) if e.to_string().contains("404") => {
+            delete_persistent_record(&dir);
+            persist_wg_key_del();
+            Ok(())
+        }
+        Err(e) => Err(format!(
+            "Couldn't destroy the always-on node ({e}). Its details are kept so you can try \
+             Destroy again — or remove the 'sentinel-vpn' node in your Linode dashboard."
+        )),
     }
-    delete_persistent_record(&dir);
-    persist_wg_key_del();
-    Ok(())
 }
 
 // --- Tauri command wrappers -------------------------------------------------
