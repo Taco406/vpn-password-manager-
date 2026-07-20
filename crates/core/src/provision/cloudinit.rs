@@ -60,7 +60,13 @@ write_files:
           iif "lo" accept
           udp dport {{ listen_port }} accept
           tcp dport 443 accept
-          iif "wg0" accept
+          # MUST be `iifname` (name match at runtime), NOT `iif` (interface INDEX resolved at
+          # load time). cloud-init loads this ruleset BEFORE wg-quick brings wg0 up, so `iif
+          # "wg0"` errors "Interface does not exist" and — because `nft -f` is atomic — rejects
+          # the WHOLE file, including the NAT table below. With no masquerade the client's
+          # packets egress with a private source and never get a reply: the tunnel handshakes
+          # (so it looks "connected") but no real traffic flows.
+          iifname "wg0" accept
         }
         chain forward { type filter hook forward priority 0; policy accept; }
         chain output { type filter hook output priority 0; policy accept; }
@@ -439,6 +445,24 @@ mod tests {
         assert!(yaml.contains("oifname != \"wg0\" masquerade"));
         assert!(!yaml.contains("/etc/wireguard/wg1.conf"));
         assert!(!yaml.contains("wg-quick@wg1"));
+    }
+
+    #[test]
+    fn firewall_matches_wg0_by_name_so_the_ruleset_loads_before_the_tunnel() {
+        // Regression: `nft -f` runs before wg-quick brings wg0 up. `iif "wg0"` resolves an
+        // interface INDEX at load time and errors "Interface does not exist", which — because
+        // `nft -f` is atomic — rejects the entire ruleset INCLUDING the NAT table, so no
+        // masquerade ever loads and no client traffic egresses. `iifname` matches by name at
+        // runtime and loads fine. Never regress to `iif "wg0"`.
+        let yaml = render(&params()).unwrap();
+        assert!(
+            yaml.contains("iifname \"wg0\" accept"),
+            "input chain must accept the tunnel by name (iifname), not by index (iif)"
+        );
+        assert!(
+            !yaml.contains("iif \"wg0\""),
+            "iif \"wg0\" fails to load before the tunnel exists and takes NAT down with it"
+        );
     }
 
     #[test]

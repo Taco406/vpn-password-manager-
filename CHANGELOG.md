@@ -8,6 +8,25 @@ The format follows [Keep a Changelog](https://keepachangelog.com/). Versions are
 [semantic](https://semver.org/). **Add a new `## [x.y.z]` section at the top in the same PR
 that bumps the app version** — that's how "the changelog updates on every merge."
 
+## [0.1.30] — 2026-07-20
+
+### Fixed
+- **The VPN now actually passes traffic — connects *and* browses.** The exit node's firewall
+  ruleset was silently failing to load, which took its NAT down with it, so a connected tunnel
+  handshaked (looked "connected", counters flickered) but no real traffic ever got a reply —
+  pages just hung. Root cause: the node loads its firewall *before* the WireGuard interface
+  exists, and one rule referenced that interface by kernel index (`iif "wg0"`), which errors
+  "interface does not exist" and — because the load is all-or-nothing — **rejected the entire
+  ruleset, including the masquerade/NAT that makes your traffic routable.** Without NAT, your
+  packets left the server with a private address and never came back. Fixed by matching the
+  interface by name (`iifname`), which loads cleanly before the tunnel comes up. Reproduced and
+  verified with the real firewall tool. New connections use the fixed node automatically —
+  update and reconnect; no manual server cleanup needed.
+- **Lowered the tunnel MTU to a universally safe value (1280).** On connections with a smaller
+  underlying MTU (PPPoE, mobile/LTE, DS-Lite, nested VPNs) the old 1420 could blackhole large
+  packets — the handshake and small requests work but page data stalls. 1280 (the IPv6 minimum)
+  survives those paths.
+
 ## [0.1.29] — 2026-07-20
 
 ### Changed

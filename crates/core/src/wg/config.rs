@@ -37,7 +37,7 @@ pub fn render_client_conf(c: &ClientConf) -> String {
          PrivateKey = {priv}\n\
          Address = {addr}\n\
          {dns_line}\
-         MTU = 1420\n\
+         MTU = 1280\n\
          \n\
          [Peer]\n\
          PublicKey = {spub}\n\
@@ -101,6 +101,10 @@ mod tests {
         assert!(out.contains("Endpoint = 203.0.113.7:51820"));
         assert!(out.contains("AllowedIPs = 0.0.0.0/0, ::/0"));
         assert!(out.contains("PersistentKeepalive = 25"));
+        // A conservative 1280 tunnel MTU (the IPv6 minimum) survives low-MTU underlays
+        // (PPPoE, LTE, DS-Lite) where 1420 blackholes large packets — the classic
+        // "connects but pages stall" symptom.
+        assert!(out.contains("MTU = 1280"));
     }
 
     #[test]
