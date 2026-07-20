@@ -857,6 +857,8 @@ fn default_settings() -> serde_json::Value {
         "killSwitchDefault": true,
         "defaultRegion": "us-east",
         "ssidAllowlist": ["home", "office"],
+        "tunnelMode": "full",
+        "splitRoutes": [],
         "telemetry": false
     })
 }

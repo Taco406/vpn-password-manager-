@@ -1,5 +1,5 @@
 import { useEffect, useState, type ReactElement, type ReactNode } from "react";
-import { Moon, Sun, Monitor, Globe, Shield, Lock, KeyRound, Smartphone, type LucideIcon } from "lucide-react";
+import { Moon, Sun, Monitor, Globe, Shield, Lock, KeyRound, Smartphone, Split, X, type LucideIcon } from "lucide-react";
 import type { Settings as SettingsT } from "@sentinel/shared";
 import changelogRaw from "../../../../CHANGELOG.md?raw";
 import {
@@ -28,7 +28,7 @@ import {
 } from "../bridge";
 import { useApp } from "../stores/app";
 import { Card, SectionTitle, Badge } from "../components/ui";
-import { Toggle, Slider, Tabs } from "../components/kit";
+import { Toggle, Slider, Tabs, inputCls, btnCls } from "../components/kit";
 
 type TabId = "general" | "security" | "vpn" | "about";
 
@@ -126,6 +126,7 @@ export function Settings() {
         <>
           <RealVpn />
           <WireGuardMonitor />
+          <SplitTunnel s={s} patch={patch} />
         </>
       )}
 
@@ -234,6 +235,136 @@ function WireGuardMonitor() {
         disconnect and on launch). Last resort if it persists: uninstall WireGuard (Settings → Apps) and
         reboot, which removes any stuck adapter.
       </p>
+    </Card>
+  );
+}
+
+// Permissive CIDR check mirroring the backend's `looks_like_cidr`: an address part and a numeric
+// prefix (≤128). Not a full validator — just enough to reject empty/garbage before persisting.
+function looksLikeCidr(v: string): boolean {
+  const t = v.trim();
+  const slash = t.indexOf("/");
+  if (slash <= 0) return false;
+  const addr = t.slice(0, slash);
+  const prefix = t.slice(slash + 1);
+  if (!/^\d+$/.test(prefix) || Number(prefix) > 128) return false;
+  return addr.includes(".") || addr.includes(":");
+}
+
+function SplitTunnel({ s, patch }: { s: SettingsT; patch: (p: Partial<SettingsT>) => void }) {
+  const mode = s.tunnelMode ?? "full";
+  const routes = s.splitRoutes ?? [];
+  const [newRoute, setNewRoute] = useState("");
+  const [hint, setHint] = useState("");
+
+  const addRoute = (raw?: string) => {
+    const v = (raw ?? newRoute).trim();
+    if (!v) return;
+    if (!looksLikeCidr(v)) {
+      setHint(`"${v}" doesn't look like a CIDR — try something like 10.0.0.0/8.`);
+      return;
+    }
+    if (routes.some((r) => r.toLowerCase() === v.toLowerCase())) {
+      setNewRoute("");
+      setHint("");
+      return;
+    }
+    setNewRoute("");
+    setHint("");
+    patch({ splitRoutes: [...routes, v] });
+  };
+
+  const removeRoute = (r: string) => patch({ splitRoutes: routes.filter((x) => x !== r) });
+
+  return (
+    <Card className="mb-4">
+      <div className="mb-2 flex items-center justify-between text-sm font-medium">
+        <span className="flex items-center gap-2">
+          <Split size={15} /> Split tunneling
+        </span>
+        <Badge tone={mode === "split" ? "accent" : "neutral"}>{mode === "split" ? "Split" : "Full tunnel"}</Badge>
+      </div>
+      <p className="mb-3 text-xs text-[var(--text-secondary)]">
+        By default every connection routes <span className="font-medium">all</span> traffic through the
+        VPN (full tunnel). Switch to <span className="font-medium">Split</span> to send only chosen
+        destinations through the VPN — everything else uses your normal connection. Takes effect on your
+        next Connect.
+      </p>
+
+      {/* Full / Split segmented control */}
+      <div className="flex gap-2">
+        {([
+          ["full", "Full tunnel", "All traffic through the VPN"],
+          ["split", "Split", "Only chosen routes"],
+        ] as const).map(([m, label, sub]) => (
+          <button
+            key={m}
+            onClick={() => patch({ tunnelMode: m })}
+            className={`flex flex-1 flex-col items-center gap-0.5 rounded-[10px] border py-2.5 text-sm ${
+              mode === m
+                ? "border-[var(--accent)]/50 bg-[var(--accent)]/10 text-[var(--accent)]"
+                : "border-[var(--border-subtle)]"
+            }`}
+          >
+            <span>{label}</span>
+            <span className="text-[10px] text-[var(--text-muted)]">{sub}</span>
+          </button>
+        ))}
+      </div>
+
+      {mode === "split" && (
+        <div className="mt-3">
+          <div className="mb-1 text-xs text-[var(--text-muted)]">
+            Routes through the VPN — only these destinations go through the VPN; everything else uses
+            your normal connection.
+          </div>
+          {routes.length > 0 && (
+            <div className="mb-2 flex flex-wrap gap-1.5">
+              {routes.map((r) => (
+                <span
+                  key={r}
+                  className="inline-flex items-center gap-1 rounded-full border border-[var(--border-subtle)] bg-[var(--bg-inset)] px-2.5 py-1 text-xs"
+                >
+                  <span className="mono">{r}</span>
+                  <button
+                    onClick={() => removeRoute(r)}
+                    aria-label={`Remove ${r}`}
+                    className="text-[var(--text-muted)] hover:text-[var(--danger)]"
+                  >
+                    <X size={12} />
+                  </button>
+                </span>
+              ))}
+            </div>
+          )}
+          <div className="flex items-center gap-2">
+            <input
+              value={newRoute}
+              onChange={(e) => {
+                setNewRoute(e.target.value);
+                if (hint) setHint("");
+              }}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") {
+                  e.preventDefault();
+                  addRoute();
+                }
+              }}
+              placeholder="e.g. 10.0.0.0/8"
+              className={`${inputCls} flex-1`}
+            />
+            <button onClick={() => addRoute()} disabled={!newRoute.trim()} className={btnCls}>
+              Add
+            </button>
+          </div>
+          {hint && <p className="mt-1 text-[11px] text-[var(--danger)]">{hint}</p>}
+          <p className="mt-2 text-[11px] text-[var(--text-muted)]">
+            Example: <span className="mono">10.0.0.0/8</span>, <span className="mono">192.168.0.0/16</span>.
+            If this list is empty (or every entry is invalid), SENTINEL safely falls back to full tunnel
+            so you're never left routing nothing.
+          </p>
+        </div>
+      )}
     </Card>
   );
 }
@@ -458,7 +589,7 @@ function Updates() {
   return (
     <Card>
       <div className="mb-2 flex items-center justify-between text-sm font-medium">
-        Updates <Badge tone="accent">v0.1.21</Badge>
+        Updates <Badge tone="accent">v0.1.22</Badge>
       </div>
       <p className="mb-3 text-xs text-[var(--text-secondary)]">
         SENTINEL checks for signed updates on launch and installs them automatically. You can also check now.

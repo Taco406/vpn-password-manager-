@@ -67,10 +67,11 @@ pub async fn connect(
     deps: &ConnectDeps,
     region: &str,
     instance_type: &str,
+    allowed_ips: Vec<String>,
     emit: &mut StateSink<'_>,
 ) -> Result<Connection> {
     let mut created: Option<String> = None;
-    let result = connect_inner(deps, region, instance_type, emit, &mut created).await;
+    let result = connect_inner(deps, region, instance_type, allowed_ips, emit, &mut created).await;
 
     if let Err(ref e) = result {
         // Guaranteed cleanup: destroy whatever we created, whatever went wrong.
@@ -97,6 +98,7 @@ async fn connect_inner(
     deps: &ConnectDeps,
     region: &str,
     instance_type: &str,
+    allowed_ips: Vec<String>,
     emit: &mut StateSink<'_>,
     created: &mut Option<String>,
 ) -> Result<Connection> {
@@ -184,7 +186,7 @@ async fn connect_inner(
         dns: "1.1.1.1".into(),
         server_public_key: server_kp.public_base64(),
         server_endpoint: format!("{ip}:51820"),
-        allowed_ips: full_tunnel(),
+        allowed_ips,
         keepalive: 25,
     };
     let rendered = render_client_conf(&conf);
@@ -216,6 +218,53 @@ pub async fn disconnect(
 
 fn hex(b: &[u8]) -> String {
     b.iter().map(|x| format!("{x:02x}")).collect()
+}
+
+// --- split-tunnel AllowedIPs decision -------------------------------------
+//
+// Include-mode split tunneling: the client's `AllowedIPs` is either the full-tunnel default or a
+// user-chosen set of CIDRs. The decision is a pure function so it can be exhaustively unit tested
+// independent of settings-file I/O (the platform layer reads `tunnelMode`/`splitRoutes` from disk
+// and hands them here).
+
+/// Permissive check that a string looks like a CIDR: an address part followed by a numeric prefix
+/// (`addr/bits`). Accepts IPv4 (`10.0.0.0/8`) and IPv6 (`2001:db8::/32`) forms without fully
+/// parsing them — the goal is to reject empty/garbage, not to be a full validator. The safe
+/// fallback in [`decide_allowed_ips`] means a rejected entry can only ever widen routing back to
+/// full-tunnel, never route "nothing".
+fn looks_like_cidr(s: &str) -> bool {
+    let s = s.trim();
+    let Some((addr, prefix)) = s.split_once('/') else {
+        return false;
+    };
+    if addr.is_empty() {
+        return false;
+    }
+    // Prefix must be all digits and within the widest sane range (IPv6 = 128 bits).
+    match prefix.parse::<u32>() {
+        Ok(bits) if bits <= 128 => {}
+        _ => return false,
+    }
+    // Address must at least look like IPv4 (has a dot) or IPv6 (has a colon).
+    addr.contains('.') || addr.contains(':')
+}
+
+/// Pure decision: given the persisted tunnel mode and split routes, compute the client's WireGuard
+/// `AllowedIPs`. In `"split"` mode with at least one valid CIDR, only those route through the VPN;
+/// anything else — full mode, or split with an empty/all-invalid list — falls back to
+/// [`full_tunnel`]. This is the load-bearing safety property: we never route "nothing".
+pub fn decide_allowed_ips(tunnel_mode: Option<&str>, split_routes: &[String]) -> Vec<String> {
+    if tunnel_mode == Some("split") {
+        let cidrs: Vec<String> = split_routes
+            .iter()
+            .map(|s| s.trim().to_string())
+            .filter(|s| looks_like_cidr(s))
+            .collect();
+        if !cidrs.is_empty() {
+            return cidrs;
+        }
+    }
+    full_tunnel()
 }
 
 // --- a mock pubkey fetcher for tests / demo -------------------------------
@@ -273,7 +322,7 @@ mod tests {
         let d = deps(cloud, false);
         let mut states = Vec::new();
         let mut sink = |s: ConnectState| states.push(s);
-        let conn = connect(&d, "us-east", "g6-nanode-1", &mut sink)
+        let conn = connect(&d, "us-east", "g6-nanode-1", full_tunnel(), &mut sink)
             .await
             .unwrap();
 
@@ -295,7 +344,7 @@ mod tests {
         let cloud = MockCloud::new(2);
         let d = deps(cloud, false);
         let mut sink = |_s: ConnectState| {};
-        let conn = connect(&d, "us-east", "g6-nanode-1", &mut sink)
+        let conn = connect(&d, "us-east", "g6-nanode-1", full_tunnel(), &mut sink)
             .await
             .unwrap();
         assert!(
@@ -313,7 +362,7 @@ mod tests {
         let before = cloud.count();
         let d = deps(cloud.clone(), false);
         let mut sink = |_s: ConnectState| {};
-        let r = connect(&d, "us-east", "g6-nanode-1", &mut sink).await;
+        let r = connect(&d, "us-east", "g6-nanode-1", full_tunnel(), &mut sink).await;
         assert!(r.is_err());
         // No new instance beyond the seeded orphan.
         assert_eq!(cloud.count(), before);
@@ -327,7 +376,7 @@ mod tests {
         let d = deps(cloud.clone(), true); // fetcher fails
         let mut states = Vec::new();
         let mut sink = |s: ConnectState| states.push(s);
-        let r = connect(&d, "eu-central", "g6-nanode-1", &mut sink).await;
+        let r = connect(&d, "eu-central", "g6-nanode-1", full_tunnel(), &mut sink).await;
 
         assert!(r.is_err());
         assert!(
@@ -353,9 +402,71 @@ mod tests {
         let mut d = deps(cloud.clone(), false);
         d.max_boot_polls = 3;
         let mut sink = |_s: ConnectState| {};
-        let r = connect(&d, "us-east", "g6-nanode-1", &mut sink).await;
+        let r = connect(&d, "us-east", "g6-nanode-1", full_tunnel(), &mut sink).await;
         assert!(r.is_err());
         assert_eq!(cloud.count(), baseline);
+    }
+
+    #[test]
+    fn full_mode_uses_full_tunnel() {
+        // Default / explicit full mode → full-tunnel, regardless of any routes present.
+        assert_eq!(decide_allowed_ips(None, &[]), full_tunnel());
+        assert_eq!(decide_allowed_ips(Some("full"), &[]), full_tunnel());
+        assert_eq!(
+            decide_allowed_ips(Some("full"), &["10.0.0.0/8".into()]),
+            full_tunnel(),
+            "full mode must ignore split routes"
+        );
+    }
+
+    #[test]
+    fn split_with_valid_routes_uses_those_cidrs() {
+        let routes = vec!["10.0.0.0/8".to_string(), "192.168.0.0/16".to_string()];
+        assert_eq!(decide_allowed_ips(Some("split"), &routes), routes);
+        // IPv6 CIDRs are accepted too.
+        assert_eq!(
+            decide_allowed_ips(Some("split"), &["2001:db8::/32".to_string()]),
+            vec!["2001:db8::/32".to_string()]
+        );
+        // Surrounding whitespace is trimmed.
+        assert_eq!(
+            decide_allowed_ips(Some("split"), &["  10.0.0.0/8  ".to_string()]),
+            vec!["10.0.0.0/8".to_string()]
+        );
+    }
+
+    #[test]
+    fn split_with_empty_routes_falls_back_to_full_tunnel() {
+        assert_eq!(decide_allowed_ips(Some("split"), &[]), full_tunnel());
+    }
+
+    #[test]
+    fn split_with_only_garbage_falls_back_to_full_tunnel() {
+        // Missing prefix, empty address, non-numeric prefix, out-of-range prefix, plain junk.
+        let garbage = vec![
+            "not-a-cidr".to_string(),
+            "10.0.0.0".to_string(),
+            "/8".to_string(),
+            "10.0.0.0/abc".to_string(),
+            "10.0.0.0/999".to_string(),
+            "".to_string(),
+            "   ".to_string(),
+        ];
+        assert_eq!(decide_allowed_ips(Some("split"), &garbage), full_tunnel());
+    }
+
+    #[test]
+    fn split_keeps_only_the_valid_routes() {
+        // A mix drops the garbage and keeps the valid CIDRs (still narrower than full-tunnel).
+        let mixed = vec![
+            "10.0.0.0/8".to_string(),
+            "garbage".to_string(),
+            "192.168.0.0/16".to_string(),
+        ];
+        assert_eq!(
+            decide_allowed_ips(Some("split"), &mixed),
+            vec!["10.0.0.0/8".to_string(), "192.168.0.0/16".to_string()]
+        );
     }
 
     #[tokio::test]
@@ -363,7 +474,7 @@ mod tests {
         let cloud = MockCloud::new(1);
         let d = deps(cloud.clone(), false);
         let mut sink = |_s: ConnectState| {};
-        let conn = connect(&d, "us-east", "g6-nanode-1", &mut sink)
+        let conn = connect(&d, "us-east", "g6-nanode-1", full_tunnel(), &mut sink)
             .await
             .unwrap();
         let n = cloud.count();

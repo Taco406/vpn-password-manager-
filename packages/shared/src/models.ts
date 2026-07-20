@@ -195,5 +195,10 @@ export interface Settings {
   killSwitchDefault: boolean;
   defaultRegion?: string;
   ssidAllowlist: string[];
+  /** VPN routing mode. Default "full" routes all traffic through the tunnel; "split" routes
+   *  only the destinations in `splitRoutes`. */
+  tunnelMode?: "full" | "split";
+  /** In "split" mode, the CIDRs that route through the VPN (everything else stays off-VPN). */
+  splitRoutes?: string[];
   telemetry: false; // there is nothing to send; always off.
 }
