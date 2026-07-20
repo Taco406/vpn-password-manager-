@@ -1271,8 +1271,9 @@ pub async fn sync_deploy(
     }
     if !healthy {
         return Err(
-            "the server didn't come up in time. It's still provisioning — check status shortly, \
-             or if the image pull failed, make the ghcr package public (see the setup guide)."
+            "the server didn't answer its health check in time. A first boot installs Docker and \
+             pulls the image, which can occasionally run long — the node is saved, so give it a \
+             minute and press Reconnect to finish signing in without redeploying."
                 .into(),
         );
     }
