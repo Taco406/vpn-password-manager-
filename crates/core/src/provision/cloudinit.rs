@@ -62,18 +62,19 @@ write_files:
           tcp dport 443 accept
           iif "wg0" accept
         }
-        chain forward {
-          type filter hook forward priority 0; policy accept;
-          # Clamp TCP MSS to the path MTU so full-tunnel clients can load large responses (HTTPS
-          # pages) instead of stalling on oversized packets that get silently dropped.
-          tcp flags syn tcp option maxseg size set rt mtu
-        }
+        chain forward { type filter hook forward priority 0; policy accept; }
         chain output { type filter hook output priority 0; policy accept; }
       }
       table ip nat {
         chain postrouting {
           type nat hook postrouting priority 100; policy accept;
-          oifname "{{ egress_if }}" masquerade
+          # Masquerade everything leaving via any interface EXCEPT the client tunnel — so return
+          # traffic is NAT'd back regardless of what the provider names the public NIC (eth0, ens3,
+          # enp0s3, …). A hardcoded interface name would silently break NAT (client gets upload but
+          # zero download) on any host that doesn't use it. For a multi-hop node the egress is wg1,
+          # which this also covers. `{{ egress_if }}` is kept in the render context but no longer
+          # pinned here on purpose.
+          oifname != "wg0" masquerade
         }
       }
 
@@ -149,6 +150,11 @@ runcmd:
   - sysctl -w net.ipv4.ip_forward=1
   - echo 'net.ipv4.ip_forward=1' > /etc/sysctl.d/99-sentinel.conf
   - nft -f /etc/nftables.conf
+  # MSS clamp is BEST-EFFORT and applied AFTER the ruleset loads, so that if this node's nftables
+  # build rejects the expression it can't fail `nft -f` and take masquerade down with it (which
+  # would break all return traffic). The client also sets MTU=1420, which handles throughput on its
+  # own; this is belt-and-suspenders for oversized-packet stalls.
+  - nft add rule inet filter forward tcp flags syn tcp option maxseg size set rt mtu || true
   - systemctl enable wg-quick@wg0
   - systemctl start wg-quick@wg0
 {% if next_hop %}
@@ -405,7 +411,9 @@ mod tests {
     #[test]
     fn single_node_nats_to_the_internet_and_has_no_wg1() {
         let yaml = render(&params()).unwrap();
-        assert!(yaml.contains("oifname \"eth0\" masquerade"));
+        // Interface-agnostic NAT: masquerade everything except the client tunnel, so return
+        // traffic is NAT'd regardless of the provider's public NIC name.
+        assert!(yaml.contains("oifname != \"wg0\" masquerade"));
         assert!(!yaml.contains("/etc/wireguard/wg1.conf"));
         assert!(!yaml.contains("wg-quick@wg1"));
     }
@@ -426,8 +434,9 @@ mod tests {
         assert!(yaml.contains("PublicKey = NEXTPUB"));
         assert!(yaml.contains("Endpoint = 203.0.113.9:51820"));
         assert!(yaml.contains("AllowedIPs = 0.0.0.0/0, ::/0"));
-        // NAT onto the downstream tunnel, not the NIC — traffic bounces onward.
-        assert!(yaml.contains("oifname \"wg1\" masquerade"));
+        // Same interface-agnostic NAT (masquerade != wg0) covers the multi-hop egress (wg1) too,
+        // and never pins a hardcoded NIC.
+        assert!(yaml.contains("oifname != \"wg0\" masquerade"));
         assert!(!yaml.contains("oifname \"eth0\" masquerade"));
         // wg1 is brought up.
         assert!(yaml.contains("systemctl start wg-quick@wg1"));

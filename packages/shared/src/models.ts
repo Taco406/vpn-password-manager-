@@ -21,7 +21,7 @@ export interface KeyringStatus {
   recoveryVerified: boolean;
 }
 
-export type ItemType = "login" | "note" | "card" | "identity";
+export type ItemType = "login" | "note" | "card" | "identity" | "passkey";
 
 export interface UrlMatch {
   url: string;
@@ -56,6 +56,16 @@ export interface ItemDetail extends ItemSummary {
   /** Present only for cards/identities; never contains the raw number in a list. */
   card?: { brand: string; last4?: string; expMonth?: number; expYear?: number };
   identity?: { fullName?: string; email?: string; phone?: string };
+  /** Present only for passkeys. SAFE metadata only — the private key is never sent to the UI. */
+  passkey?: {
+    rpId: string;
+    rpName?: string;
+    userName: string;
+    userDisplayName?: string;
+    credentialId: string;
+    algorithm: number;
+    signCount: number;
+  };
 }
 
 export interface PasswordSpec {

@@ -13,6 +13,7 @@ import {
   StickyNote,
   CreditCard,
   User,
+  KeyRound,
   Loader2,
 } from "lucide-react";
 import type { ItemInput, ItemType } from "@sentinel/shared";
@@ -229,7 +230,9 @@ export function ItemEditor() {
     }
   }
 
-  const ActiveIcon = typeMeta.find((t) => t.type === type)?.icon ?? Globe;
+  // Passkeys are never created here, but an existing one can be opened to edit its
+  // title/tags/notes; give it the right icon rather than falling back to the globe.
+  const ActiveIcon = type === "passkey" ? KeyRound : (typeMeta.find((t) => t.type === type)?.icon ?? Globe);
 
   if (loading) {
     return (

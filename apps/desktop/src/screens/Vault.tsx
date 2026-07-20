@@ -1,11 +1,11 @@
 import { useEffect, useMemo, useState } from "react";
 import { useParams, useNavigate } from "react-router-dom";
-import { Search, Plus, Eye, EyeOff, Copy, Globe, StickyNote, CreditCard, User, Command as CmdIcon, ShieldCheck, Pencil, Upload } from "lucide-react";
+import { Search, Plus, Eye, EyeOff, Copy, Globe, StickyNote, CreditCard, User, KeyRound, Command as CmdIcon, ShieldCheck, Pencil, Upload } from "lucide-react";
 import type { ItemDetail, ItemSummary } from "@sentinel/shared";
 import { bridge } from "../bridge";
 import { Favicon, Badge, Button, Card } from "../components/ui";
 
-const typeIcon = { login: Globe, note: StickyNote, card: CreditCard, identity: User } as const;
+const typeIcon = { login: Globe, note: StickyNote, card: CreditCard, identity: User, passkey: KeyRound } as const;
 
 export function Vault() {
   const [items, setItems] = useState<ItemSummary[]>([]);
@@ -180,7 +180,31 @@ function ItemDetailPane({ id }: { id: string }) {
       </div>
 
       <div className="surface divide-y divide-[var(--border-subtle)] p-0">
-        {item.username && <Field label="Username" value={item.username} copyField="username" itemId={id} />}
+        {item.username && item.type !== "passkey" && (
+          <Field label="Username" value={item.username} copyField="username" itemId={id} />
+        )}
+        {item.passkey && (
+          <>
+            <Field label="Site" value={item.passkey.rpId} />
+            <Field label="Username" value={item.passkey.userName} />
+            <Field
+              label="Credential"
+              value={
+                item.passkey.credentialId.length > 14
+                  ? `${item.passkey.credentialId.slice(0, 12)}…`
+                  : item.passkey.credentialId
+              }
+            />
+            <Field
+              label="Algorithm"
+              value={item.passkey.algorithm === -7 ? "ES256" : String(item.passkey.algorithm)}
+            />
+            <div className="flex items-center gap-2 px-5 py-3.5 text-xs text-[var(--text-muted)]">
+              <KeyRound size={13} className="text-[var(--accent)]" /> Private key is stored encrypted
+              and never displayed.
+            </div>
+          </>
+        )}
         {item.type === "login" && (
           <div className="flex items-center gap-3 px-5 py-3.5">
             <div className="w-28 shrink-0 text-xs uppercase tracking-wide text-[var(--text-muted)]">Password</div>

@@ -189,6 +189,7 @@ class MockBridge implements SentinelBridge {
       urls: i.urls.map((url) => ({ url, mode: "domain" as const })),
       notes: i.notes ?? undefined,
       customFields: [],
+      ...(i.passkey ? { passkey: i.passkey } : {}),
     };
   }
   async vaultRevealField(id: string, field: string) {
@@ -231,6 +232,49 @@ class MockBridge implements SentinelBridge {
     if (existing) Object.assign(existing, rec);
     else this.items.unshift(rec);
     return id;
+  }
+  async vaultPasskeyCreate(
+    rpId: string,
+    rpName: string | undefined,
+    userName: string,
+    userDisplayName: string | undefined,
+    _userHandleB64u: string,
+  ) {
+    // Deterministic-ish fake record; no real key material lives in the mock.
+    const id = "pk-" + Math.floor(nowMs());
+    const rnd = new Uint8Array(16);
+    crypto.getRandomValues(rnd);
+    const credentialId = b64url(rnd);
+    const rec: SeedItem = {
+      id,
+      type: "passkey",
+      title: `${userName} @ ${rpId}`,
+      username: userName,
+      password: null,
+      tags: ["passkey"],
+      faviconDomain: rpId,
+      hasTotp: false,
+      totpUri: null,
+      urls: [],
+      notes: null,
+      updatedAt: new Date(nowMs()).toISOString(),
+      passwordChangedAt: null,
+      passkey: {
+        rpId,
+        rpName,
+        userName,
+        userDisplayName,
+        credentialId,
+        algorithm: -7,
+        signCount: 0,
+      },
+    };
+    this.items.unshift(rec);
+    // A plausible 65-byte SEC1 point (0x04 || 64 bytes), base64-std, purely cosmetic.
+    const pub = new Uint8Array(65);
+    pub[0] = 0x04;
+    crypto.getRandomValues(pub.subarray(1));
+    return { id, credentialId, publicKeyB64: b64std(pub) };
   }
   async vaultDelete(id: string) {
     this.items = this.items.filter((x) => x.id !== id);
@@ -513,6 +557,14 @@ function hostOf(url: string): string {
   } catch {
     return url;
   }
+}
+function b64std(bytes: Uint8Array): string {
+  let s = "";
+  for (const b of bytes) s += String.fromCharCode(b);
+  return btoa(s);
+}
+function b64url(bytes: Uint8Array): string {
+  return b64std(bytes).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
 }
 function iso(daysFromNow: number): string {
   return new Date(nowMs() + daysFromNow * 86_400_000).toISOString();

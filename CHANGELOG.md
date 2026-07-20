@@ -8,6 +8,28 @@ The format follows [Keep a Changelog](https://keepachangelog.com/). Versions are
 [semantic](https://semver.org/). **Add a new `## [x.y.z]` section at the top in the same PR
 that bumps the app version** — that's how "the changelog updates on every merge."
 
+## [0.1.24] — 2026-07-20
+
+### Fixed
+- **The VPN connects but pages don't load / downloads stall.** The exit node now NATs your return
+  traffic reliably. Two bugs caused the connect-but-no-internet symptom (upload worked, download was
+  zero): the node's masquerade rule was pinned to a hardcoded network interface name (`eth0`) that not
+  every Linode host actually uses, and the throughput MSS-clamp rule was bundled into the same atomic
+  firewall load — so on any host where that clamp expression was rejected, the **entire** NAT ruleset
+  failed to apply and no return traffic was ever masqueraded. NAT is now interface-agnostic
+  (masquerade everything leaving except the client tunnel, so it works no matter what the provider
+  names the public NIC, and covers the multi-hop egress too), and the MSS clamp is applied
+  best-effort *after* the firewall is up so it can never take NAT down with it. New exit nodes route
+  return traffic, so pages load and downloads flow.
+
+### Added
+- **Passkeys can now be stored in your vault (groundwork).** SENTINEL now understands a new
+  **passkey** item type and can securely generate and store a passkey's keys — the private key is
+  minted on-device (P-256 / ES256) and sealed with the same per-item encryption as everything else,
+  so it's never shown or copyable. You'll see stored passkeys in the vault with their site, username,
+  and credential id, clearly marked read-only. This is foundational plumbing: actually **using** a
+  passkey to register with or sign in to a website (through the browser) arrives in the next updates.
+
 ## [0.1.23] — 2026-07-20
 
 ### Added

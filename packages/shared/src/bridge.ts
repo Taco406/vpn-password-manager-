@@ -88,6 +88,18 @@ export interface SentinelBridge {
   vaultRevealField(id: string, field: string): Promise<string>;
   vaultCopyField(id: string, field: string): Promise<void>;
   vaultSave(item: ItemInput): Promise<string>;
+  /**
+   * Mint an ES256 passkey and store it as a new Passkey vault item. The seam Stage B's
+   * browser registration flow calls. Returns the new item id, the credential id, and the
+   * base64 (std) SEC1 public key — never the private key, which stays sealed in the vault.
+   */
+  vaultPasskeyCreate(
+    rpId: string,
+    rpName: string | undefined,
+    userName: string,
+    userDisplayName: string | undefined,
+    userHandleB64u: string,
+  ): Promise<{ id: string; credentialId: string; publicKeyB64: string }>;
   vaultDelete(id: string): Promise<void>;
   vaultTotp(id: string): Promise<{ code: string; remainingMs: number }>;
   vaultImport(kind: ImportKind, content: string): Promise<{ imported: number; skipped: number }>;
