@@ -9,40 +9,60 @@
         --muted: #9aa7b4; --accent: #22d3ee; --ok: #2ed47a;
       }
       * { box-sizing: border-box; }
-      body { width: 340px; margin: 0; background: var(--bg); color: var(--text);
-        font: 14px "Inter", system-ui, sans-serif; }
+      body { width: 344px; margin: 0; background: var(--bg); color: var(--text);
+        font: 14px "Inter", system-ui, -apple-system, "Segoe UI", sans-serif; }
       header { display: flex; align-items: center; justify-content: space-between;
         padding: 12px 14px; border-bottom: 1px solid var(--border); }
-      .brand { display: flex; align-items: center; gap: 8px; font-weight: 700; }
+      .brand { display: flex; align-items: center; gap: 8px; font-weight: 700; letter-spacing: .02em; }
+      .brand .mark { font-size: 15px; line-height: 1; }
       .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); }
-      .dot.on { background: var(--ok); }
+      .dot.on { background: var(--ok); box-shadow: 0 0 8px #2ed47a88; }
       .pill { font-size: 12px; color: var(--muted); display: flex; align-items: center; gap: 6px; }
-      .search { margin: 12px 14px; display: flex; align-items: center; gap: 8px;
+      .site { padding: 9px 14px 0; font-size: 11px; color: var(--muted);
+        text-transform: uppercase; letter-spacing: .05em; overflow: hidden;
+        text-overflow: ellipsis; white-space: nowrap; }
+      .search { margin: 10px 14px; display: flex; align-items: center; gap: 8px;
         background: #080b10; border: 1px solid var(--border); border-radius: 10px; padding: 0 10px; }
       .search input { flex: 1; background: none; border: 0; color: var(--text); padding: 9px 0; outline: none; }
-      ul { list-style: none; margin: 0; padding: 0 8px 10px; max-height: 340px; overflow-y: auto; }
-      li { display: flex; align-items: center; gap: 10px; padding: 9px 8px; border-radius: 8px; cursor: pointer; }
-      li:hover { background: #22d3ee14; }
-      .fav { width: 30px; height: 30px; border-radius: 7px; display: grid; place-items: center;
-        font-weight: 600; font-size: 13px; }
-      .title { font-weight: 500; }
-      .user { font-size: 12px; color: var(--muted); }
-      .actions { margin-left: auto; display: flex; gap: 6px; opacity: 0; }
+      ul { list-style: none; margin: 0; padding: 0 8px 6px; max-height: 320px; overflow-y: auto; }
+      li { display: flex; align-items: center; gap: 10px; padding: 8px; border-radius: 10px; }
+      li:hover { background: #22d3ee12; }
+      .fav { width: 30px; height: 30px; border-radius: 8px; display: grid; place-items: center;
+        font-weight: 600; font-size: 13px; flex: none; }
+      .meta { min-width: 0; flex: 1; }
+      .title { font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+      .user { font-size: 12px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+      .actions { margin-left: auto; display: flex; gap: 6px; opacity: 0; flex: none; }
       li:hover .actions { opacity: 1; }
       .actions button { background: none; border: 1px solid var(--border); color: var(--muted);
-        border-radius: 6px; padding: 3px 7px; font-size: 11px; cursor: pointer; }
+        border-radius: 7px; padding: 4px 8px; font-size: 11px; cursor: pointer; }
+      .actions button.fill { border-color: var(--accent); color: var(--accent); }
       .actions button:hover { color: var(--accent); border-color: var(--accent); }
+      .empty { padding: 26px 20px; text-align: center; color: var(--muted); font-size: 13px; }
       .locked { padding: 40px 20px; text-align: center; color: var(--muted); }
       .locked b { color: var(--text); display: block; margin-bottom: 6px; }
-      .mono { font-family: "JetBrains Mono", monospace; }
+      footer { display: flex; gap: 8px; padding: 10px 14px; border-top: 1px solid var(--border); }
+      footer button { flex: 1; background: var(--raised); border: 1px solid var(--border);
+        color: var(--text); border-radius: 9px; padding: 8px; cursor: pointer; font-size: 12px;
+        display: flex; align-items: center; justify-content: center; gap: 6px; }
+      footer button:hover { border-color: var(--accent); color: var(--accent); }
+      .toast { position: fixed; left: 50%; bottom: 12px; transform: translateX(-50%);
+        background: #173a2a; color: #8ff0bf; padding: 7px 12px; border-radius: 8px; font-size: 12px;
+        opacity: 0; transition: opacity .15s; pointer-events: none; }
+      .toast.show { opacity: 1; }
     </style>
   </head>
   <body>
     <header>
-      <span class="brand">🛡 SENTINEL</span>
+      <span class="brand"><span class="mark" aria-hidden="true">🛡</span>SENTINEL</span>
       <span class="pill"><span id="vpnDot" class="dot"></span><span id="vpnLabel">VPN off</span></span>
     </header>
+    <div id="site" class="site"></div>
     <div id="app"></div>
+    <footer>
+      <button id="genBtn" title="Generate a strong password and copy it to the clipboard">⚡ Generate &amp; copy password</button>
+    </footer>
+    <div id="toast" class="toast"></div>
     <script type="module" src="./src/popup/popup.ts"></script>
   </body>
 </html>

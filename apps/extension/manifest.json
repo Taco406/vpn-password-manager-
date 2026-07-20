@@ -1,9 +1,15 @@
 {
   "manifest_version": 3,
   "name": "SENTINEL",
-  "version": "0.1.0",
+  "version": "0.1.29",
   "description": "Vault autofill and VPN status for the SENTINEL desktop app.",
   "minimum_chrome_version": "116",
+  "icons": {
+    "16": "icons/16.png",
+    "32": "icons/32.png",
+    "48": "icons/48.png",
+    "128": "icons/128.png"
+  },
   "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAtJeygmEVuQIqmwkVoTwh0/a3WxdWHrsCTAqpC71ldweMsV1uz7yMt8lRNzsUcOPn8nK/j0vLJu4bbJ1PxZAuC2I2K299sX6fYC1/Gb7nidMfzOcGrFLc2qmmZJ44tpbdOW85Mf5WNqESs8Zi0OiFP2bS+1bocYS8NTbw/8GmIz5hoYxIxSl9ubQm1s8PotlyBkHEH0Ztas9TMuyK5rMQb2eveGT2DNEg/v3dYS8BOLY97iE4p7HpZQ3Uuw2zLGGqQyGdi5IXQPgoYPmyFRHXTJHEK9bESoJLzlKQKqY14zfe+BpNJSMADHSD90QPCvrnpM7lGI6N/DRoU/HEVdKQ6QIDAQAB",
   "permissions": ["nativeMessaging", "storage", "activeTab", "clipboardWrite"],
   "host_permissions": ["https://*/*", "http://*/*"],
@@ -21,7 +27,11 @@
   ],
   "action": {
     "default_popup": "popup.html",
-    "default_title": "SENTINEL"
+    "default_title": "SENTINEL",
+    "default_icon": {
+      "16": "icons/16.png",
+      "32": "icons/32.png"
+    }
   },
   "content_security_policy": {
     "extension_pages": "script-src 'self'; object-src 'self'"

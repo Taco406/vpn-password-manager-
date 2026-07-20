@@ -1,6 +1,6 @@
 import { defineConfig } from "vite";
 import { resolve } from "node:path";
-import { copyFileSync, mkdirSync } from "node:fs";
+import { copyFileSync, mkdirSync, readdirSync } from "node:fs";
 
 // Build the MV3 extension: background + content as IIFE-safe ES modules, the popup as
 // its own HTML entry, and copy the manifest into dist.
@@ -24,10 +24,17 @@ export default defineConfig({
   },
   plugins: [
     {
-      name: "copy-manifest",
+      name: "copy-manifest-and-icons",
       closeBundle() {
-        mkdirSync(resolve(__dirname, "dist"), { recursive: true });
-        copyFileSync(resolve(__dirname, "manifest.json"), resolve(__dirname, "dist/manifest.json"));
+        const dist = resolve(__dirname, "dist");
+        mkdirSync(dist, { recursive: true });
+        copyFileSync(resolve(__dirname, "manifest.json"), resolve(dist, "manifest.json"));
+        const iconsSrc = resolve(__dirname, "icons");
+        const iconsDst = resolve(dist, "icons");
+        mkdirSync(iconsDst, { recursive: true });
+        for (const f of readdirSync(iconsSrc)) {
+          copyFileSync(resolve(iconsSrc, f), resolve(iconsDst, f));
+        }
       },
     },
   ],

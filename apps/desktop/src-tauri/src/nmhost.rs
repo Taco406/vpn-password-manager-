@@ -21,7 +21,7 @@ use sentinel_core::nm::{
     VaultFieldsGetRequest, VaultSearchRequest, VaultSearchResultItem,
 };
 use sentinel_core::totp::TotpSecret;
-use sentinel_core::vault::model::Item;
+use sentinel_core::vault::model::{Item, ItemType, UrlMatch, UrlMode};
 use sentinel_core::vault::{origin_matches, LocalVault, VaultSession};
 use serde::de::DeserializeOwned;
 use serde::Deserialize;
@@ -144,6 +144,7 @@ fn handle(host: Option<&Host>, env: &NmEnvelope) -> NmEnvelope {
         NmType::VaultFieldsGet => fields(host, env),
         NmType::VaultTotpGet => totp(host, env),
         NmType::VaultGenerate => generate(&env.id),
+        NmType::VaultSaveCandidate => save_candidate(host, env),
         _ => error(
             &env.id,
             env.kind,
@@ -162,6 +163,7 @@ const CAPS: &[&str] = &[
     "vault.fields.get",
     "vault.totp.get",
     "vault.generate",
+    "vault.save_candidate",
 ];
 
 fn hello(host: Option<&Host>, id: &str) -> NmEnvelope {
@@ -323,6 +325,101 @@ fn generate(id: &str) -> NmEnvelope {
             "generate failed",
         ),
     }
+}
+
+#[derive(Deserialize)]
+struct SaveCandidateRequest {
+    origin: String,
+    #[serde(default)]
+    username: String,
+    password: String,
+    #[serde(default)]
+    title: String,
+}
+
+/// Persist a credential the extension captured on a form submit. Finds an existing login for
+/// this origin with the same username (→ update its password) or creates a new one; the new/
+/// updated item's saved URL is exactly the requesting origin so future autofill matches it.
+/// Only ever writes while unlocked; a locked vault answers `LOCKED` and stores nothing.
+fn save_candidate(host: Option<&Host>, env: &NmEnvelope) -> NmEnvelope {
+    let host = match host {
+        Some(h) => h,
+        None => return NmEnvelope::locked(&env.id),
+    };
+    let req: SaveCandidateRequest = match parse(env) {
+        Ok(r) => r,
+        Err(e) => return e,
+    };
+    if req.password.is_empty() {
+        return error(
+            &env.id,
+            env.kind,
+            NmErrorCode::BadRequest,
+            "no password to save",
+        );
+    }
+
+    let now = time::OffsetDateTime::now_utc().unix_timestamp();
+    // Match an existing login for this origin with the same username (empty matches empty).
+    let existing = load_items(host).into_iter().find(|it| {
+        it.item_type == ItemType::Login
+            && origin_matches(&it.urls, &req.origin)
+            && it.username().unwrap_or("") == req.username
+    });
+
+    let (item, action) = match existing {
+        Some(mut it) => {
+            if it.password() == Some(req.password.as_str()) {
+                // Nothing changed — report success without a redundant write (no save nag).
+                return ok(
+                    &env.id,
+                    NmType::VaultSaveCandidate,
+                    serde_json::json!({ "saved": true, "action": "unchanged", "id": it.id.to_string() }),
+                );
+            }
+            let login = it.login.get_or_insert_with(Default::default);
+            login.password = Some(req.password.clone());
+            it.updated_at = now;
+            it.password_changed_at = Some(now);
+            (it, "updated")
+        }
+        None => {
+            let title = if req.title.trim().is_empty() {
+                host_of(&req.origin)
+            } else {
+                req.title.clone()
+            };
+            let mut it = Item::new_login(title, now);
+            it.urls = vec![UrlMatch {
+                url: req.origin.clone(),
+                mode: UrlMode::Domain,
+            }];
+            let login = it.login.get_or_insert_with(Default::default);
+            if !req.username.is_empty() {
+                login.username = Some(req.username.clone());
+            }
+            login.password = Some(req.password.clone());
+            (it, "created")
+        }
+    };
+
+    let sealed = match host.session.seal(&item) {
+        Ok(s) => s,
+        Err(_) => return error(&env.id, env.kind, NmErrorCode::Internal, "seal failed"),
+    };
+    if host.vault.upsert(&sealed).is_err() {
+        return error(
+            &env.id,
+            env.kind,
+            NmErrorCode::Internal,
+            "vault write failed",
+        );
+    }
+    ok(
+        &env.id,
+        NmType::VaultSaveCandidate,
+        serde_json::json!({ "saved": true, "action": action, "id": item.id.to_string() }),
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -711,6 +808,71 @@ mod tests {
     fn extension_id_is_valid_chrome_id() {
         assert_eq!(EXTENSION_ID.len(), 32);
         assert!(EXTENSION_ID.bytes().all(|b| (b'a'..=b'p').contains(&b)));
+    }
+
+    fn test_host() -> Host {
+        use sentinel_core::keyring::VaultKey;
+        Host {
+            session: VaultSession::unlocked(VaultKey::generate()),
+            vault: LocalVault::open(":memory:").unwrap(),
+        }
+    }
+
+    fn save_env(origin: &str, username: &str, password: &str) -> NmEnvelope {
+        NmEnvelope {
+            id: "s".into(),
+            kind: NmType::VaultSaveCandidate,
+            ok: None,
+            payload: Some(serde_json::json!({
+                "origin": origin, "username": username, "password": password, "title": ""
+            })),
+            err: None,
+        }
+    }
+
+    #[test]
+    fn save_candidate_is_locked_without_vault() {
+        let reply = handle(None, &save_env("https://example.com", "me", "p1"));
+        assert_eq!(reply.err.unwrap().code, NmErrorCode::Locked);
+    }
+
+    #[test]
+    fn save_candidate_creates_then_updates_then_reports_unchanged() {
+        let host = test_host();
+
+        // 1) First save creates the login and makes it autofill-matchable.
+        let r = handle(Some(&host), &save_env("https://example.com", "me", "p1"));
+        assert_eq!(r.ok, Some(true));
+        assert_eq!(r.payload.as_ref().unwrap()["action"], "created");
+        assert_eq!(host.vault.count().unwrap(), 1);
+
+        // The created item is returned by a search for that origin.
+        let search_env = NmEnvelope {
+            id: "q".into(),
+            kind: NmType::VaultSearch,
+            ok: None,
+            payload: Some(serde_json::json!({ "query": "", "origin": "https://example.com" })),
+            err: None,
+        };
+        let s = handle(Some(&host), &search_env);
+        assert_eq!(s.payload.unwrap()["items"].as_array().unwrap().len(), 1);
+
+        // 2) Same origin+username, new password → update (not a second item).
+        let r = handle(Some(&host), &save_env("https://example.com", "me", "p2"));
+        assert_eq!(r.payload.as_ref().unwrap()["action"], "updated");
+        assert_eq!(host.vault.count().unwrap(), 1);
+
+        // 3) Identical again → unchanged, still one item, no error.
+        let r = handle(Some(&host), &save_env("https://example.com", "me", "p2"));
+        assert_eq!(r.payload.as_ref().unwrap()["action"], "unchanged");
+        assert_eq!(host.vault.count().unwrap(), 1);
+    }
+
+    #[test]
+    fn save_candidate_rejects_empty_password() {
+        let host = test_host();
+        let reply = handle(Some(&host), &save_env("https://example.com", "me", ""));
+        assert_eq!(reply.err.unwrap().code, NmErrorCode::BadRequest);
     }
 
     #[test]
