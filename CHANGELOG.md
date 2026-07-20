@@ -8,6 +8,27 @@ The format follows [Keep a Changelog](https://keepachangelog.com/). Versions are
 [semantic](https://semver.org/). **Add a new `## [x.y.z]` section at the top in the same PR
 that bumps the app version** — that's how "the changelog updates on every merge."
 
+## [0.1.29] — 2026-07-20
+
+### Changed
+- **Browser autofill overhaul — it now fills *and* offers to save.** The extension was missing
+  its whole save path and the autofill was easy to miss. Now:
+  - **Save works.** When you sign in on a site, an in-page **"Save password to SENTINEL?"** bar
+    appears; saving creates a new login (or updates the existing one for that site) directly in
+    your vault. Previously the extension asked the app to save but the app had no handler, so
+    nothing ever happened.
+  - **Autofill is visible.** A small key badge appears inside the focused username/password field
+    — click it for a menu of your matching logins, a **Generate password** action, and a clear
+    "Unlock SENTINEL" hint when the app is locked (instead of silently doing nothing). Login forms
+    that load later (single-page apps) are detected too.
+  - **Nicer popup.** Redesigned with per-item **Fill** (fills the active tab), copy username /
+    password, and a one-click generate-and-copy — plus a real toolbar icon.
+  - Nothing changed about the security model: credentials are still released only on an explicit
+    click, only for a matching origin, and only while the app is unlocked.
+  - **After updating**, re-open **Settings → Experimental → Browser autofill → Get the extension**,
+    then in `chrome://extensions` press **Reload** on the SENTINEL card so the browser picks up the
+    new version.
+
 ## [0.1.28] — 2026-07-20
 
 ### Fixed

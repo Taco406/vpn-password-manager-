@@ -25,6 +25,10 @@ impl LocalVault {
     /// Open (creating if needed) a vault at `path`. Use `":memory:"` for tests.
     pub fn open(path: &str) -> Result<Self> {
         let conn = Connection::open(path)?;
+        // The browser-autofill native-messaging host opens this same vault.db while the desktop
+        // app also has it open, so a save from one can race a write from the other. A busy
+        // timeout makes the loser wait for the lock instead of failing immediately with BUSY.
+        let _ = conn.busy_timeout(std::time::Duration::from_secs(3));
         conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS items (
                  id BLOB PRIMARY KEY,
