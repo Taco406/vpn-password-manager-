@@ -1,4 +1,5 @@
 import { useEffect, useState, type ReactElement, type ReactNode } from "react";
+import { useNavigate } from "react-router-dom";
 import { Moon, Sun, Monitor, Globe, Shield, Lock, KeyRound, Smartphone, Split, X, type LucideIcon } from "lucide-react";
 import type { Settings as SettingsT } from "@sentinel/shared";
 import changelogRaw from "../../../../CHANGELOG.md?raw";
@@ -43,6 +44,7 @@ export function Settings() {
   const [s, setS] = useState<SettingsT | null>(null);
   const [tab, setTab] = useState<TabId>("general");
   const setTheme = useApp((a) => a.setTheme);
+  const navigate = useNavigate();
 
   useEffect(() => {
     void bridge.settingsGet().then(setS);
@@ -104,6 +106,18 @@ export function Settings() {
             <p className="text-xs text-[var(--text-secondary)]">
               SENTINEL ships with no analytics endpoints. This switch is permanently off — there is nowhere for data to go.
             </p>
+          </Card>
+
+          <Card className="mb-4">
+            <div className="mb-2 flex items-center justify-between text-sm font-medium">
+              First-run setup
+            </div>
+            <p className="mb-3 text-xs text-[var(--text-secondary)]">
+              Walk back through the optional setup steps — securing the vault, the real VPN, and browser autofill.
+            </p>
+            <button onClick={() => navigate("/setup")} className={btnCls}>
+              Run setup guide again
+            </button>
           </Card>
         </>
       )}
@@ -589,7 +603,7 @@ function Updates() {
   return (
     <Card>
       <div className="mb-2 flex items-center justify-between text-sm font-medium">
-        Updates <Badge tone="accent">v0.1.22</Badge>
+        Updates <Badge tone="accent">v0.1.23</Badge>
       </div>
       <p className="mb-3 text-xs text-[var(--text-secondary)]">
         SENTINEL checks for signed updates on launch and installs them automatically. You can also check now.

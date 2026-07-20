@@ -72,6 +72,7 @@ class MockBridge implements SentinelBridge {
     ssidAllowlist: ["home", "office"],
     tunnelMode: "full",
     splitRoutes: [],
+    onboardingComplete: true,
     telemetry: false,
   };
   private devices: DeviceInfo[] = [

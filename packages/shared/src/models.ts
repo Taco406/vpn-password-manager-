@@ -200,5 +200,7 @@ export interface Settings {
   tunnelMode?: "full" | "split";
   /** In "split" mode, the CIDRs that route through the VPN (everything else stays off-VPN). */
   splitRoutes?: string[];
+  /** Set once the user has seen (or skipped) the first-run setup wizard. Absent = first run. */
+  onboardingComplete?: boolean;
   telemetry: false; // there is nothing to send; always off.
 }

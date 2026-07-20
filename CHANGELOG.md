@@ -8,6 +8,16 @@ The format follows [Keep a Changelog](https://keepachangelog.com/). Versions are
 [semantic](https://semver.org/). **Add a new `## [x.y.z]` section at the top in the same PR
 that bumps the app version** — that's how "the changelog updates on every merge."
 
+## [0.1.23] — 2026-07-20
+
+### Added
+- **First-run setup wizard.** On first launch SENTINEL now greets you with a short, fully skippable
+  guide instead of leaving the optional extras buried in Settings. It walks through securing the vault
+  with a master password, turning on the real (Linode) VPN — with a live WireGuard prerequisite check
+  and a **Download WireGuard** shortcut — and enabling browser autofill for Chrome and Edge. Every step
+  shows a live ✓/✗ status and can be skipped; the app is fully usable without any of it. You can replay
+  the guide anytime from **Settings → General → Run setup guide again**.
+
 ## [0.1.22] — 2026-07-20
 
 ### Added
