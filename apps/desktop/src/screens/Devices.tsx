@@ -112,7 +112,7 @@ function SyncServer({ sync, onSyncChange }: { sync: SyncStatusInfo | null; onSyn
   const [gSecret, setGSecret] = useState("");
   const [showGuide, setShowGuide] = useState(false);
   const [pending, setPending] = useState<{ email: string; totpRequired: boolean } | null>(null);
-  const [enroll, setEnroll] = useState<{ otpauthUri: string; secret: string } | null>(null);
+  const [enroll, setEnroll] = useState<{ otpauthUri: string; secret: string; qrSvg: string } | null>(null);
   const [code, setCode] = useState("");
   // The client secret typed at sign-in time (when it wasn't saved at deploy time — Google
   // requires it for the desktop token exchange, so sign-in can't succeed without one).
@@ -490,7 +490,15 @@ function SyncServer({ sync, onSyncChange }: { sync: SyncStatusInfo | null; onSyn
                   <div className="space-y-2">
                     {enroll && (
                       <div className="text-[11px] text-[var(--text-secondary)]">
-                        First device: add this secret to Google Authenticator (or any TOTP app), then enter the 6-digit code.
+                        First device: scan this with Google Authenticator (or any TOTP app), then enter the 6-digit code.
+                        {enroll.qrSvg && (
+                          <div
+                            className="mt-2 w-fit rounded-[10px] bg-white p-2"
+                            // eslint-disable-next-line react/no-danger
+                            dangerouslySetInnerHTML={{ __html: enroll.qrSvg }}
+                          />
+                        )}
+                        <div className="mt-1 text-[var(--text-muted)]">…or type the key instead:</div>
                         <div className="mono mt-1 break-all rounded bg-[var(--bg-inset)] p-1.5 text-[var(--text-primary)]">{enroll.secret}</div>
                       </div>
                     )}
@@ -679,7 +687,7 @@ function AccountSync({ sync, onSyncChange }: { sync: SyncStatusInfo | null; onSy
 
   // Sign-in in progress: between authGoogleSignin and the TOTP verify that yields tokens.
   const [pending, setPending] = useState<{ email: string; totpRequired: boolean } | null>(null);
-  const [enroll, setEnroll] = useState<{ otpauthUri: string; secret: string } | null>(null);
+  const [enroll, setEnroll] = useState<{ otpauthUri: string; secret: string; qrSvg: string } | null>(null);
   const [code, setCode] = useState("");
 
   // Signed-in actions.
@@ -1031,8 +1039,16 @@ function AccountSync({ sync, onSyncChange }: { sync: SyncStatusInfo | null; onSy
                     {enroll && (
                       <div className="rounded-[10px] border border-[var(--border-subtle)] bg-[var(--bg-inset)] p-3">
                         <div className="mb-1 text-xs text-[var(--text-muted)]">
-                          First time on this account — add this secret to your authenticator app:
+                          First time on this account — scan this with your authenticator app:
                         </div>
+                        {enroll.qrSvg && (
+                          <div
+                            className="my-2 w-fit rounded-[10px] bg-white p-2"
+                            // eslint-disable-next-line react/no-danger
+                            dangerouslySetInnerHTML={{ __html: enroll.qrSvg }}
+                          />
+                        )}
+                        <div className="mb-1 text-[11px] text-[var(--text-muted)]">…or type the key instead:</div>
                         <div className="mono break-all text-sm text-[var(--accent)]">{enroll.secret}</div>
                       </div>
                     )}
