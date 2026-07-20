@@ -471,3 +471,34 @@ export async function syncDeviceRevoke(id: string): Promise<void> {
   if (!inTauri()) return;
   await inv("sync_device_revoke", { id });
 }
+
+/**
+ * Finish (or repair) sign-in to an already-deployed one-click sync server whose initial
+ * sign-in didn't complete (e.g. the server was still installing when the deploy timed out).
+ * No destroy/redeploy — reuses the saved server address, pinned cert, and bootstrap token.
+ */
+export async function syncReconnect(): Promise<{ signedIn: boolean }> {
+  if (!inTauri()) throw new Error("Reconnecting is only available in the desktop app.");
+  return inv<{ signedIn: boolean }>("sync_reconnect");
+}
+
+/** Mint a one-shot device-join code so another computer can join this device's sync server. */
+export async function syncPairBegin(): Promise<{ code: string; createdAt: string }> {
+  if (!inTauri()) throw new Error("Device pairing is only available in the desktop app.");
+  return inv<{ code: string; createdAt: string }>("sync_pair_begin");
+}
+
+/** Join the sync server described by a device-join code from another computer (empty vault only). */
+export async function syncPairComplete(code: string): Promise<{ restored: number; serverIp: string }> {
+  if (!inTauri()) throw new Error("Device pairing is only available in the desktop app.");
+  return inv<{ restored: number; serverIp: string }>("sync_pair_complete", { code });
+}
+
+/**
+ * Forget the sync server this device points at (clears config + tokens, keeps the local vault and
+ * any deployed Linode). Escape hatch for a device stuck on a server that's gone away or was wrong.
+ */
+export async function syncForget(): Promise<void> {
+  if (!inTauri()) return;
+  await inv("sync_forget");
+}

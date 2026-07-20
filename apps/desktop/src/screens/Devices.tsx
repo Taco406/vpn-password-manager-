@@ -1,5 +1,19 @@
 import { useEffect, useState } from "react";
-import { Laptop, Smartphone, ShieldCheck, QrCode, Cloud, LogIn, Download, RefreshCw, Trash2 } from "lucide-react";
+import {
+  Laptop,
+  Smartphone,
+  ShieldCheck,
+  QrCode,
+  Cloud,
+  LogIn,
+  Download,
+  RefreshCw,
+  Trash2,
+  Copy,
+  UserPlus,
+  Link2,
+  PlugZap,
+} from "lucide-react";
 import type { DeviceInfo } from "@sentinel/shared";
 import {
   bridge,
@@ -9,6 +23,10 @@ import {
   onSyncDeploy,
   syncStatus,
   syncSetConfig,
+  syncReconnect,
+  syncPairBegin,
+  syncPairComplete,
+  syncForget,
   authGoogleSignin,
   authTotpEnroll,
   authTotpVerify,
@@ -25,12 +43,25 @@ import {
 import { Card, SectionTitle, Button, Badge } from "../components/ui";
 import { inputCls, btnCls, errMsg } from "../components/kit";
 
+/** The fixed hostname a one-click (self-hosted, no-domain) server is reached at. */
+const ONE_CLICK_URL = "https://sentinel-sync";
+
 export function Devices() {
   const [devices, setDevices] = useState<DeviceInfo[]>([]);
   const [pairing, setPairing] = useState<{ qrPayload: string; verificationCode: string } | null>(null);
+  const [sync, setSync] = useState<SyncStatusInfo | null>(null);
+
+  const refreshSync = async () => {
+    try {
+      setSync(await syncStatus());
+    } catch {
+      /* ignore */
+    }
+  };
 
   useEffect(() => {
     void bridge.devicesList().then(setDevices);
+    void refreshSync();
   }, []);
 
   const startPair = async () => setPairing(await bridge.pairBegin());
@@ -84,8 +115,8 @@ export function Devices() {
       </Card>
 
       <div className="mt-6">
-        <SyncServer />
-        <AccountSync />
+        <SyncServer sync={sync} onSyncChange={refreshSync} />
+        <AccountSync sync={sync} onSyncChange={refreshSync} />
       </div>
     </div>
   );
@@ -113,12 +144,40 @@ const SYNC_REGIONS: { id: string; label: string }[] = [
   { id: "ap-northeast", label: "Asia (Tokyo)" },
 ];
 
-function SyncServer() {
+/** A read-only code box with a Copy button — used for device-join codes. */
+function CodeBox({ code }: { code: string }) {
+  const [copied, setCopied] = useState(false);
+  const copy = async () => {
+    try {
+      await navigator.clipboard.writeText(code);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    } catch {
+      /* clipboard unavailable — the user can still select the text */
+    }
+  };
+  return (
+    <div className="rounded-[10px] border border-[var(--border-subtle)] bg-[var(--bg-inset)] p-2">
+      <div className="mono max-h-24 overflow-auto break-all text-[11px] text-[var(--text-secondary)]">{code}</div>
+      <button onClick={copy} className="mt-2 inline-flex items-center gap-1.5 text-xs text-[var(--accent)] hover:underline">
+        <Copy size={12} /> {copied ? "Copied" : "Copy code"}
+      </button>
+    </div>
+  );
+}
+
+function SyncServer({ sync, onSyncChange }: { sync: SyncStatusInfo | null; onSyncChange: () => Promise<void> }) {
   const [st, setSt] = useState<SyncServerStatus | null>(null);
   const [region, setRegion] = useState("us-east");
   const [busy, setBusy] = useState(false);
   const [progress, setProgress] = useState("");
   const [msg, setMsg] = useState("");
+  const [pairCode, setPairCode] = useState<{ code: string; createdAt: string } | null>(null);
+  const [joinCode, setJoinCode] = useState("");
+  const [showJoin, setShowJoin] = useState(false);
+
+  const signedIn = !!sync?.signedIn;
+  const oneClick = sync?.serverUrl === ONE_CLICK_URL;
 
   const refresh = async () => {
     try {
@@ -141,11 +200,17 @@ function SyncServer() {
     try {
       await syncDeploy(region);
       setProgress("");
-      setMsg("Sync server is up and this device is signed in. Use Cross-device sync below to sync.");
+      setMsg("Sync server is up and this device is signed in. Use “Add a device” below to connect another computer.");
       await refresh();
+      await onSyncChange();
     } catch (e) {
       setProgress("");
       setMsg(e instanceof Error ? e.message : String(e));
+      // A deploy can fail AFTER the server record + billing exist (e.g. the first sign-in timed out
+      // while the box was still installing). Refresh so the running/billed server and its
+      // Destroy + Reconnect controls surface instead of leaving the card on "Not deployed".
+      await refresh();
+      await onSyncChange();
     }
     setBusy(false);
   };
@@ -157,12 +222,75 @@ function SyncServer() {
     try {
       await syncServerDestroy();
       setMsg("Sync server destroyed. Billing stopped.");
+      setPairCode(null);
       await refresh();
+      await onSyncChange();
     } catch (e) {
-      setMsg(e instanceof Error ? e.message : String(e));
+      setMsg(errMsg(e));
     }
     setBusy(false);
   };
+
+  const reconnect = async () => {
+    setBusy(true);
+    setMsg("Finishing setup — signing this device in to the server…");
+    try {
+      await syncReconnect();
+      setMsg("Reconnected. This device is now signed in and syncing.");
+      await onSyncChange();
+    } catch (e) {
+      setMsg(errMsg(e));
+    }
+    setBusy(false);
+  };
+
+  const addDevice = async () => {
+    setBusy(true);
+    setMsg("");
+    try {
+      setPairCode(await syncPairBegin());
+    } catch (e) {
+      setMsg(errMsg(e));
+    }
+    setBusy(false);
+  };
+
+  const join = async () => {
+    setBusy(true);
+    setMsg("Joining the sync server…");
+    try {
+      const r = await syncPairComplete(joinCode.trim());
+      setJoinCode("");
+      setShowJoin(false);
+      setMsg(`Joined and pulled ${r.restored} item${r.restored === 1 ? "" : "s"} from the shared vault. Reopen the vault to see them.`);
+      await refresh();
+      await onSyncChange();
+    } catch (e) {
+      setMsg(errMsg(e));
+    }
+    setBusy(false);
+  };
+
+  const forget = async () => {
+    if (!window.confirm("Forget this sync server on this device? Your local vault stays; the server keeps running. You can deploy or join again afterward.")) return;
+    setBusy(true);
+    setMsg("");
+    try {
+      await syncForget();
+      setPairCode(null);
+      setMsg("Forgotten. This device is local-only again.");
+      await refresh();
+      await onSyncChange();
+    } catch (e) {
+      setMsg(errMsg(e));
+    }
+    setBusy(false);
+  };
+
+  // Layout branches. `configured` = this device is pointed at a one-click server (whether it
+  // deployed it or joined via a code). `deployed` = this device owns the server record (can Destroy).
+  const deployed = !!st?.deployed;
+  const configured = oneClick || deployed;
 
   return (
     <Card className="mb-4">
@@ -170,15 +298,27 @@ function SyncServer() {
         <span className="flex items-center gap-2">
           <Cloud size={15} /> Sync server <span className="text-[11px] font-normal text-[var(--text-muted)]">(one-click)</span>
         </span>
-        <Badge tone={st?.deployed ? "ok" : "neutral"}>{st?.deployed ? "Running" : "Not deployed"}</Badge>
+        <Badge tone={signedIn ? "ok" : configured ? "warn" : "neutral"}>
+          {deployed
+            ? signedIn
+              ? "Running · syncing"
+              : "Running · not signed in"
+            : configured
+              ? signedIn
+                ? "Connected"
+                : "Not signed in"
+              : "Not deployed"}
+        </Badge>
       </div>
       <p className="mb-3 text-xs text-[var(--text-secondary)]">
         Spin up your <span className="font-medium">own</span> encrypted sync server on Linode with one click — it reuses your
         Real VPN token, generates its own keys, and this device signs in automatically. No Google account or domain needed.
-        The vault stays end-to-end encrypted (the server only sees ciphertext).
+        The vault stays end-to-end encrypted (the server only sees ciphertext). To use it on another computer, add that device
+        here — no IP, cert, or login to type.
       </p>
 
-      {!st?.deployed && (
+      {/* 1. Not pointed at any server yet: deploy a new one, or join an existing one with a code. */}
+      {!configured && (
         <>
           <div className="mb-2 rounded-[10px] border border-[var(--warn)]/30 bg-[var(--warn)]/10 p-2 text-[11px] text-[var(--text-secondary)]">
             Unlike the VPN, a sync server is <span className="font-medium">always on</span> and bills continuously
@@ -203,18 +343,99 @@ function SyncServer() {
             </button>
           </div>
           {busy && progress && <p className="mt-2 text-xs text-[var(--accent)]">{progress}</p>}
+
+          <div className="mt-3 border-t border-[var(--border-subtle)] pt-3">
+            {!showJoin ? (
+              <button onClick={() => setShowJoin(true)} className="inline-flex items-center gap-1.5 text-xs text-[var(--accent)] hover:underline">
+                <Link2 size={13} /> Already have a server on another computer? Join it with a device code
+              </button>
+            ) : (
+              <div className="space-y-2">
+                <div className="text-sm font-medium">Join an existing sync server</div>
+                <p className="text-xs text-[var(--text-secondary)]">
+                  On the computer that already has the server, open <span className="font-medium">Add a device</span> and copy its
+                  code, then paste it here. This works only on a fresh install with an empty vault.
+                </p>
+                <textarea
+                  value={joinCode}
+                  onChange={(e) => setJoinCode(e.target.value)}
+                  placeholder="SNTL1.…"
+                  rows={3}
+                  className={`${inputCls} w-full resize-y`}
+                />
+                <div className="flex items-center gap-2">
+                  <button onClick={() => void join()} disabled={busy || !joinCode.trim()} className={btnCls}>
+                    {busy ? "Joining…" : "Join server"}
+                  </button>
+                  <button onClick={() => { setShowJoin(false); setJoinCode(""); }} className="text-xs text-[var(--text-muted)] hover:underline">
+                    Cancel
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
         </>
       )}
 
-      {st?.deployed && (
-        <div className="space-y-1.5 text-xs text-[var(--text-secondary)]">
-          <div>Server: <span className="mono">{st.ipv4}</span>{st.state ? ` · ${st.state}` : ""}</div>
-          <div>
-            Cost: <span className="font-medium">${st.monthlyUsd.toFixed(2)}/mo</span> (~${st.hourlyUsd.toFixed(3)}/hr) — billing until destroyed.
+      {/* 2. Pointed at a server but NOT signed in: finish/repair sign-in, or forget & start over.
+             Covers a deploy whose sign-in timed out AND a joined device that later signed out. */}
+      {configured && !signedIn && (
+        <div className="space-y-2 text-xs text-[var(--text-secondary)]">
+          {deployed && (
+            <>
+              <div>Server: <span className="mono">{st?.ipv4}</span>{st?.state ? ` · ${st.state}` : ""}</div>
+              <div>
+                Cost: <span className="font-medium">${st?.monthlyUsd?.toFixed(2)}/mo</span> (~${st?.hourlyUsd?.toFixed(3)}/hr) — billing until destroyed.
+              </div>
+            </>
+          )}
+          <div className="!mt-2 rounded-[10px] border border-[var(--warn)]/40 bg-[var(--warn)]/10 p-2.5">
+            <div className="text-[11px] text-[var(--text-secondary)]">
+              This device is set up for a sync server but isn’t signed in yet
+              {deployed ? " (its first sign-in likely ran before the server finished installing)" : ""}. Your vault is
+              <span className="font-medium"> not syncing yet</span>. Finish setup:
+            </div>
+            <button onClick={() => void reconnect()} disabled={busy} className="mt-2 inline-flex items-center gap-1.5 rounded-[10px] border border-[var(--accent)]/50 px-3 py-1.5 text-sm text-[var(--accent)] hover:bg-[var(--accent)]/10 disabled:opacity-50">
+              <PlugZap size={14} /> {busy ? "Reconnecting…" : "Reconnect / finish setup"}
+            </button>
           </div>
-          <button onClick={() => void destroy()} disabled={busy} className="mt-1 text-[var(--danger)] hover:underline disabled:opacity-50">
-            Destroy sync server (stop billing)
-          </button>
+          <div className="flex items-center gap-4 !mt-2">
+            {deployed ? (
+              <button onClick={() => void destroy()} disabled={busy} className="text-[var(--danger)] hover:underline disabled:opacity-50">
+                Destroy sync server (stop billing)
+              </button>
+            ) : (
+              <button onClick={() => void forget()} disabled={busy} className="text-[var(--text-muted)] hover:underline disabled:opacity-50">
+                Forget this server / start over
+              </button>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* 3. Signed in: owner sees server info + Destroy; a joined device sees a connected note; both add devices. */}
+      {configured && signedIn && (
+        <div className="space-y-2 text-xs text-[var(--text-secondary)]">
+          {deployed ? (
+            <>
+              <div>Server: <span className="mono">{st?.ipv4}</span>{st?.state ? ` · ${st.state}` : ""}</div>
+              <div>
+                Cost: <span className="font-medium">${st?.monthlyUsd?.toFixed(2)}/mo</span> (~${st?.hourlyUsd?.toFixed(3)}/hr) — billing until destroyed.
+              </div>
+            </>
+          ) : (
+            <div>This device is connected to your sync server as an added device. The server itself is managed on the computer that deployed it.</div>
+          )}
+          <AddDeviceBlock busy={busy} pairCode={pairCode} onAdd={() => void addDevice()} />
+          {deployed ? (
+            <button onClick={() => void destroy()} disabled={busy} className="!mt-2 block text-[var(--danger)] hover:underline disabled:opacity-50">
+              Destroy sync server (stop billing)
+            </button>
+          ) : (
+            <button onClick={() => void forget()} disabled={busy} className="!mt-2 block text-[var(--text-muted)] hover:underline disabled:opacity-50">
+              Disconnect this device from the server
+            </button>
+          )}
         </div>
       )}
 
@@ -223,12 +444,33 @@ function SyncServer() {
   );
 }
 
-function AccountSync() {
-  const [status, setStatus] = useState<SyncStatusInfo | null>(null);
+/** "Add a device" affordance: mint a join code and show it with copy + a sensitivity warning. */
+function AddDeviceBlock({ busy, pairCode, onAdd }: { busy: boolean; pairCode: { code: string; createdAt: string } | null; onAdd: () => void }) {
+  return (
+    <div className="!mt-2">
+      {!pairCode ? (
+        <button onClick={onAdd} disabled={busy} className="inline-flex items-center gap-1.5 rounded-[10px] border border-[var(--border-strong)] px-3 py-1.5 text-sm hover:border-[var(--accent)]/50 disabled:opacity-50">
+          <UserPlus size={14} /> {busy ? "Working…" : "Add a device"}
+        </button>
+      ) : (
+        <div className="space-y-2">
+          <div className="rounded-[10px] border border-[var(--warn)]/40 bg-[var(--warn)]/10 p-2 text-[11px] text-[var(--warn)]">
+            This code unlocks your vault on another device — treat it like a password. It’s shown once; paste it into
+            <span className="font-medium"> Devices → Join with a device code</span> on the other computer, then close this.
+          </div>
+          <CodeBox code={pairCode.code} />
+        </div>
+      )}
+    </div>
+  );
+}
+
+function AccountSync({ sync, onSyncChange }: { sync: SyncStatusInfo | null; onSyncChange: () => Promise<void> }) {
   const [serverUrl, setServerUrl] = useState("");
   const [clientId, setClientId] = useState("");
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState("");
+  const [showAdvanced, setShowAdvanced] = useState(false);
 
   // Sign-in in progress: between authGoogleSignin and the TOTP verify that yields tokens.
   const [pending, setPending] = useState<{ email: string; totpRequired: boolean } | null>(null);
@@ -240,27 +482,21 @@ function AccountSync() {
   const [restoreCode, setRestoreCode] = useState("");
   const [devices, setDevices] = useState<SyncDevice[]>([]);
 
-  const refresh = async () => {
-    const s = await syncStatus();
-    setStatus(s);
-    setServerUrl(s.serverUrl ?? "");
-    setClientId(s.googleClientId ?? "");
-    return s;
-  };
-
   useEffect(() => {
-    void refresh().catch(() => {});
-  }, []);
+    setServerUrl(sync?.serverUrl ?? "");
+    setClientId(sync?.googleClientId ?? "");
+  }, [sync]);
 
-  const configured = !!(status?.serverUrl && status?.googleClientId);
-  const signedIn = !!status?.signedIn;
+  const signedIn = !!sync?.signedIn;
+  const oneClick = sync?.serverUrl === ONE_CLICK_URL;
+  const configured = !!(sync?.serverUrl && sync?.googleClientId);
 
   const saveConfig = async () => {
     setBusy(true);
     setMsg("");
     try {
       await syncSetConfig(serverUrl.trim() || null, clientId.trim() || null);
-      await refresh();
+      await onSyncChange();
       setMsg("Saved.");
     } catch (e) {
       setMsg(errMsg(e));
@@ -294,7 +530,7 @@ function AccountSync() {
       setPending(null);
       setEnroll(null);
       setCode("");
-      await refresh();
+      await onSyncChange();
       setMsg("Signed in.");
     } catch (e) {
       setMsg(errMsg(e));
@@ -310,7 +546,7 @@ function AccountSync() {
       setBackup(null);
       setDevices([]);
       setPending(null);
-      await refresh();
+      await onSyncChange();
       setMsg("Signed out.");
     } catch (e) {
       setMsg(errMsg(e));
@@ -381,99 +617,20 @@ function AccountSync() {
     <Card className="mb-4">
       <div className="mb-2 flex items-center justify-between text-sm font-medium">
         <span className="flex items-center gap-2">
-          <Cloud size={15} /> Cross-device sync <span className="text-[11px] font-normal text-[var(--text-muted)]">(advanced)</span>
+          <Cloud size={15} /> Vault sync
         </span>
         <Badge tone={signedIn ? "ok" : "neutral"}>{signedIn ? "Signed in" : "Off · local-only"}</Badge>
       </div>
-      <p className="mb-3 text-xs text-[var(--text-secondary)]">
-        This is <span className="font-medium">not</span> how you log into the app — that's <span className="font-medium">App lock</span> above.
-        This optional feature syncs your vault to your <span className="font-medium">own</span> self-hosted server (end-to-end
-        encrypted; the server only ever stores ciphertext). It needs a sync-server URL and a Google OAuth client id you
-        create, so the button below stays disabled until both are filled in. Leave it untouched and SENTINEL stays entirely local.
-      </p>
 
-      {/* server + client id config */}
-      <div className="space-y-2">
-        <div>
-          <label className="mb-1 block text-xs text-[var(--text-muted)]">Sync server URL</label>
-          <input
-            value={serverUrl}
-            onChange={(e) => setServerUrl(e.target.value)}
-            placeholder="https://sync.example.com"
-            className={inputCls}
-          />
-        </div>
-        <div>
-          <label className="mb-1 block text-xs text-[var(--text-muted)]">Google client id</label>
-          <input
-            value={clientId}
-            onChange={(e) => setClientId(e.target.value)}
-            placeholder="xxxxx.apps.googleusercontent.com"
-            className={inputCls}
-          />
-        </div>
-        <button onClick={saveConfig} disabled={busy} className={btnCls}>
-          {busy ? "Saving…" : "Save configuration"}
-        </button>
-      </div>
-
-      {/* sign-in / TOTP */}
-      {!signedIn && (
-        <div className="mt-4 border-t border-[var(--border-subtle)] pt-4">
-          {!pending ? (
-            <>
-              <button
-                onClick={signin}
-                disabled={busy || !configured}
-                className="inline-flex items-center gap-2 rounded-[10px] border border-[var(--border-strong)] px-3 py-2 text-sm hover:border-[var(--accent)]/50 disabled:opacity-50"
-              >
-                <LogIn size={15} /> Sign in with Google
-              </button>
-              {!configured && (
-                <p className="mt-2 text-xs text-[var(--text-muted)]">
-                  Save a server URL and Google client id above to enable sign-in.
-                </p>
-              )}
-            </>
-          ) : (
-            <div className="space-y-2">
-              <div className="text-sm">
-                Almost there{pending.email ? ` — signing in as ${pending.email}` : ""}. Enter a
-                6-digit code from your authenticator to finish.
-              </div>
-              {enroll && (
-                <div className="rounded-[10px] border border-[var(--border-subtle)] bg-[var(--bg-inset)] p-3">
-                  <div className="mb-1 text-xs text-[var(--text-muted)]">
-                    First time on this account — add this secret to your authenticator app:
-                  </div>
-                  <div className="mono break-all text-sm text-[var(--accent)]">{enroll.secret}</div>
-                </div>
-              )}
-              <div className="flex items-center gap-2">
-                <input
-                  value={code}
-                  onChange={(e) => setCode(e.target.value)}
-                  inputMode="numeric"
-                  maxLength={6}
-                  placeholder="123456"
-                  className={`${inputCls} flex-1`}
-                />
-                <button onClick={verify} disabled={busy || code.trim().length < 6} className={btnCls}>
-                  {busy ? "Verifying…" : "Verify"}
-                </button>
-              </div>
-            </div>
-          )}
-        </div>
-      )}
-
-      {/* signed-in actions */}
-      {signedIn && (
-        <div className="mt-4 space-y-4 border-t border-[var(--border-subtle)] pt-4">
+      {/* Signed in: the account actions (work for both the one-click server and a custom server). */}
+      {signedIn ? (
+        <div className="space-y-4">
           <div className="flex items-center justify-between text-sm">
             <span className="text-[var(--text-secondary)]">
-              Signed in{status?.email ? ` as ` : ""}
-              {status?.email && <span className="mono text-[var(--text-primary)]">{status.email}</span>}
+              {oneClick ? "Syncing to your one-click server" : "Signed in"}
+              {sync?.email ? " as " : ""}
+              {sync?.email && <span className="mono text-[var(--text-primary)]">{sync.email}</span>}
+              .
             </span>
             <button onClick={logout} disabled={busy} className={btnCls}>
               Sign out
@@ -484,8 +641,8 @@ function AccountSync() {
           <div>
             <div className="mb-1 flex items-center gap-2 text-sm font-medium">Recovery backup</div>
             <p className="mb-2 text-xs text-[var(--text-secondary)]">
-              Wraps your vault key with a one-time recovery kit and uploads the encrypted vault.
-              You will need the recovery code to restore on a new device.
+              Wraps your vault key with a one-time recovery kit and uploads the encrypted vault. Keep the recovery code
+              somewhere safe — it’s the fallback if you ever lose every signed-in device.
             </p>
             <button onClick={doBackup} disabled={busy} className={btnCls}>
               {busy ? "Working…" : "Back up now"}
@@ -520,10 +677,11 @@ function AccountSync() {
 
           {/* restore */}
           <div>
-            <div className="mb-1 text-sm font-medium">Restore from another device</div>
+            <div className="mb-1 text-sm font-medium">Restore from your recovery code</div>
             <p className="mb-2 text-xs text-[var(--text-secondary)]">
-              On a fresh device with an empty vault, paste the recovery code from your kit to pull
-              your vault down.
+              To bring your vault onto a <span className="font-medium">new</span> computer, the easiest way is
+              <span className="font-medium"> Add a device</span> above. This box is the fallback: on a fresh device with an
+              empty vault, paste the recovery code from your kit.
             </p>
             <div className="flex items-center gap-2">
               <input
@@ -541,7 +699,7 @@ function AccountSync() {
           {/* devices */}
           <div>
             <div className="mb-2 flex items-center justify-between text-sm font-medium">
-              <span>Devices</span>
+              <span>Signed-in devices</span>
               <button onClick={loadDevices} disabled={busy} className={btnCls}>
                 {busy ? "…" : "Refresh"}
               </button>
@@ -578,6 +736,102 @@ function AccountSync() {
               </ul>
             )}
           </div>
+        </div>
+      ) : oneClick ? (
+        // One-click server configured but this device isn't signed in yet — point at Reconnect.
+        <p className="text-xs text-[var(--text-secondary)]">
+          This device has a one-click sync server configured but isn’t signed in yet. Use
+          <span className="font-medium"> Reconnect / finish setup</span> in the Sync server card above to finish — you don’t
+          need a Google account.
+        </p>
+      ) : (
+        // No server at all — plain local, with the advanced bring-your-own path tucked away.
+        <div className="space-y-3">
+          <p className="text-xs text-[var(--text-secondary)]">
+            Your vault is <span className="font-medium">local-only</span>. The simplest way to sync across devices is the
+            one-click sync server above — no Google account or domain. Everything stays end-to-end encrypted either way.
+          </p>
+          {!showAdvanced ? (
+            <button onClick={() => setShowAdvanced(true)} className="text-xs text-[var(--accent)] hover:underline">
+              Advanced: use your own server + Google sign-in instead
+            </button>
+          ) : (
+            <div className="space-y-2 border-t border-[var(--border-subtle)] pt-3">
+              <p className="text-[11px] text-[var(--text-muted)]">
+                For a server you host yourself with a real domain. Point SENTINEL at its URL and a Google OAuth client id you
+                create, then sign in with Google.
+              </p>
+              <div>
+                <label className="mb-1 block text-xs text-[var(--text-muted)]">Sync server URL</label>
+                <input
+                  value={serverUrl}
+                  onChange={(e) => setServerUrl(e.target.value)}
+                  placeholder="https://sync.example.com"
+                  className={inputCls}
+                />
+              </div>
+              <div>
+                <label className="mb-1 block text-xs text-[var(--text-muted)]">Google client id</label>
+                <input
+                  value={clientId}
+                  onChange={(e) => setClientId(e.target.value)}
+                  placeholder="xxxxx.apps.googleusercontent.com"
+                  className={inputCls}
+                />
+              </div>
+              <button onClick={saveConfig} disabled={busy} className={btnCls}>
+                {busy ? "Saving…" : "Save configuration"}
+              </button>
+
+              {/* sign-in / TOTP for the custom-server path */}
+              <div className="mt-2 border-t border-[var(--border-subtle)] pt-3">
+                {!pending ? (
+                  <>
+                    <button
+                      onClick={signin}
+                      disabled={busy || !configured}
+                      className="inline-flex items-center gap-2 rounded-[10px] border border-[var(--border-strong)] px-3 py-2 text-sm hover:border-[var(--accent)]/50 disabled:opacity-50"
+                    >
+                      <LogIn size={15} /> Sign in with Google
+                    </button>
+                    {!configured && (
+                      <p className="mt-2 text-xs text-[var(--text-muted)]">
+                        Save a server URL and Google client id above to enable sign-in.
+                      </p>
+                    )}
+                  </>
+                ) : (
+                  <div className="space-y-2">
+                    <div className="text-sm">
+                      Almost there{pending.email ? ` — signing in as ${pending.email}` : ""}. Enter a
+                      6-digit code from your authenticator to finish.
+                    </div>
+                    {enroll && (
+                      <div className="rounded-[10px] border border-[var(--border-subtle)] bg-[var(--bg-inset)] p-3">
+                        <div className="mb-1 text-xs text-[var(--text-muted)]">
+                          First time on this account — add this secret to your authenticator app:
+                        </div>
+                        <div className="mono break-all text-sm text-[var(--accent)]">{enroll.secret}</div>
+                      </div>
+                    )}
+                    <div className="flex items-center gap-2">
+                      <input
+                        value={code}
+                        onChange={(e) => setCode(e.target.value)}
+                        inputMode="numeric"
+                        maxLength={6}
+                        placeholder="123456"
+                        className={`${inputCls} flex-1`}
+                      />
+                      <button onClick={verify} disabled={busy || code.trim().length < 6} className={btnCls}>
+                        {busy ? "Verifying…" : "Verify"}
+                      </button>
+                    </div>
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
         </div>
       )}
 

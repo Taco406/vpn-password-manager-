@@ -8,6 +8,33 @@ The format follows [Keep a Changelog](https://keepachangelog.com/). Versions are
 [semantic](https://semver.org/). **Add a new `## [x.y.z]` section at the top in the same PR
 that bumps the app version** — that's how "the changelog updates on every merge."
 
+## [0.1.25] — 2026-07-20
+
+### Added
+- **Add another computer to your sync server with one code — no IP, cert, or Google needed.** On the
+  device that has your one-click sync server, open **Devices → Sync server → Add a device** to get a
+  one-time join code. On the new computer (fresh install, empty vault), choose **Join it with a device
+  code**, paste, and it instantly connects to the same server and pulls your vault down. The code
+  carries everything the new device needs (the server address, its pinned certificate, the login, and
+  your vault key) so there's nothing to type by hand. Treat the code like a password — it's shown once.
+  Joining only ever runs on a fresh, empty vault so it can never overwrite what's already on a device,
+  and a device can **Reconnect** (finish an interrupted sign-in) or **Disconnect / forget the server**
+  at any time to start over cleanly.
+
+### Fixed
+- **"I deployed a sync server but my vault isn't syncing."** A one-click deploy that finished creating
+  the server but whose sign-in step didn't complete (first boot installs Docker, pulls the image, and
+  migrates — which can take longer than the app waited) used to leave you stuck: the server was up and
+  billing, but this device was never signed in, and there was no way to finish without destroying and
+  redeploying. New **Reconnect / finish setup** button completes the sign-in against your existing
+  server — no re-deploy, no lost billing.
+- **The "Cross-device sync" panel no longer nags for a Google client id you don't need.** If you used
+  the one-click server, that panel used to still show an empty "Google client id" field and copy
+  claiming sync "needs" one — misleading, since one-click uses no Google account. The sync area now
+  reflects what you actually set up: the account actions when you're signed in, a pointer to Reconnect
+  if setup is unfinished, and the bring-your-own-server + Google path tucked behind an **Advanced**
+  toggle for the few who want it.
+
 ## [0.1.24] — 2026-07-20
 
 ### Fixed
