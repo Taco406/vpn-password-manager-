@@ -1,9 +1,9 @@
 import { useEffect, useMemo, useState } from "react";
 import { useParams, useNavigate } from "react-router-dom";
-import { Search, Plus, Eye, EyeOff, Copy, Globe, StickyNote, CreditCard, User, Command as CmdIcon, ShieldCheck, Pencil } from "lucide-react";
+import { Search, Plus, Eye, EyeOff, Copy, Globe, StickyNote, CreditCard, User, Command as CmdIcon, ShieldCheck, Pencil, Upload } from "lucide-react";
 import type { ItemDetail, ItemSummary } from "@sentinel/shared";
 import { bridge } from "../bridge";
-import { Favicon, Badge, Button } from "../components/ui";
+import { Favicon, Badge, Button, Card } from "../components/ui";
 
 const typeIcon = { login: Globe, note: StickyNote, card: CreditCard, identity: User } as const;
 
@@ -71,12 +71,72 @@ export function Vault() {
             );
           })}
         </div>
+        <div className="border-t border-[var(--border-subtle)] p-3">
+          <ImportPasswords />
+        </div>
       </div>
 
       <div className="flex-1 overflow-y-auto">
         {selectedId ? <ItemDetailPane id={selectedId} /> : <EmptyDetail />}
       </div>
     </div>
+  );
+}
+
+function ImportPasswords() {
+  const [kind, setKind] = useState<"chrome_csv" | "bitwarden_csv" | "bitwarden_json">("chrome_csv");
+  const [status, setStatus] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  const onFile = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    e.target.value = "";
+    if (!file) return;
+    setBusy(true);
+    setStatus("");
+    try {
+      const content = await file.text();
+      const r = await bridge.vaultImport(kind, content);
+      setStatus(`Imported ${r.imported} item${r.imported === 1 ? "" : "s"}${r.skipped ? `, skipped ${r.skipped}` : ""}. Open the Vault to see them.`);
+    } catch (err) {
+      setStatus(`Import failed: ${err instanceof Error ? err.message : String(err)}`);
+    }
+    setBusy(false);
+  };
+
+  return (
+    <Card className="mb-4">
+      <div className="mb-2 flex items-center gap-2 text-sm font-medium">
+        <Upload size={15} /> Import passwords
+      </div>
+      <p className="mb-3 text-xs text-[var(--text-secondary)]">
+        Bring in your existing logins. Export from your current manager, then pick the format and
+        choose the file. (1Password: export to a Chrome/Bitwarden CSV. Everything is encrypted
+        locally on import.)
+      </p>
+      <div className="flex items-center gap-2">
+        <select
+          value={kind}
+          onChange={(e) => setKind(e.target.value as typeof kind)}
+          className="rounded-[10px] border border-[var(--border-subtle)] bg-[var(--bg-inset)] px-3 py-2 text-sm outline-none focus:border-[var(--accent)]/50"
+        >
+          <option value="chrome_csv">Chrome / Edge (CSV)</option>
+          <option value="bitwarden_csv">Bitwarden (CSV)</option>
+          <option value="bitwarden_json">Bitwarden (JSON)</option>
+        </select>
+        <label className="cursor-pointer rounded-[10px] border border-[var(--border-strong)] px-3 py-2 text-sm hover:border-[var(--accent)]/50">
+          {busy ? "Importing…" : "Choose file…"}
+          <input
+            type="file"
+            accept=".csv,.json,text/csv,application/json"
+            onChange={onFile}
+            disabled={busy}
+            className="hidden"
+          />
+        </label>
+      </div>
+      {status && <p className="mt-2 text-xs text-[var(--text-muted)]">{status}</p>}
+    </Card>
   );
 }
 

@@ -8,6 +8,18 @@ The format follows [Keep a Changelog](https://keepachangelog.com/). Versions are
 [semantic](https://semver.org/). **Add a new `## [x.y.z]` section at the top in the same PR
 that bumps the app version** — that's how "the changelog updates on every merge."
 
+## [0.1.21] — 2026-07-20
+
+### Changed
+- **Settings is no longer one endless scroll.** It's now split into tabs — **General**, **Security**,
+  **VPN**, and **About** — so each area is a short, focused page.
+- **Features moved out of Settings to where you actually use them.** The **VPN exit-node fleet** now
+  lives on the **VPN** screen, **cross-device sync** and **one-click sync-server deploy** moved to the
+  **Devices** screen, and **password import** moved into the **Vault**.
+- **New "Experimental" section** in the sidebar gathers the beta, Windows-first features —
+  **multi-hop (bounce)**, **auto-connect on untrusted Wi-Fi**, and **browser autofill** — behind a
+  clear "these may change" banner, so the main screens stay focused on what's stable.
+
 ## [0.1.20] — 2026-07-19
 
 ### Fixed
