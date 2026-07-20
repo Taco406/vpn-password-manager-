@@ -326,13 +326,12 @@ fn wireguard_installed() -> (bool, Option<String>) {
 /// probe). Non-Windows isn't gated on this here (the unix path uses `wg-quick` under sudo/root).
 fn is_elevated() -> bool {
     if cfg!(windows) {
-        std::process::Command::new("net")
-            .arg("session")
+        let mut cmd = std::process::Command::new("net");
+        cmd.arg("session")
             .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status()
-            .map(|s| s.success())
-            .unwrap_or(false)
+            .stderr(std::process::Stdio::null());
+        no_window_std(&mut cmd); // don't flash a console window when the VPN tab checks elevation
+        cmd.status().map(|s| s.success()).unwrap_or(false)
     } else {
         true
     }
@@ -427,9 +426,30 @@ fn wg_err(detail: impl Into<String>) -> CoreError {
     }
 }
 
+/// Suppress the black console window Windows flashes when spawning a console program (`wg`, `net`,
+/// `ping`, …). No-op on other platforms. Without this EVERY WireGuard/`net` call pops a window — the
+/// "flashing" seen on connect (the counter poll runs `wg show` every 2s) and when opening the VPN
+/// tab (`net session` checks elevation). 0x08000000 = CREATE_NO_WINDOW.
+#[cfg(windows)]
+fn no_window_std(cmd: &mut std::process::Command) {
+    use std::os::windows::process::CommandExt;
+    cmd.creation_flags(0x0800_0000);
+}
+#[cfg(not(windows))]
+fn no_window_std(_cmd: &mut std::process::Command) {}
+
+#[cfg(windows)]
+fn no_window_tokio(cmd: &mut tokio::process::Command) {
+    cmd.creation_flags(0x0800_0000);
+}
+#[cfg(not(windows))]
+fn no_window_tokio(_cmd: &mut tokio::process::Command) {}
+
 async fn run(program: &str, args: &[&str]) -> CoreResult<String> {
-    let out = tokio::process::Command::new(program)
-        .args(args)
+    let mut cmd = tokio::process::Command::new(program);
+    cmd.args(args);
+    no_window_tokio(&mut cmd); // never flash a console window (esp. the 2s counter poll)
+    let out = cmd
         .output()
         .await
         .map_err(|e| wg_err(format!("spawn {program}: {e}")))?;
@@ -675,11 +695,10 @@ fn selftest_say(msg: &str) {
 /// Best-effort data-plane ping to the peer's tunnel address (bonus signal beyond the handshake).
 fn selftest_ping(ip: &str) -> bool {
     let count_flag = if cfg!(windows) { "-n" } else { "-c" };
-    std::process::Command::new("ping")
-        .args([count_flag, "1", ip])
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
+    let mut cmd = std::process::Command::new("ping");
+    cmd.args([count_flag, "1", ip]);
+    no_window_std(&mut cmd);
+    cmd.output().map(|o| o.status.success()).unwrap_or(false)
 }
 
 /// Run the headless self-test to completion and exit the process (0 = handshake landed, 1 = not).

@@ -10,6 +10,13 @@ that bumps the app version** — that's how "the changelog updates on every merg
 
 ## [0.1.26] — 2026-07-20
 
+### Fixed
+- **No more flashing black windows.** On Windows, every WireGuard/network command the app ran
+  (`wg`, `net`, `ping`) popped a console window for a split second — and because the throughput
+  counter polls `wg show` every 2 seconds while connected, and opening the **VPN** tab checks
+  elevation with `net session`, it flashed constantly on the VPN screen and throughout a connection.
+  Every one of those calls now runs hidden (`CREATE_NO_WINDOW`), so nothing flashes anymore.
+
 ### Added
 - **Always-on VPN (optional).** Alongside the disposable per-session VPN, you can now deploy a
   **dedicated exit node that stays running** for a stable connection — find it under **VPN → Always-on
