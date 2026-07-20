@@ -8,6 +8,20 @@ The format follows [Keep a Changelog](https://keepachangelog.com/). Versions are
 [semantic](https://semver.org/). **Add a new `## [x.y.z]` section at the top in the same PR
 that bumps the app version** — that's how "the changelog updates on every merge."
 
+## [0.1.28] — 2026-07-20
+
+### Fixed
+- **The sync server now actually starts (the second and final crash cause).** v0.1.27 fixed a
+  missing startup secret, but that only exposed a second crash hiding right behind it: the moment the
+  server tried to bring up its own HTTPS, it hit an internal TLS mix-up (two cryptography backends
+  were compiled in and the library refused to pick one) and **panicked on boot** — so the container
+  still crash-looped and the health check still never answered, which is why a fresh Delete + Deploy
+  on v0.1.27 *still* showed *Running · not signed in*. The server now picks its crypto backend
+  explicitly, so it boots, serves its health check, and this device signs itself in. Verified
+  end-to-end by running the real server through its exact production startup (migrate → HTTPS →
+  health check → sign-in). **If your server is stuck, Destroy it and Deploy once more** — the new box
+  pulls the fixed server and comes up on its own.
+
 ## [0.1.27] — 2026-07-20
 
 ### Fixed

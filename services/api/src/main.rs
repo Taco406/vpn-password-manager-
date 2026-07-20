@@ -6,6 +6,8 @@ use std::sync::Arc;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    install_crypto_provider();
+
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
@@ -134,4 +136,37 @@ fn env_flag(name: &str) -> bool {
 fn read_pem_env(name: &str) -> Option<String> {
     let val = std::env::var(name).ok().filter(|v| !v.is_empty())?;
     Some(std::fs::read_to_string(&val).unwrap_or(val))
+}
+
+/// Install a process-default rustls [`CryptoProvider`]. REQUIRED before any TLS config is built:
+/// our dependency graph compiles in BOTH rustls backends (aws-lc-rs via sqlx's `tls-rustls`, ring
+/// via reqwest), and rustls 0.23 refuses to auto-pick one — it PANICS the first time
+/// `ServerConfig::builder()` runs without a process-default provider. axum-server's
+/// `RustlsConfig::from_pem` (the one-click self-signed HTTPS listener) hits exactly that path, so
+/// without this the sync server crash-loops on boot under `--restart=always` and `/healthz` never
+/// answers. We pick ring (the provider reqwest already uses). Idempotent — a redundant call, or a
+/// provider installed elsewhere first, is a harmless no-op.
+fn install_crypto_provider() {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Regression for the sync-server crash-loop: building the one-click HTTPS listener must not
+    /// panic. With both rustls backends compiled in, `RustlsConfig::from_pem` used to panic
+    /// ("Could not automatically determine the process-level CryptoProvider") — which meant the
+    /// container died on boot, restarted forever, and never served `/healthz`. Installing a
+    /// provider first must make the exact same call succeed.
+    #[tokio::test]
+    async fn https_listener_config_builds_without_crypto_provider_panic() {
+        install_crypto_provider();
+        let certified = rcgen::generate_simple_self_signed(vec!["sentinel-sync".to_string()])
+            .expect("generate test cert");
+        let cert = certified.cert.pem().into_bytes();
+        let key = certified.key_pair.serialize_pem().into_bytes();
+        let cfg = axum_server::tls_rustls::RustlsConfig::from_pem(cert, key).await;
+        assert!(cfg.is_ok(), "HTTPS TLS config must build: {:?}", cfg.err());
+    }
 }
