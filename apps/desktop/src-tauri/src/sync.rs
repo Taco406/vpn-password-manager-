@@ -1173,6 +1173,15 @@ pub async fn sync_deploy(
     emit_deploy(&app, "creating", "generating keys…");
     let bootstrap_token = rand_hex(32);
     let db_password = rand_hex(16);
+    // The TOTP encryption key is a REQUIRED production secret — base64 of 32 random bytes. Without
+    // it the server refuses to boot under SENTINEL_ENV=production and crash-loops (so /healthz never
+    // answers and the deploy can never sign in). Generated on-device like the other secrets.
+    let totp_enc_key = {
+        use rand::RngCore as _;
+        let mut b = [0u8; 32];
+        rand::rngs::OsRng.fill_bytes(&mut b);
+        STANDARD.encode(b)
+    };
     let certified = rcgen::generate_simple_self_signed(vec![SYNC_HOST.to_string()])
         .map_err(|e| format!("generate cert: {e}"))?;
     let cert_pem = certified.cert.pem();
@@ -1184,6 +1193,7 @@ pub async fn sync_deploy(
         db_password,
         tls_cert_b64: STANDARD.encode(cert_pem.as_bytes()),
         tls_key_b64: STANDARD.encode(key_pem.as_bytes()),
+        totp_enc_key,
     })
     .map_err(estr)?;
 
