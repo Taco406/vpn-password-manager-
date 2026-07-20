@@ -548,9 +548,9 @@ export async function authGoogleSignin(): Promise<{ email: string; totpRequired:
   return inv<{ email: string; totpRequired: boolean }>("auth_google_signin");
 }
 
-export async function authTotpEnroll(): Promise<{ otpauthUri: string; secret: string }> {
+export async function authTotpEnroll(): Promise<{ otpauthUri: string; secret: string; qrSvg: string }> {
   if (!inTauri()) throw new Error("Sign-in is only available in the desktop app.");
-  return inv<{ otpauthUri: string; secret: string }>("auth_totp_enroll");
+  return inv<{ otpauthUri: string; secret: string; qrSvg: string }>("auth_totp_enroll");
 }
 
 export async function authTotpVerify(code: string): Promise<void> {

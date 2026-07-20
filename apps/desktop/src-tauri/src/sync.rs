@@ -703,6 +703,9 @@ pub struct SigninOut {
 pub struct EnrollOut {
     otpauth_uri: String,
     secret: String,
+    /// The otpauth URI rendered as an SVG QR code, so the UI can show a scannable code
+    /// (empty string if rendering failed — the typed secret is always present as fallback).
+    qr_svg: String,
 }
 
 #[derive(Serialize)]
@@ -855,9 +858,11 @@ pub async fn auth_totp_enroll(state: State<'_, AppState>) -> Result<EnrollOut, S
         secret_base32: String,
     }
     let e: E = resp.json().await.map_err(estr)?;
+    let qr_svg = crate::applock::qr_svg(&e.otpauth_uri).unwrap_or_default();
     Ok(EnrollOut {
         otpauth_uri: e.otpauth_uri,
         secret: e.secret_base32,
+        qr_svg,
     })
 }
 

@@ -250,8 +250,8 @@ pub fn applock_totp_disable(state: State<AppState>, code: String) -> R<()> {
     state::totp_secret_delete()
 }
 
-/// Render an otpauth URI as an SVG QR string.
-fn qr_svg(uri: &str) -> R<String> {
+/// Render an otpauth URI as an SVG QR string (also used by the sync sign-in's TOTP enrollment).
+pub(crate) fn qr_svg(uri: &str) -> R<String> {
     use qrcode::render::svg;
     let code = qrcode::QrCode::new(uri.as_bytes()).map_err(|e| format!("qr: {e}"))?;
     Ok(code

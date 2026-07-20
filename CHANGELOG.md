@@ -8,6 +8,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/). Versions are
 [semantic](https://semver.org/). **Add a new `## [x.y.z]` section at the top in the same PR
 that bumps the app version** — that's how "the changelog updates on every merge."
 
+## [0.1.36] — 2026-07-20
+
+### Fixed
+- **The Google sign‑in's authenticator step now shows an actual QR code.** The message said
+  "scan the QR" but the screen only showed the typed setup key. Enrollment now displays a
+  scannable QR (same as the app‑lock 2‑step setup), with the typed key still there as a fallback.
+
 ## [0.1.35] — 2026-07-20
 
 ### Fixed
