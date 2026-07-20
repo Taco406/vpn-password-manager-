@@ -180,6 +180,48 @@ export async function openFolder(path: string): Promise<void> {
   await core.invoke("open_folder", { path });
 }
 
+// --- Network tools (Tools screen): what's-my-IP + geo, TCP ping, DNS ---------
+// Go out the app's current route, so with the VPN connected they reflect the exit node.
+
+export interface MyIp {
+  ip: string;
+  city: string;
+  region: string;
+  country: string;
+  org: string;
+  lat: number | null;
+  lon: number | null;
+}
+
+/** Public IP + coarse geolocation as seen from this device now (reflects the VPN exit if on). */
+export async function netMyIp(): Promise<MyIp> {
+  if (!inTauri()) throw new Error("Network tools are only available in the desktop app.");
+  const core = await import("@tauri-apps/api/core");
+  return core.invoke("net_myip") as Promise<MyIp>;
+}
+
+export interface PingResult {
+  host: string;
+  ip: string;
+  port: number;
+  ms: number;
+  attempts: number;
+}
+
+/** TCP-connect latency probe to a host (443, then 80). Best of a few attempts, in ms. */
+export async function netPing(host: string): Promise<PingResult> {
+  if (!inTauri()) throw new Error("Network tools are only available in the desktop app.");
+  const core = await import("@tauri-apps/api/core");
+  return core.invoke("net_ping", { host }) as Promise<PingResult>;
+}
+
+/** Resolve a hostname to its IP addresses. */
+export async function netDns(host: string): Promise<string[]> {
+  if (!inTauri()) throw new Error("Network tools are only available in the desktop app.");
+  const core = await import("@tauri-apps/api/core");
+  return core.invoke("net_dns", { host }) as Promise<string[]>;
+}
+
 // --- App lock: opt-in master password + authenticator-app (TOTP) unlock -----
 // The app is unlocked by default; these engage only once the user turns them on. Standalone
 // (not part of the SentinelBridge contract) — no-op / safe defaults in the browser demo.

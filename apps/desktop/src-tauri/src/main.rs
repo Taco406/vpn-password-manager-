@@ -9,6 +9,7 @@ mod applock;
 mod applog;
 mod commands;
 mod hello;
+mod net;
 mod nmhost;
 mod state;
 mod sync;
@@ -144,6 +145,9 @@ fn main() {
             applog::log_tail,
             applog::log_clear,
             applog::log_dir_path,
+            net::net_myip,
+            net::net_ping,
+            net::net_dns,
         ])
         .build(tauri::generate_context!())
         .expect("error while building SENTINEL")
