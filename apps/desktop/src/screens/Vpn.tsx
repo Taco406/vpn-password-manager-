@@ -24,6 +24,7 @@ export function Vpn() {
   const [selectedRegion, setSelectedRegion] = useState<string>("us-east");
   const [selectedType, setSelectedType] = useState<string>("g6-nanode-1");
   const [cost, setCost] = useState<{ hourlyUsd: number; accruedUsd: number }>({ hourlyUsd: 0, accruedUsd: 0 });
+  const [tunnelMode, setTunnelMode] = useState<"full" | "split">("full");
   const connect = useApp((s) => s.connect);
   const metrics = useApp((s) => s.metrics);
   const rxHistory = useApp((s) => s.rxHistory);
@@ -31,6 +32,7 @@ export function Vpn() {
   useEffect(() => {
     void bridge.vpnRegions().then(setRegions);
     void bridge.vpnInstanceTypes().then(setTypes);
+    void bridge.settingsGet().then((s) => setTunnelMode(s.tunnelMode ?? "full"));
     // Demo/screenshot: auto-connect when asked via the window query.
     const q = new URLSearchParams(window.location.search);
     if (q.get("vpn") === "connected") {
@@ -91,6 +93,12 @@ export function Vpn() {
       <div className="flex flex-col gap-4 overflow-y-auto border-l border-[var(--border-subtle)] p-5">
         {stage === "idle" ? (
           <>
+            <div className="flex items-center justify-between text-xs">
+              <span className="uppercase tracking-wide text-[var(--text-muted)]">Tunnel mode</span>
+              <Badge tone={tunnelMode === "split" ? "accent" : "neutral"}>
+                {tunnelMode === "split" ? "Split" : "Full"}
+              </Badge>
+            </div>
             <RegionPicker regions={regions} selected={selectedRegion} onSelect={setSelectedRegion} />
             <VpnNodes />
             <InstancePicker types={types} selected={selectedType} onSelect={setSelectedType} />

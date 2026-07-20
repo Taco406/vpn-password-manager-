@@ -18,13 +18,11 @@ use sentinel_core::provision::{
     render_base64, verify_callback, CallbackBody, CloudInitParams, NextHop,
 };
 use sentinel_core::vpn::{
-    connect as core_connect, disconnect as core_disconnect, orphan_sweep_keeping, ConnectDeps,
-    ConnectState, ServerPubkeyFetcher,
+    connect as core_connect, decide_allowed_ips, disconnect as core_disconnect,
+    orphan_sweep_keeping, ConnectDeps, ConnectState, ServerPubkeyFetcher,
 };
 use sentinel_core::vpn::{CostTicker, HistoryStore, SessionRecord};
-use sentinel_core::wg::{
-    full_tunnel, render_client_conf, ClientConf, WgController, WgCounters, WgKeypair,
-};
+use sentinel_core::wg::{render_client_conf, ClientConf, WgController, WgCounters, WgKeypair};
 use serde::Serialize;
 use serde_json::json;
 use std::collections::HashSet;
@@ -1081,6 +1079,33 @@ fn killswitch_enabled(data_dir: &Path) -> bool {
         .unwrap_or(false)
 }
 
+// ---------------------------------------------------------------------------
+// split tunneling (opt-in): which destinations route through the VPN
+// ---------------------------------------------------------------------------
+
+/// Read the persisted `tunnelMode` / `splitRoutes` and resolve them to the client's WireGuard
+/// `AllowedIPs`. Reads `settings.json` (mirroring `killswitch_enabled` / `read_net_settings`),
+/// then defers the actual decision to the pure `decide_allowed_ips` in the core (which is unit
+/// tested). Default (missing/`"full"` mode) is `full_tunnel()` — zero behavior change unless the
+/// user opts into split mode with at least one valid route.
+fn resolve_allowed_ips(data_dir: &Path) -> Vec<String> {
+    let v = std::fs::read_to_string(data_dir.join("settings.json"))
+        .ok()
+        .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
+        .unwrap_or_else(|| json!({}));
+    let mode = v.get("tunnelMode").and_then(|m| m.as_str());
+    let routes: Vec<String> = v
+        .get("splitRoutes")
+        .and_then(|a| a.as_array())
+        .map(|a| {
+            a.iter()
+                .filter_map(|x| x.as_str().map(|s| s.to_string()))
+                .collect()
+        })
+        .unwrap_or_default();
+    decide_allowed_ips(mode, &routes)
+}
+
 /// Manual panic button: tear down every kill-switch rule immediately. Always succeeds.
 #[tauri::command]
 pub fn killswitch_clear() -> Result<(), String> {
@@ -1465,13 +1490,18 @@ pub async fn connect_real(
     // (registry), so connecting doesn't destroy their saved/stopped nodes.
     let _ = orphan_sweep_keeping(&*deps.cloud, &kept_ids(&data_dir)).await;
 
+    // Split-tunnel resolution: full mode (default) → full_tunnel; split mode with valid routes →
+    // just those CIDRs. Read from disk at connect time so a settings change needs no reconnect
+    // plumbing.
+    let allowed = resolve_allowed_ips(&data_dir);
+
     let (r, it) = (region.clone(), instance_type.clone());
     let apph = app.clone();
     let mut emit = move |s: ConnectState| {
         let _ = apph.emit("vpn:state", state_json(&s, &r, &it));
     };
 
-    let conn = match core_connect(&deps, &region, &instance_type, &mut emit).await {
+    let conn = match core_connect(&deps, &region, &instance_type, allowed, &mut emit).await {
         Ok(c) => c,
         Err(e) => {
             // On ANY connect failure, guarantee no kill-switch rules are left behind.
@@ -1752,7 +1782,7 @@ async fn multihop_run(
         dns: "1.1.1.1".into(),
         server_public_key: server_kps[0].public_base64(),
         server_endpoint: format!("{entry_ip}:51820"),
-        allowed_ips: full_tunnel(),
+        allowed_ips: resolve_allowed_ips(&data_dir),
         keepalive: 25,
     };
     if let Err(e) = deps.wg.up(&conf).await {

@@ -8,6 +8,16 @@ The format follows [Keep a Changelog](https://keepachangelog.com/). Versions are
 [semantic](https://semver.org/). **Add a new `## [x.y.z]` section at the top in the same PR
 that bumps the app version** — that's how "the changelog updates on every merge."
 
+## [0.1.22] — 2026-07-20
+
+### Added
+- **Split tunneling.** The VPN still routes **all** your traffic by default (full tunnel, nothing
+  changes). New in **Settings → VPN → Split tunneling**, you can switch to **Split** mode and list the
+  destinations — as CIDRs like `10.0.0.0/8` or `192.168.0.0/16` — that should go through the VPN;
+  everything else uses your normal connection. Add and remove routes as chips, and if you leave the
+  list empty (or an entry is invalid) SENTINEL safely falls back to full tunnel so you're never left
+  routing nothing. The mode takes effect on your next Connect and works for single- and multi-hop.
+
 ## [0.1.21] — 2026-07-20
 
 ### Changed

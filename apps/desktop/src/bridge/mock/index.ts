@@ -70,6 +70,8 @@ class MockBridge implements SentinelBridge {
     killSwitchDefault: true,
     defaultRegion: "us-east",
     ssidAllowlist: ["home", "office"],
+    tunnelMode: "full",
+    splitRoutes: [],
     telemetry: false,
   };
   private devices: DeviceInfo[] = [

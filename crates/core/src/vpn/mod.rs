@@ -16,8 +16,8 @@ pub use history::{
 pub use metrics::{sample_at, total_rx_bytes, MetricsSample, UpsizeDetector};
 pub use profiles::{seeded as seeded_profiles, ConnectionProfile};
 pub use session::{
-    connect, disconnect, ConnectDeps, ConnectState, Connection, MockPubkeyFetcher,
-    ServerPubkeyFetcher,
+    connect, decide_allowed_ips, disconnect, ConnectDeps, ConnectState, Connection,
+    MockPubkeyFetcher, ServerPubkeyFetcher,
 };
 pub use speedtest::{MockSpeedTest, SpeedResult, SpeedTest};
 pub use sweep::{orphan_sweep, orphan_sweep_keeping};
