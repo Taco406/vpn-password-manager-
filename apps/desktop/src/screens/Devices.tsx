@@ -21,6 +21,7 @@ import {
   syncPairBegin,
   syncPairComplete,
   syncForget,
+  syncSetGoogleSecret,
   authGoogleSignin,
   authTotpEnroll,
   authTotpVerify,
@@ -105,16 +106,21 @@ function SyncServer({ sync, onSyncChange }: { sync: SyncStatusInfo | null; onSyn
   const [pairCode, setPairCode] = useState<{ code: string; createdAt: string } | null>(null);
   const [joinCode, setJoinCode] = useState("");
   const [showJoin, setShowJoin] = useState(false);
-  // Google sign-in: deploy-time client id + the interactive finish-sign-in state.
+  // Google sign-in: deploy-time client id + secret, plus the interactive finish-sign-in state.
   const [useGoogle, setUseGoogle] = useState(false);
   const [gClientId, setGClientId] = useState("");
+  const [gSecret, setGSecret] = useState("");
   const [showGuide, setShowGuide] = useState(false);
   const [pending, setPending] = useState<{ email: string; totpRequired: boolean } | null>(null);
   const [enroll, setEnroll] = useState<{ otpauthUri: string; secret: string } | null>(null);
   const [code, setCode] = useState("");
+  // The client secret typed at sign-in time (when it wasn't saved at deploy time — Google
+  // requires it for the desktop token exchange, so sign-in can't succeed without one).
+  const [signinSecret, setSigninSecret] = useState("");
   // Switch an already-deployed built-in-login server over to Google sign-in (needs a redeploy).
   const [showSwitch, setShowSwitch] = useState(false);
   const [switchClientId, setSwitchClientId] = useState("");
+  const [switchSecret, setSwitchSecret] = useState("");
   const [switchRegion, setSwitchRegion] = useState("us-east");
   const [switchGuide, setSwitchGuide] = useState(false);
 
@@ -143,13 +149,13 @@ function SyncServer({ sync, onSyncChange }: { sync: SyncStatusInfo | null; onSyn
     setProgress("Starting…");
     try {
       const gcid = useGoogle ? gClientId.trim() : "";
-      if (useGoogle && !gcid) {
+      if (useGoogle && (!gcid || !gSecret.trim())) {
         setProgress("");
-        setMsg("Enter your Google client ID, or turn off “Sign in with Google”.");
+        setMsg("Enter your Google client ID and client secret, or turn off “Sign in with Google”.");
         setBusy(false);
         return;
       }
-      await syncDeploy(region, undefined, gcid || undefined);
+      await syncDeploy(region, undefined, gcid || undefined, useGoogle ? gSecret : undefined);
       setProgress("");
       setMsg(
         gcid
@@ -192,8 +198,8 @@ function SyncServer({ sync, onSyncChange }: { sync: SyncStatusInfo | null; onSyn
   // this device signs in; other devices will need to re-join.
   const enableGoogle = async () => {
     const gcid = switchClientId.trim();
-    if (!gcid) {
-      setMsg("Enter your Google client ID first, or hide this to keep the built-in login.");
+    if (!gcid || !switchSecret.trim()) {
+      setMsg("Enter your Google client ID and client secret first, or hide this to keep the built-in login.");
       return;
     }
     if (
@@ -207,10 +213,11 @@ function SyncServer({ sync, onSyncChange }: { sync: SyncStatusInfo | null; onSyn
     setMsg("Switching to Google sign-in — destroying the old server and redeploying…");
     try {
       await syncServerDestroy();
-      await syncDeploy(switchRegion, undefined, gcid);
+      await syncDeploy(switchRegion, undefined, gcid, switchSecret);
       setProgress("");
       setShowSwitch(false);
       setSwitchClientId("");
+      setSwitchSecret("");
       setMsg("Redeployed with Google enabled. Click “Sign in with Google” below to finish.");
       await refresh();
       await onSyncChange();
@@ -239,11 +246,22 @@ function SyncServer({ sync, onSyncChange }: { sync: SyncStatusInfo | null; onSyn
   // Google finish-sign-in for a Google-mode server: browser PKCE → TOTP (enroll on the first
   // device, or enter the existing code on later ones) → session.
   const signinGoogle = async () => {
+    // Google requires the client SECRET (not just the id) in the desktop token exchange —
+    // make sure one is saved before opening the browser, or the exchange 400s at the end.
+    if (!sync?.googleSecretSet && !signinSecret.trim()) {
+      setMsg("Paste your Google client secret first (it's next to the Client ID in Google Cloud → Credentials).");
+      return;
+    }
     setBusy(true);
     setMsg("Opening your browser — finish Google sign-in there, then come back.");
     setEnroll(null);
     setCode("");
     try {
+      if (signinSecret.trim()) {
+        await syncSetGoogleSecret(signinSecret);
+        setSigninSecret("");
+        await onSyncChange();
+      }
       const p = await authGoogleSignin();
       setPending(p);
       setMsg(p.totpRequired ? "Scan the QR in your authenticator, then enter the 6-digit code." : "Enter your 6-digit authenticator code.");
@@ -381,11 +399,17 @@ function SyncServer({ sync, onSyncChange }: { sync: SyncStatusInfo | null; onSyn
                 <input
                   value={gClientId}
                   onChange={(e) => setGClientId(e.target.value)}
-                  placeholder="xxxxx.apps.googleusercontent.com"
+                  placeholder="Client ID — xxxxx.apps.googleusercontent.com"
+                  className={`${inputCls} w-full`}
+                />
+                <input
+                  value={gSecret}
+                  onChange={(e) => setGSecret(e.target.value)}
+                  placeholder="Client secret — GOCSPX-…"
                   className={`${inputCls} w-full`}
                 />
                 <button onClick={() => setShowGuide((v) => !v)} className="text-xs text-[var(--accent)] hover:underline">
-                  {showGuide ? "Hide setup steps" : "How do I get a Client ID? (~10 min, one-time)"}
+                  {showGuide ? "Hide setup steps" : "How do I get these? (~10 min, one-time)"}
                 </button>
                 {showGuide && <GoogleGuideSteps />}
               </div>
@@ -445,6 +469,20 @@ function SyncServer({ sync, onSyncChange }: { sync: SyncStatusInfo | null; onSyn
             </div>
             {googleMode ? (
               <div className="mt-2 space-y-2">
+                {!sync?.googleSecretSet && (
+                  <div>
+                    <label className="mb-1 block text-[11px] text-[var(--text-muted)]">
+                      Google client secret — from the same Google Cloud → Credentials page as your Client ID
+                      (Google requires it to finish sign-in; it stays on this device)
+                    </label>
+                    <input
+                      value={signinSecret}
+                      onChange={(e) => setSigninSecret(e.target.value)}
+                      placeholder="GOCSPX-…"
+                      className={`${inputCls} w-full`}
+                    />
+                  </div>
+                )}
                 <button onClick={() => void signinGoogle()} disabled={busy} className="inline-flex items-center gap-1.5 rounded-[10px] border border-[var(--accent)]/50 px-3 py-1.5 text-sm text-[var(--accent)] hover:bg-[var(--accent)]/10 disabled:opacity-50">
                   <LogIn size={14} /> {busy && !pending ? "Working…" : "Sign in with Google"}
                 </button>
@@ -551,21 +589,32 @@ function SyncServer({ sync, onSyncChange }: { sync: SyncStatusInfo | null; onSyn
               <input
                 value={switchClientId}
                 onChange={(e) => setSwitchClientId(e.target.value)}
-                placeholder="xxxxx.apps.googleusercontent.com"
+                placeholder="Client ID — xxxxx.apps.googleusercontent.com"
+                className={`${inputCls} w-full`}
+              />
+              <input
+                value={switchSecret}
+                onChange={(e) => setSwitchSecret(e.target.value)}
+                placeholder="Client secret — GOCSPX-…"
                 className={`${inputCls} w-full`}
               />
               <button onClick={() => setSwitchGuide((v) => !v)} className="text-[11px] text-[var(--accent)] hover:underline">
-                {switchGuide ? "Hide setup steps" : "How do I get a Client ID? (~10 min, one-time)"}
+                {switchGuide ? "Hide setup steps" : "How do I get these? (~10 min, one-time)"}
               </button>
               {switchGuide && <GoogleGuideSteps />}
               <div className="flex items-center gap-3">
-                <button onClick={() => void enableGoogle()} disabled={busy || !switchClientId.trim()} className={btnCls}>
+                <button
+                  onClick={() => void enableGoogle()}
+                  disabled={busy || !switchClientId.trim() || !switchSecret.trim()}
+                  className={btnCls}
+                >
                   {busy ? "Working…" : "Destroy & redeploy with Google"}
                 </button>
                 <button
                   onClick={() => {
                     setShowSwitch(false);
                     setSwitchClientId("");
+                    setSwitchSecret("");
                   }}
                   className="text-[11px] text-[var(--text-muted)] hover:underline"
                 >
@@ -583,14 +632,18 @@ function SyncServer({ sync, onSyncChange }: { sync: SyncStatusInfo | null; onSyn
   );
 }
 
-/** The one-time Google Cloud steps to get a Desktop-app OAuth Client ID (no client secret). */
+/** The one-time Google Cloud steps to get a Desktop-app OAuth Client ID + secret. */
 function GoogleGuideSteps() {
   return (
     <ol className="list-decimal space-y-1 pl-4 text-[11px] text-[var(--text-secondary)]">
       <li>Open <span className="mono">console.cloud.google.com</span> and pick or create a project.</li>
       <li>APIs &amp; Services → OAuth consent screen → <span className="font-medium">External</span>; add your own email under Test users.</li>
       <li>APIs &amp; Services → Credentials → Create credentials → OAuth client ID → Application type <span className="font-medium">Desktop app</span>.</li>
-      <li>Copy the Client ID (ends in <span className="mono">.apps.googleusercontent.com</span>) and paste it above — no client secret needed.</li>
+      <li>
+        Copy the <span className="font-medium">Client ID</span> (ends in <span className="mono">.apps.googleusercontent.com</span>) and
+        the <span className="font-medium">Client secret</span> (starts with <span className="mono">GOCSPX-</span>) shown beside it, and
+        paste both above. Google requires both to sign in from a desktop app; the secret stays on this computer.
+      </li>
     </ol>
   );
 }
@@ -619,6 +672,7 @@ function AddDeviceBlock({ busy, pairCode, onAdd }: { busy: boolean; pairCode: { 
 function AccountSync({ sync, onSyncChange }: { sync: SyncStatusInfo | null; onSyncChange: () => Promise<void> }) {
   const [serverUrl, setServerUrl] = useState("");
   const [clientId, setClientId] = useState("");
+  const [clientSecret, setClientSecret] = useState("");
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState("");
   const [showAdvanced, setShowAdvanced] = useState(false);
@@ -647,6 +701,12 @@ function AccountSync({ sync, onSyncChange }: { sync: SyncStatusInfo | null; onSy
     setMsg("");
     try {
       await syncSetConfig(serverUrl.trim() || null, clientId.trim() || null);
+      // The secret is saved separately (keychain) and only when typed, so re-saving the
+      // config never wipes a previously-stored secret.
+      if (clientSecret.trim()) {
+        await syncSetGoogleSecret(clientSecret);
+        setClientSecret("");
+      }
       await onSyncChange();
       setMsg("Saved.");
     } catch (e) {
@@ -927,6 +987,17 @@ function AccountSync({ sync, onSyncChange }: { sync: SyncStatusInfo | null; onSy
                   value={clientId}
                   onChange={(e) => setClientId(e.target.value)}
                   placeholder="xxxxx.apps.googleusercontent.com"
+                  className={inputCls}
+                />
+              </div>
+              <div>
+                <label className="mb-1 block text-xs text-[var(--text-muted)]">
+                  Google client secret{sync?.googleSecretSet ? " (saved — retype to replace)" : ""}
+                </label>
+                <input
+                  value={clientSecret}
+                  onChange={(e) => setClientSecret(e.target.value)}
+                  placeholder="GOCSPX-…"
                   className={inputCls}
                 />
               </div>

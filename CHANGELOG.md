@@ -8,6 +8,17 @@ The format follows [Keep a Changelog](https://keepachangelog.com/). Versions are
 [semantic](https://semver.org/). **Add a new `## [x.y.z]` section at the top in the same PR
 that bumps the app version** — that's how "the changelog updates on every merge."
 
+## [0.1.35] — 2026-07-20
+
+### Fixed
+- **Google sign‑in failed at the last step with "token endpoint returned HTTP 400."** For
+  Desktop‑app OAuth clients, Google requires the **client secret** (shown next to the Client ID in
+  Google Cloud → Credentials) in the final token exchange — even with PKCE — and the app wasn't
+  sending one. There's now a **Client secret** field wherever you set up Google sign‑in (deploy,
+  switch, and right above the "Sign in with Google" button if it isn't saved yet). The secret is
+  stored in the Windows keychain and never leaves your PC — the sync server itself doesn't need it.
+  Token‑exchange failures now also show Google's actual error text instead of just the HTTP code.
+
 ## [0.1.34] — 2026-07-20
 
 ### Fixed

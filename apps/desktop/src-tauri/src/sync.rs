@@ -36,6 +36,10 @@ const KC_SERVICE: &str = "com.sentinel.desktop";
 const KC_ACCESS: &str = "sync-access";
 const KC_REFRESH: &str = "sync-refresh";
 const KC_PENDING: &str = "sync-pending";
+/// Google OAuth client SECRET. Google requires it in the code→token exchange for
+/// "Desktop app" clients even with PKCE (it's non-confidential for installed apps,
+/// but omitting it is a hard 400). Kept in the keychain alongside the other tokens.
+const KC_GSECRET: &str = "sync-google-secret";
 // Same service/account `state::load_or_create_key` uses, so a restore rebinds the local key.
 const KC_VAULT_KEY: &str = "vault-key";
 
@@ -239,13 +243,16 @@ impl BrowserOpener for SystemBrowserOpener {
 struct HttpTokenExchanger {
     http: reqwest::Client,
     client_id: String,
+    /// Required by Google for Desktop-app clients (see `KC_GSECRET`).
+    client_secret: Option<String>,
 }
 
 impl HttpTokenExchanger {
-    fn new(client_id: String) -> Self {
+    fn new(client_id: String, client_secret: Option<String>) -> Self {
         HttpTokenExchanger {
             http: http_client(),
             client_id,
+            client_secret,
         }
     }
 }
@@ -258,13 +265,16 @@ impl TokenExchanger for HttpTokenExchanger {
         verifier: &str,
         redirect_uri: &str,
     ) -> CoreResult<TokenSet> {
-        let form = [
+        let mut form = vec![
             ("grant_type", "authorization_code"),
             ("code", code),
             ("code_verifier", verifier),
             ("client_id", self.client_id.as_str()),
             ("redirect_uri", redirect_uri),
         ];
+        if let Some(secret) = self.client_secret.as_deref() {
+            form.push(("client_secret", secret));
+        }
         let resp = self
             .http
             .post(GOOGLE_TOKEN_ENDPOINT)
@@ -274,9 +284,13 @@ impl TokenExchanger for HttpTokenExchanger {
             .map_err(|e| CoreError::Network(e.to_string()))?;
         if !resp.status().is_success() {
             let s = resp.status();
+            // Surface Google's error body (e.g. `invalid_grant`, "client_secret is missing")
+            // so a failure is diagnosable from the UI message alone.
+            let body = resp.text().await.unwrap_or_default();
+            let body = body.trim().chars().take(300).collect::<String>();
             return Err(CoreError::Provision {
                 stage: "token",
-                detail: format!("google token endpoint returned HTTP {s}"),
+                detail: format!("google token endpoint returned HTTP {s}: {body}"),
             });
         }
         #[derive(Deserialize)]
@@ -316,7 +330,7 @@ const CALLBACK_ERR_HTML: &str = "<!doctype html><html><head><meta charset=utf-8>
 
 /// Run the full PKCE loop: bind an ephemeral loopback port, open the browser, wait for the
 /// single `/callback` GET, then exchange the code for tokens. ~2-minute overall timeout.
-async fn run_pkce_flow(client_id: &str) -> Result<TokenSet, String> {
+async fn run_pkce_flow(client_id: &str, client_secret: Option<String>) -> Result<TokenSet, String> {
     let listener =
         std::net::TcpListener::bind("127.0.0.1:0").map_err(|e| format!("bind loopback: {e}"))?;
     let port = listener.local_addr().map_err(estr)?.port();
@@ -325,7 +339,10 @@ async fn run_pkce_flow(client_id: &str) -> Result<TokenSet, String> {
     let auth = GoogleAuth::new(
         client_id.to_string(),
         Arc::new(SystemBrowserOpener),
-        Arc::new(HttpTokenExchanger::new(client_id.to_string())),
+        Arc::new(HttpTokenExchanger::new(
+            client_id.to_string(),
+            client_secret,
+        )),
     );
     auth.start(&params).await.map_err(estr)?;
 
@@ -667,6 +684,9 @@ async fn push_document(
 pub struct SyncStatusOut {
     server_url: Option<String>,
     google_client_id: Option<String>,
+    /// Whether a Google client SECRET is saved (never the value itself). The UI uses this to
+    /// prompt for the secret before a Google sign-in can succeed (Google requires it).
+    google_secret_set: bool,
     signed_in: bool,
     email: Option<String>,
 }
@@ -728,9 +748,17 @@ pub fn sync_status(state: State<AppState>) -> SyncStatusOut {
     SyncStatusOut {
         server_url: cfg.server_url,
         google_client_id: cfg.google_client_id,
+        google_secret_set: kc_get(KC_GSECRET).is_some(),
         signed_in: kc_get(KC_ACCESS).is_some(),
         email: cfg.email,
     }
+}
+
+/// Save (or clear, with an empty string) the Google OAuth client secret. Kept separate from
+/// `sync_set_config` so re-saving the non-secret config can never silently wipe the secret.
+#[tauri::command]
+pub fn sync_set_google_secret(secret: String) -> Result<(), String> {
+    kc_set(KC_GSECRET, &secret)
 }
 
 #[tauri::command]
@@ -768,7 +796,7 @@ pub async fn auth_google_signin(
         .filter(|s| !s.trim().is_empty())
         .ok_or("set the Google client id first")?;
 
-    let tokens = run_pkce_flow(&client_id).await?;
+    let tokens = run_pkce_flow(&client_id, kc_get(KC_GSECRET)).await?;
     let email = email_from_id_token(&tokens.id_token).unwrap_or_default();
 
     // Use the PINNED client so this reaches a one-click self-signed server (trust its exact
@@ -1129,6 +1157,7 @@ pub async fn sync_deploy(
     region: String,
     instance_type: Option<String>,
     google_client_id: Option<String>,
+    google_client_secret: Option<String>,
 ) -> Result<(), String> {
     let dir = data_dir(&state);
     if load_server_record(&dir).is_some() {
@@ -1142,6 +1171,16 @@ pub async fn sync_deploy(
     let google_client_id = google_client_id
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty());
+    // The client SECRET stays on this device (keychain) — only the desktop's code→token
+    // exchange needs it; the server validates id_tokens with just the client id.
+    if google_client_id.is_some() {
+        if let Some(secret) = google_client_secret
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+        {
+            kc_set(KC_GSECRET, &secret)?;
+        }
+    }
 
     // 1) Generate everything client-side so we know the secrets + the exact cert to pin.
     emit_deploy(&app, "creating", "generating keys…");
@@ -1335,6 +1374,7 @@ pub async fn sync_server_destroy(state: State<'_, AppState>) -> Result<(), Strin
     kc_del(KC_ACCESS);
     kc_del(KC_REFRESH);
     kc_del(KC_PENDING);
+    kc_del(KC_GSECRET);
     Ok(())
 }
 
@@ -1588,5 +1628,6 @@ pub fn sync_forget(state: State<AppState>) -> Result<(), String> {
     kc_del(KC_ACCESS);
     kc_del(KC_REFRESH);
     kc_del(KC_PENDING);
+    kc_del(KC_GSECRET);
     Ok(())
 }

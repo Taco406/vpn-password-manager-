@@ -122,6 +122,7 @@ fn main() {
             vpn::vpn_persistent_status,
             sync::sync_status,
             sync::sync_set_config,
+            sync::sync_set_google_secret,
             sync::auth_google_signin,
             sync::auth_totp_enroll,
             sync::auth_totp_verify,
