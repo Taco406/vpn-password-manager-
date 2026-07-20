@@ -493,13 +493,6 @@ struct Api {
 }
 
 impl Api {
-    fn new(base: String) -> Self {
-        Api {
-            http: http_client(),
-            base,
-        }
-    }
-
     /// Refresh the access token using the (rotating) refresh token, storing both anew.
     async fn refresh(&self) -> Result<(), String> {
         let rt = kc_get(KC_REFRESH).ok_or("your session expired — sign in again")?;
@@ -805,13 +798,15 @@ pub async fn auth_google_signin(
     let tokens = run_pkce_flow(&client_id).await?;
     let email = email_from_id_token(&tokens.id_token).unwrap_or_default();
 
-    let api = Api::new(format!("{}/v1", server.trim_end_matches('/')));
-    let resp = api
-        .http
-        .post(format!("{}/auth/google", api.base))
+    // Use the PINNED client so this reaches a one-click self-signed server (trust its exact
+    // cert + resolve the fixed `sentinel-sync` host). A plain client would fail TLS there —
+    // which is why Google sign-in never worked against a one-click deploy before.
+    let client = sync_http_client(&cfg);
+    let resp = client
+        .post(format!("{}/v1/auth/google", server.trim_end_matches('/')))
         .json(&json!({
             "id_token": tokens.id_token,
-            "device": { "name": device_name(), "platform": "windows" },
+            "device": { "name": device_name(), "platform": platform_str() },
         }))
         .send()
         .await
@@ -1160,6 +1155,7 @@ pub async fn sync_deploy(
     state: State<'_, AppState>,
     region: String,
     instance_type: Option<String>,
+    google_client_id: Option<String>,
 ) -> Result<(), String> {
     let dir = data_dir(&state);
     if load_server_record(&dir).is_some() {
@@ -1168,6 +1164,11 @@ pub async fn sync_deploy(
     let token = crate::vpn::get_token()
         .ok_or("set a Linode API token first (Settings → Real VPN) — the deploy reuses it")?;
     let itype = instance_type.unwrap_or_else(|| "g6-nanode-1".to_string());
+    // When set, the server validates real Google id_tokens and this device signs in with
+    // Google (+ TOTP) instead of the bootstrap token. Empty ⇒ the personal bootstrap flow.
+    let google_client_id = google_client_id
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
 
     // 1) Generate everything client-side so we know the secrets + the exact cert to pin.
     emit_deploy(&app, "creating", "generating keys…");
@@ -1194,6 +1195,7 @@ pub async fn sync_deploy(
         tls_cert_b64: STANDARD.encode(cert_pem.as_bytes()),
         tls_key_b64: STANDARD.encode(key_pem.as_bytes()),
         totp_enc_key,
+        google_client_id: google_client_id.clone().unwrap_or_default(),
     })
     .map_err(estr)?;
 
@@ -1245,6 +1247,9 @@ pub async fn sync_deploy(
         cfg.server_url = Some(format!("https://{SYNC_HOST}"));
         cfg.pinned_cert_pem = Some(cert_pem);
         cfg.server_ip = Some(ipv4.clone());
+        // Store the Google client id (if any) so the pinned "Sign in with Google" flow can run
+        // its PKCE against this exact server without the user re-typing it.
+        cfg.google_client_id = google_client_id.clone();
         save_config(&dir, &cfg)?;
     }
     kc_set(KC_BOOTSTRAP, &bootstrap_token)?;
@@ -1278,10 +1283,20 @@ pub async fn sync_deploy(
         );
     }
 
-    // 6) Sign in with the bootstrap token → real access/refresh session.
-    emit_deploy(&app, "connecting", "signing in…");
-    bootstrap_signin(&dir).await?;
-    emit_deploy(&app, "ready", "sync server ready");
+    // 6) Sign in. A Google-enabled server can't be signed into from here — that needs the
+    //    interactive browser PKCE + TOTP flow — so we stop at "ready" and the UI drives
+    //    "Sign in with Google". A bootstrap-only (personal) server signs this device in now.
+    if google_client_id.is_some() {
+        emit_deploy(
+            &app,
+            "ready",
+            "server ready — sign in with Google to finish",
+        );
+    } else {
+        emit_deploy(&app, "connecting", "signing in…");
+        bootstrap_signin(&dir).await?;
+        emit_deploy(&app, "ready", "sync server ready");
+    }
     Ok(())
 }
 

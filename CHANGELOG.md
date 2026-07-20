@@ -8,6 +8,23 @@ The format follows [Keep a Changelog](https://keepachangelog.com/). Versions are
 [semantic](https://semver.org/). **Add a new `## [x.y.z]` section at the top in the same PR
 that bumps the app version** — that's how "the changelog updates on every merge."
 
+## [0.1.31] — 2026-07-20
+
+### Added
+- **Sign in with Google for the one-click sync server.** When deploying your sync server you can
+  now choose **"Sign in with Google"** and paste a Google OAuth **Client ID** (the deploy screen
+  has the ~10-minute, one-time setup steps for creating a "Desktop app" client in Google Cloud —
+  no client secret needed). The server is provisioned to validate real Google logins, and this
+  device finishes sign-in with Google + a TOTP code from your authenticator app. Leave it off to
+  keep the original zero-setup personal server.
+
+### Fixed
+- **Google sign-in now actually reaches a one-click server.** The Google sign-in call used the
+  un-pinned HTTP client, so it couldn't complete the TLS handshake against a self-signed one-click
+  server (it only worked against a public-CA custom server). It now uses the pinned client — the
+  same trust/cert path the rest of sync uses — and reports the real device platform instead of
+  always "windows".
+
 ## [0.1.30] — 2026-07-20
 
 ### Fixed
