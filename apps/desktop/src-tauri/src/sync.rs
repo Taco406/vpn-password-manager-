@@ -220,45 +220,18 @@ fn save_config(dir: &Path, cfg: &SyncConfig) -> Result<(), String> {
 // real BrowserOpener + TokenExchanger for the PKCE flow
 // ---------------------------------------------------------------------------
 
-/// Opens the system browser at `url`. We avoid `cmd /C start` (which mis-parses the `&`
-/// in an OAuth URL); on Windows the URL is handed straight to the default handler.
+/// Opens the system browser at `url`. Delegates to `vpn::open_url`, the one shared opener that
+/// is known to survive an OAuth URL's query string on every platform (`explorer <url>` does NOT —
+/// it silently opens a File Explorer window instead of the browser for any `?a=b&c=d` URL).
 struct SystemBrowserOpener;
 
 #[async_trait]
 impl BrowserOpener for SystemBrowserOpener {
     async fn open(&self, url: &str) -> CoreResult<()> {
-        let url = url.to_string();
-        let status = if cfg!(target_os = "windows") {
-            // `explorer <url>` opens the default browser and treats the whole argument as a
-            // single URL, side-stepping cmd.exe metacharacter parsing of `&`.
-            tokio::process::Command::new("explorer")
-                .arg(&url)
-                .status()
-                .await
-        } else if cfg!(target_os = "macos") {
-            tokio::process::Command::new("open")
-                .arg(&url)
-                .status()
-                .await
-        } else {
-            tokio::process::Command::new("xdg-open")
-                .arg(&url)
-                .status()
-                .await
-        };
-        match status {
-            // `explorer` returns a non-zero exit code even on success, so on Windows we treat
-            // a successful spawn as good enough; elsewhere require a clean exit.
-            Ok(s) if s.success() || cfg!(target_os = "windows") => Ok(()),
-            Ok(s) => Err(CoreError::Provision {
-                stage: "browser",
-                detail: format!("browser opener exited with {s}"),
-            }),
-            Err(e) => Err(CoreError::Provision {
-                stage: "browser",
-                detail: format!("could not launch browser: {e}"),
-            }),
-        }
+        crate::vpn::open_url(url.to_string()).map_err(|detail| CoreError::Provision {
+            stage: "browser",
+            detail,
+        })
     }
 }
 
