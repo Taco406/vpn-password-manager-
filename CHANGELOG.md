@@ -8,6 +8,24 @@ The format follows [Keep a Changelog](https://keepachangelog.com/). Versions are
 [semantic](https://semver.org/). **Add a new `## [x.y.z]` section at the top in the same PR
 that bumps the app version** — that's how "the changelog updates on every merge."
 
+## [0.1.33] — 2026-07-20
+
+### Added
+- **Fix a password in one click (Vault health).** Every weak, reused, or breached entry now has a
+  **Fix** button: it generates a fresh strong password, copies it to your clipboard, and opens that
+  site's password‑change page (via the web‑standard `/.well-known/change-password`, which the major
+  sites redirect to their real reset form) so you can paste the new one straight in.
+- **A way to switch a running sync server to "Sign in with Google."** Previously the Google option
+  only appeared while first deploying a server, so anyone who'd already deployed the built‑in‑login
+  server had no path to it. The Sync server card now shows your current sign‑in method and a
+  **Switch to "Sign in with Google"** action (it redeploys a fresh, Google‑enabled server — your
+  local vault is untouched and re‑uploads after you sign in).
+
+### Changed
+- **Vault health opens instantly.** The tab used to sit blank for a few seconds while it ran the
+  online breach check. It now renders immediately from the local audit (reused / weak / old) and
+  fills in the "Breached" count a moment later, with a small spinner while that online check runs.
+
 ## [0.1.32] — 2026-07-20
 
 ### Added

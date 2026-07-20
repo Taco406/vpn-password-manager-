@@ -5,7 +5,7 @@ pub mod audit;
 pub mod hibp;
 
 pub use audit::{run_audit, AuditReport, ReusedGroup};
-pub use hibp::{HibpClient, MockHibp};
+pub use hibp::{HibpClient, MockHibp, NoHibp};
 
 #[cfg(feature = "live-hibp")]
 pub use hibp::RealHibp;

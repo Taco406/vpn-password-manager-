@@ -54,6 +54,18 @@ impl HibpClient for MockHibp {
     }
 }
 
+/// A no-network HIBP client: always reports 0 breaches, instantly. Powers the *fast* local audit
+/// so the Health tab renders immediately; the real (network) breach check runs separately after.
+#[derive(Default)]
+pub struct NoHibp;
+
+#[async_trait]
+impl HibpClient for NoHibp {
+    async fn breach_count(&self, _password: &str) -> Result<u32> {
+        Ok(0)
+    }
+}
+
 /// The real HIBP client (behind `live-hibp`), using the k-anonymity range API with
 /// `Add-Padding: true` so the response size doesn't leak which prefix was queried.
 #[cfg(feature = "live-hibp")]

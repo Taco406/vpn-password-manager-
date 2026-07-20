@@ -2,7 +2,7 @@
 // browser / demo / screenshots. Resolved synchronously at module load so every consumer
 // holds the correct implementation (an earlier version captured the mock and never swapped).
 
-import type { SentinelBridge } from "@sentinel/shared";
+import type { SentinelBridge, AuditReport } from "@sentinel/shared";
 import { mockBridge } from "./mock";
 import { createTauriBridge } from "./tauri";
 
@@ -220,6 +220,17 @@ export async function netDns(host: string): Promise<string[]> {
   if (!inTauri()) throw new Error("Network tools are only available in the desktop app.");
   const core = await import("@tauri-apps/api/core");
   return core.invoke("net_dns", { host }) as Promise<string[]>;
+}
+
+/**
+ * Instant local vault audit (reused / weak / old, no network) so the Health tab renders without
+ * waiting on the HIBP breach check. The full `bridge.healthAudit()` runs after and fills breaches.
+ * In the browser demo the mock audit is already instant, so we just use it.
+ */
+export async function healthAuditFast(): Promise<AuditReport> {
+  if (!inTauri()) return bridge.healthAudit();
+  const core = await import("@tauri-apps/api/core");
+  return core.invoke("health_audit_fast") as Promise<AuditReport>;
 }
 
 // --- App lock: opt-in master password + authenticator-app (TOTP) unlock -----
