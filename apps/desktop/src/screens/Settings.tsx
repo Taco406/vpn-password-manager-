@@ -465,8 +465,10 @@ function RealVpn() {
 // uses: `## [ver] — date`, `### Category`, and `- bullet`; skips the title/intro and the
 // reference-link definitions at the bottom.
 function renderChangelog(md: string): ReactElement[] {
-  const start = md.indexOf("## [");
-  const body = start >= 0 ? md.slice(start) : md;
+  // Anchor to a LINE starting with "## [" — a plain indexOf also matched the backticked
+  // `## [x.y.z]` inside the intro paragraph and rendered the intro as a garbage entry.
+  const start = /^## \[/m.exec(md);
+  const body = start ? md.slice(start.index) : md;
   const out: ReactElement[] = [];
   let key = 0;
   for (const raw of body.split("\n")) {
@@ -578,6 +580,24 @@ function Updates() {
   const [status, setStatus] = useState<string>("");
   const [busy, setBusy] = useState(false);
   const [showNotes, setShowNotes] = useState(false);
+  // The RUNNING app's version, read from Tauri at mount — never a hardcoded string, which
+  // is how the badge once sat at v0.1.32 for four releases. Browser demo falls back to the
+  // newest version in the bundled changelog.
+  const [ver, setVer] = useState("");
+  useEffect(() => {
+    void (async () => {
+      try {
+        if (typeof window !== "undefined" && "__TAURI_INTERNALS__" in window) {
+          const app = await import("@tauri-apps/api/app");
+          setVer(await app.getVersion());
+          return;
+        }
+      } catch {
+        /* fall through to the changelog-derived fallback */
+      }
+      setVer(/^## \[(\d+\.\d+\.\d+)\]/m.exec(changelogRaw)?.[1] ?? "");
+    })();
+  }, []);
 
   const check = async () => {
     setBusy(true);
@@ -603,7 +623,7 @@ function Updates() {
   return (
     <Card>
       <div className="mb-2 flex items-center justify-between text-sm font-medium">
-        Updates <Badge tone="accent">v0.1.32</Badge>
+        Updates {ver && <Badge tone="accent">v{ver}</Badge>}
       </div>
       <p className="mb-3 text-xs text-[var(--text-secondary)]">
         SENTINEL checks for signed updates on launch and installs them automatically. You can also check now.
@@ -676,6 +696,21 @@ function AppLock() {
       resetForms();
       await refresh();
       setMsg(ok);
+    } catch (e) {
+      setMsg(e instanceof Error ? e.message : String(e));
+    }
+    setBusy(false);
+  };
+
+  // Deliberately NOT run(): run() calls resetForms() on success, which nulls the enrollment
+  // state this just set — that made "Set up 2-step unlock" appear to do nothing (no QR ever
+  // shown), leaving no way to turn the authenticator step on.
+  const beginTotpEnroll = async () => {
+    setBusy(true);
+    setMsg("");
+    try {
+      setEnroll(await lockTotpEnroll());
+      setTotpCode("");
     } catch (e) {
       setMsg(e instanceof Error ? e.message : String(e));
     }
@@ -790,7 +825,7 @@ function AppLock() {
 
         {!lock?.totpEnabled && !enroll && (
           <button
-            onClick={() => void run(async () => setEnroll(await lockTotpEnroll()), "")}
+            onClick={() => void beginTotpEnroll()}
             disabled={busy}
             className="mt-2 text-xs text-[var(--accent)] hover:underline disabled:opacity-50"
           >

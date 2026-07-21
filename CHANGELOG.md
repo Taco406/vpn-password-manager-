@@ -8,6 +8,18 @@ The format follows [Keep a Changelog](https://keepachangelog.com/). Versions are
 [semantic](https://semver.org/). **Add a new `## [x.y.z]` section at the top in the same PR
 that bumps the app version** — that's how "the changelog updates on every merge."
 
+## [0.1.37] — 2026-07-20
+
+### Fixed
+- **"Set up 2‑step unlock" (App lock → Authenticator app) did nothing when clicked.** The QR/setup
+  screen was being cleared the instant it loaded, so there was no way to turn on the authenticator
+  second step. It now opens properly: scan the QR (or type the key), enter the 6‑digit code, done —
+  from then on unlocking SENTINEL takes your master password *and* a Google Authenticator code.
+- **The Updates card showed the wrong version.** The version badge was a leftover hardcoded
+  "v0.1.32" no matter what was actually installed. It now reads the running app's real version.
+- **"What's new" no longer starts with a garbled entry.** The changelog viewer mistakenly rendered
+  part of the file's own intro text as a fake "vx.y.z" release at the top.
+
 ## [0.1.36] — 2026-07-20
 
 ### Fixed
