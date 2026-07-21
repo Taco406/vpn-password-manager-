@@ -4,7 +4,9 @@
 pub mod latency;
 pub mod manager;
 pub mod mock;
+pub mod netdata;
 pub mod provider;
+pub mod watchdog;
 
 #[cfg(feature = "live-hetzner")]
 pub mod hetzner;
@@ -14,10 +16,12 @@ pub mod linode;
 pub use latency::{LatencyProbe, MockLatencyProbe};
 pub use manager::{MetricPoint, PowerAction, Provider, ServerInfo, ServerManager, ServerMetrics};
 pub use mock::{MockCloud, MockServerManager};
+pub use netdata::{NetdataAlarm, NetdataEndpoint, NetdataInfo, NetdataSeries};
 pub use provider::{
     CloudProvider, Instance, InstanceSpec, InstanceState, Region, EPHEMERAL_TAG,
     PERSISTENT_VPN_TAG, SYNC_TAG,
 };
+pub use watchdog::{Alert, ServerSample, WatchdogCfg, WatchdogState};
 
 #[cfg(feature = "live-hetzner")]
 pub use hetzner::HetznerClient;

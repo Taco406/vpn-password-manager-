@@ -33,6 +33,8 @@ tauri = { version = "2", features = [] }
 # process plugin relaunches the app after an update is applied.
 tauri-plugin-updater = "2"
 tauri-plugin-process = "2"
+# Server-watchdog alerts surface as native OS notifications (Windows toasts).
+tauri-plugin-notification = "2"
 # Local persistence: the vault key lives only in the OS keychain (Windows Credential
 # Manager / macOS Keychain / Secret Service), never next to the on-disk vault. The
 # vault ciphertext itself is the SQLite file opened by sentinel-core's LocalVault.
