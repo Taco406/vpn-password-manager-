@@ -103,6 +103,28 @@ struct LinodeInstance {
     status: String,
     ipv4: Vec<String>,
     tags: Vec<String>,
+    // Extras used only by the full-account server manager (`list_all`). Optional so the
+    // narrow ephemeral-sweep deserialization path is completely unaffected.
+    #[serde(default)]
+    label: Option<String>,
+    #[serde(default)]
+    ipv6: Option<String>,
+    #[serde(default)]
+    created: Option<String>,
+    #[serde(default)]
+    specs: Option<LinodeSpecs>,
+}
+
+#[derive(Deserialize)]
+struct LinodeSpecs {
+    #[serde(default)]
+    vcpus: u32,
+    /// MB.
+    #[serde(default)]
+    memory: u32,
+    /// MB (Linode reports disk in MB).
+    #[serde(default)]
+    disk: u32,
 }
 
 impl From<LinodeInstance> for Instance {
@@ -256,5 +278,224 @@ impl LinodeClient {
             .await
             .map_err(Self::net)?;
         Self::empty_ok(resp).await
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Full-account server management (the Servers screen). Separate from the tag-scoped
+// CloudProvider view — nothing here is ever fed to the ephemeral orphan sweep.
+// ---------------------------------------------------------------------------
+
+use super::manager::{
+    MetricPoint, PowerAction, Provider, ServerInfo, ServerManager, ServerMetrics,
+};
+
+/// Known monthly caps (Linode bills hourly up to a fixed monthly price).
+fn linode_monthly(instance_type: &str, hourly: f64) -> f64 {
+    match instance_type {
+        "g6-nanode-1" => 5.0,
+        "g6-standard-2" => 24.0,
+        "g6-standard-4" => 48.0,
+        "g6-dedicated-4" => 72.0,
+        _ => hourly * 730.0,
+    }
+}
+
+fn server_info(l: LinodeInstance, hourly: f64) -> ServerInfo {
+    // Linode datetimes are "YYYY-MM-DDTHH:MM:SS" (UTC, no offset).
+    let created_at = l.created.as_deref().and_then(|c| {
+        let fmt =
+            time::macros::format_description!("[year]-[month]-[day]T[hour]:[minute]:[second]");
+        time::PrimitiveDateTime::parse(c, &fmt)
+            .ok()
+            .map(|t| t.assume_utc().unix_timestamp())
+    });
+    let specs = l.specs.as_ref();
+    ServerInfo {
+        provider: Provider::Linode,
+        id: l.id.to_string(),
+        label: l.label.clone().unwrap_or_else(|| l.id.to_string()),
+        region: l.region.clone(),
+        instance_type: l.kind.clone(),
+        state: map_state(&l.status),
+        ipv4: l.ipv4.first().cloned(),
+        ipv6: l.ipv6.clone(),
+        tags: l.tags.clone(),
+        created_at,
+        vcpus: specs.map(|s| s.vcpus).unwrap_or(0),
+        memory_mb: specs.map(|s| s.memory).unwrap_or(0),
+        disk_gb: specs.map(|s| s.disk / 1024).unwrap_or(0),
+        monthly: linode_monthly(&l.kind, hourly),
+        hourly,
+        currency: "USD",
+    }
+}
+
+/// Parse one /linode/instances page body → (rows, total pages).
+fn parse_instances_page(body: &str, price: impl Fn(&str) -> f64) -> Result<(Vec<ServerInfo>, u32)> {
+    #[derive(Deserialize)]
+    struct Page {
+        data: Vec<LinodeInstance>,
+        #[serde(default)]
+        pages: u32,
+    }
+    let page: Page = serde_json::from_str(body)
+        .map_err(|e| CoreError::Network(format!("Linode API: bad response ({e})")))?;
+    let pages = page.pages.max(1);
+    Ok((
+        page.data
+            .into_iter()
+            .map(|l| {
+                let hourly = price(&l.kind);
+                server_info(l, hourly)
+            })
+            .collect(),
+        pages,
+    ))
+}
+
+/// Parse a /linode/instances/{id}/stats body. Timestamps arrive in MILLISECONDS and
+/// `netv4` series are BITS/second — both normalized here (seconds, bytes/s).
+fn parse_stats(body: &str) -> Result<ServerMetrics> {
+    let v: serde_json::Value = serde_json::from_str(body)
+        .map_err(|e| CoreError::Network(format!("Linode API: bad response ({e})")))?;
+    let data = v.get("data").cloned().unwrap_or_default();
+
+    let series = |val: Option<&serde_json::Value>, scale: f64| -> Vec<MetricPoint> {
+        val.and_then(|s| s.as_array())
+            .map(|pairs| {
+                pairs
+                    .iter()
+                    .filter_map(|p| {
+                        let ts_ms = p.get(0)?.as_f64()?;
+                        let value = p.get(1)?.as_f64()? * scale;
+                        Some(MetricPoint {
+                            ts: (ts_ms / 1000.0) as i64,
+                            value,
+                        })
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+
+    Ok(ServerMetrics {
+        cpu_pct: series(data.get("cpu"), 1.0),
+        // bits/s → bytes/s
+        net_in_bps: series(data.get("netv4").and_then(|n| n.get("in")), 1.0 / 8.0),
+        net_out_bps: series(data.get("netv4").and_then(|n| n.get("out")), 1.0 / 8.0),
+        disk_io: series(data.get("io").and_then(|i| i.get("io")), 1.0),
+    })
+}
+
+#[async_trait]
+impl ServerManager for LinodeClient {
+    async fn list_all(&self) -> Result<Vec<ServerInfo>> {
+        let mut out = Vec::new();
+        let mut page: u32 = 1;
+        loop {
+            let resp = self
+                .http
+                .get(format!("{API}/linode/instances?page={page}&page_size=100"))
+                .bearer_auth(&self.token)
+                .send()
+                .await
+                .map_err(Self::net)?;
+            let status = resp.status();
+            let text = resp.text().await.map_err(Self::net)?;
+            if !status.is_success() {
+                return Err(Self::linode_reason(status, &text));
+            }
+            let (mut servers, pages) = parse_instances_page(&text, |t| self.price_per_hour(t))?;
+            out.append(&mut servers);
+            if page >= pages {
+                break;
+            }
+            page += 1;
+        }
+        Ok(out)
+    }
+
+    async fn metrics(&self, id: &str, _window_secs: u32) -> Result<ServerMetrics> {
+        // Linode's stats endpoint always returns ~24h of 5-minute averages; callers trim.
+        let resp = self
+            .http
+            .get(format!("{API}/linode/instances/{id}/stats"))
+            .bearer_auth(&self.token)
+            .send()
+            .await
+            .map_err(Self::net)?;
+        let status = resp.status();
+        let text = resp.text().await.map_err(Self::net)?;
+        if !status.is_success() {
+            return Err(Self::linode_reason(status, &text));
+        }
+        parse_stats(&text)
+    }
+
+    async fn power(&self, id: &str, action: PowerAction) -> Result<()> {
+        let name = match action {
+            PowerAction::Boot => "boot",
+            PowerAction::Shutdown => "shutdown",
+            PowerAction::Reboot => "reboot",
+        };
+        LinodeClient::power(self, id, name).await
+    }
+}
+
+#[cfg(test)]
+mod manager_tests {
+    use super::*;
+
+    #[test]
+    fn parses_paginated_instances_with_specs() {
+        let body = r#"{
+          "data": [{
+            "id": 777, "region": "us-east", "type": "g6-nanode-1", "status": "running",
+            "ipv4": ["50.1.2.3"], "tags": ["sentinel-sync"],
+            "label": "sentinel-sync", "ipv6": "2600:db8::1/128",
+            "created": "2025-11-02T08:30:00",
+            "specs": {"vcpus": 1, "memory": 1024, "disk": 25600}
+          }],
+          "page": 1, "pages": 3, "results": 21
+        }"#;
+        let (rows, pages) = parse_instances_page(body, |_| 0.0075).unwrap();
+        assert_eq!(pages, 3);
+        let s = &rows[0];
+        assert_eq!(s.provider, Provider::Linode);
+        assert_eq!(s.label, "sentinel-sync");
+        assert_eq!(s.state, InstanceState::Running);
+        assert_eq!(s.vcpus, 1);
+        assert_eq!(s.memory_mb, 1024);
+        assert_eq!(s.disk_gb, 25);
+        assert!((s.monthly - 5.0).abs() < 1e-9);
+        assert_eq!(s.currency, "USD");
+        assert!(s.created_at.is_some());
+    }
+
+    #[test]
+    fn old_minimal_instance_shape_still_parses() {
+        // The exact shape list_ephemeral consumes — the new Option fields must not break it.
+        let body = r#"{"data": [{"id": 1, "region": "us-east", "type": "g6-nanode-1",
+            "status": "offline", "ipv4": [], "tags": ["sentinel-ephemeral"]}], "pages": 1}"#;
+        let (rows, pages) = parse_instances_page(body, |_| 0.0075).unwrap();
+        assert_eq!(pages, 1);
+        assert_eq!(rows[0].state, InstanceState::Stopped);
+        assert_eq!(rows[0].label, "1"); // falls back to the id
+    }
+
+    #[test]
+    fn stats_normalize_ms_timestamps_and_bits() {
+        let body = r#"{"data": {
+            "cpu": [[1700000000000, 7.5]],
+            "netv4": {"in": [[1700000000000, 8000.0]], "out": [[1700000000000, 16000.0]]},
+            "io": {"io": [[1700000000000, 42.0]]}
+        }, "title": "stats"}"#;
+        let m = parse_stats(body).unwrap();
+        assert_eq!(m.cpu_pct[0].ts, 1700000000); // ms → s
+        assert!((m.cpu_pct[0].value - 7.5).abs() < 1e-9);
+        assert!((m.net_in_bps[0].value - 1000.0).abs() < 1e-9); // bits → bytes
+        assert!((m.net_out_bps[0].value - 2000.0).abs() < 1e-9);
+        assert!((m.disk_io[0].value - 42.0).abs() < 1e-9);
     }
 }

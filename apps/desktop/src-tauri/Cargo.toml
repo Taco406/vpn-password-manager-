@@ -20,7 +20,7 @@ tauri-build = { version = "2", features = [] }
 [dependencies]
 # live-linode compiles the real Linode CloudProvider alongside the default mocks (opt-in
 # real VPN); live-hibp enables the real Have-I-Been-Pwned breach check for the health audit.
-sentinel-core = { workspace = true, features = ["live-linode", "live-hibp"] }
+sentinel-core = { workspace = true, features = ["live-linode", "live-hibp", "live-hetzner"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
 time = { workspace = true }

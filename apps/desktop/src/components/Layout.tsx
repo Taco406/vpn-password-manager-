@@ -1,5 +1,5 @@
 import { NavLink, Outlet } from "react-router-dom";
-import { Mountain, KeyRound, Globe2, HeartPulse, Smartphone, Settings as Cog, Lock, FlaskConical, Radar } from "lucide-react";
+import { Mountain, KeyRound, Globe2, HeartPulse, Smartphone, Settings as Cog, Lock, FlaskConical, Radar, Server } from "lucide-react";
 import { useApp } from "../stores/app";
 import { bridge } from "../bridge";
 import { ClipboardCountdown } from "./ClipboardCountdown";
@@ -9,6 +9,7 @@ const nav = [
   { to: "/vpn", label: "VPN", icon: Globe2 },
   { to: "/health", label: "Health", icon: HeartPulse },
   { to: "/devices", label: "Devices", icon: Smartphone },
+  { to: "/servers", label: "Servers", icon: Server },
   { to: "/tools", label: "Tools", icon: Radar },
   { to: "/experimental", label: "Experimental", icon: FlaskConical },
   { to: "/settings", label: "Settings", icon: Cog },

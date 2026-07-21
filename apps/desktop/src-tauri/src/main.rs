@@ -11,6 +11,7 @@ mod commands;
 mod hello;
 mod net;
 mod nmhost;
+mod servers;
 mod state;
 mod sync;
 mod vpn;
@@ -150,6 +151,11 @@ fn main() {
             net::net_myip,
             net::net_ping,
             net::net_dns,
+            servers::servers_config,
+            servers::servers_set_hetzner_token,
+            servers::servers_list,
+            servers::servers_metrics,
+            servers::servers_power,
         ])
         .build(tauri::generate_context!())
         .expect("error while building NorthKey")

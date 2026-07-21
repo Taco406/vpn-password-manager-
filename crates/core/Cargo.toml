@@ -14,6 +14,7 @@ mock = []
 # Real cloud + external network paths. Opt-in; never enabled in normal `cargo test`.
 live-linode = []
 live-hibp = []
+live-hetzner = []
 # Platform key-wrapper implementations (compile-checked only on their targets).
 platform-windows = []
 platform-macos = []
