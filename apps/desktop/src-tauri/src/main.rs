@@ -26,7 +26,7 @@ fn main() {
         return;
     }
 
-    // Headless VPN self-test: `SENTINEL --vpn-selftest [region]` runs a real end-to-end connect
+    // Headless VPN self-test: `NorthKey --vpn-selftest [region]` runs a real end-to-end connect
     // (minimal routing, no full-tunnel), verifies the WireGuard handshake, destroys the node, and
     // exits with 0/1. Lets the shipped app double as a live VPN tester for a human or a CI runner.
     if let Some(region) = vpn::selftest_region() {
@@ -53,7 +53,7 @@ fn main() {
                     app.manage(s);
                 }
                 Err(e) => {
-                    eprintln!("SENTINEL: could not open persistent vault ({e}); running in-memory");
+                    eprintln!("NorthKey: could not open persistent vault ({e}); running in-memory");
                     app.manage(state::AppState::new_memory_fallback());
                 }
             }
@@ -152,7 +152,7 @@ fn main() {
             net::net_dns,
         ])
         .build(tauri::generate_context!())
-        .expect("error while building SENTINEL")
+        .expect("error while building NorthKey")
         .run(|_app, event| {
             // SAFETY: on exit, tear down any kill-switch rules so quitting the app can never
             // leave the user's internet blocked (self-heal on next launch also covers crashes).

@@ -166,7 +166,7 @@ fn reunlock(state: &State<AppState>) -> R<()> {
 pub fn unlock_platform(state: State<AppState>) -> R<()> {
     let dir = { state.inner.lock().unwrap().data_dir.clone() };
     if crate::state::require_hello(&dir)
-        && !crate::hello::verify("Unlock SENTINEL").map_err(|m| err("hello", m))?
+        && !crate::hello::verify("Unlock NorthKey").map_err(|m| err("hello", m))?
     {
         return Err(err("hello", "Windows Hello verification did not pass"));
     }
@@ -197,7 +197,7 @@ pub fn hello_set(state: State<AppState>, enabled: bool) -> R<()> {
         if !crate::hello::available() {
             return Err(err("hello", "Windows Hello isn't set up on this device"));
         }
-        if !crate::hello::verify("Confirm Windows Hello for SENTINEL")
+        if !crate::hello::verify("Confirm Windows Hello for NorthKey")
             .map_err(|m| err("hello", m))?
         {
             return Err(err("hello", "Windows Hello verification cancelled"));

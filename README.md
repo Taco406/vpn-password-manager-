@@ -1,11 +1,13 @@
-# SENTINEL
+# NorthKey
+
+> **Your network. Your passwords. Your control.**
 
 **Personal security suite — on-demand ephemeral WireGuard VPN + zero-knowledge password
 manager.** One desktop app, one Chrome extension, one iPhone companion key, one
 lightweight sync backend. Single-user / family. Local-first: the vault and VPN work
 fully offline with no account; the server is optional.
 
-> This repository is a from-scratch build against the SENTINEL v1 brief. The crypto,
+> This repository is a from-scratch build against the original SENTINEL v1 brief (the product is now NorthKey). The crypto,
 > vault, VPN control plane, and sync API are real and tested. Platform integrations that
 > require hardware/cloud/OS access the CI box doesn't have (biometrics, WireGuard kernel,
 > Linode, Apple Secure Enclave) sit behind traits with a real implementation coded to the
@@ -93,7 +95,7 @@ workflow builds all three on their own runners:
 just release 0.2.0     # bumps version, tags v0.2.0, pushes → CI publishes the Release
 ```
 
-Installed apps **update themselves**: SENTINEL uses Tauri's signed updater, so on launch
+Installed apps **update themselves**: NorthKey uses Tauri's signed updater, so on launch
 it checks the latest Release's `latest.json`, and applies any newer signed version
 (there's also a *Check for updates* button in Settings). One-time setup (generating the
 updater signing key + adding it as a repo secret) is in

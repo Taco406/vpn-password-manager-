@@ -56,7 +56,7 @@ pub async fn net_myip() -> Result<MyIp, String> {
         .map_err(estr)?;
     let resp = client
         .get("https://ipapi.co/json/")
-        .header("User-Agent", "SENTINEL")
+        .header("User-Agent", "NorthKey")
         .send()
         .await
         .map_err(|e| {

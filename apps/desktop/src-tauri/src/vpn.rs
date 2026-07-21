@@ -410,13 +410,13 @@ fn preflight_vpn() -> std::result::Result<(), String> {
     if !wireguard_installed().0 {
         return Err(format!(
             "WireGuard isn't installed on this PC, so the tunnel can't come up. Install it from \
-             {WG_DOWNLOAD_URL} (on Windows, then launch SENTINEL as Administrator) and try Connect \
+             {WG_DOWNLOAD_URL} (on Windows, then launch NorthKey as Administrator) and try Connect \
              again — no server was created."
         ));
     }
     if cfg!(windows) && !is_elevated() {
         return Err(
-            "SENTINEL needs to run as Administrator to create the WireGuard tunnel. Close SENTINEL, \
+            "NorthKey needs to run as Administrator to create the WireGuard tunnel. Close NorthKey, \
              right-click it, choose \"Run as administrator\", then Connect again — no server was created."
                 .into(),
         );
@@ -495,8 +495,8 @@ impl WgController for SystemWgController {
                 let es = e.to_string();
                 if es.contains("Access is denied") || es.contains("denied") {
                     return Err(wg_err(
-                        "SENTINEL must run as Administrator to create the WireGuard tunnel. \
-                         Close SENTINEL, right-click it, choose \"Run as administrator\", then Connect again.",
+                        "NorthKey must run as Administrator to create the WireGuard tunnel. \
+                         Close NorthKey, right-click it, choose \"Run as administrator\", then Connect again.",
                     ));
                 }
                 return Err(e);

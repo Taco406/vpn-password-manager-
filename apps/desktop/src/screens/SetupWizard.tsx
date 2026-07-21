@@ -68,7 +68,7 @@ export function SetupWizard() {
       <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} className="w-[560px]">
         <div className="mb-6 flex items-center gap-3">
           <Shield className="text-accent" size={26} />
-          <span className="text-xl font-bold tracking-tight">Set up SENTINEL</span>
+          <span className="text-xl font-bold tracking-tight">Set up NorthKey</span>
         </div>
 
         {/* Segmented stepper — copied from Onboarding.tsx */}
@@ -84,9 +84,9 @@ export function SetupWizard() {
 
         {step === "welcome" && (
           <Card>
-            <h2 className="text-lg font-semibold">Welcome to SENTINEL</h2>
+            <h2 className="text-lg font-semibold">Welcome to NorthKey</h2>
             <p className="mt-2 text-sm text-[var(--text-secondary)]">
-              SENTINEL works out of the box. These optional steps set up the extras — you can skip any
+              NorthKey works out of the box. These optional steps set up the extras — you can skip any
               of them and change your mind later in Settings.
             </p>
             <Button onClick={next} className="mt-5 w-full">Get started</Button>
@@ -277,7 +277,7 @@ function VpnStep({ onBack, onNext }: StepProps) {
         </StatusRow>
         {wg?.elevationMatters && (
           <StatusRow ok={!!wg.elevated}>
-            {wg.elevated ? "Running as administrator" : "Not elevated — relaunch SENTINEL as administrator"}
+            {wg.elevated ? "Running as administrator" : "Not elevated — relaunch NorthKey as administrator"}
           </StatusRow>
         )}
       </div>

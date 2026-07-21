@@ -104,7 +104,7 @@ export function Settings() {
               Telemetry <Badge tone="ok">Off · nothing to send</Badge>
             </div>
             <p className="text-xs text-[var(--text-secondary)]">
-              SENTINEL ships with no analytics endpoints. This switch is permanently off — there is nowhere for data to go.
+              NorthKey ships with no analytics endpoints. This switch is permanently off — there is nowhere for data to go.
             </p>
           </Card>
 
@@ -204,7 +204,7 @@ function WireGuardMonitor() {
         <Badge tone={tone as "neutral" | "danger" | "ok" | "warn"}>{label}</Badge>
       </div>
       <p className="mb-3 text-xs text-[var(--text-secondary)]">
-        The real VPN needs the WireGuard tunnel driver installed, and (on Windows) SENTINEL running
+        The real VPN needs the WireGuard tunnel driver installed, and (on Windows) NorthKey running
         as administrator. This monitor shows both so a Connect doesn't fail after a node is created.
       </p>
 
@@ -220,7 +220,7 @@ function WireGuardMonitor() {
         </Row>
         {st?.elevationMatters && (
           <Row ok={!!st?.elevated}>
-            {st?.elevated ? "Running as administrator" : "Not elevated — relaunch SENTINEL as administrator"}
+            {st?.elevated ? "Running as administrator" : "Not elevated — relaunch NorthKey as administrator"}
           </Row>
         )}
       </div>
@@ -244,7 +244,7 @@ function WireGuardMonitor() {
       {repairMsg && <p className="mt-2 text-xs text-[var(--text-muted)]">{repairMsg}</p>}
       <p className="mt-2 text-[11px] text-[var(--text-muted)]">
         If a failed Connect ever leaves you without internet, click <span className="font-medium">Restore
-        internet</span> above — it removes any leftover SENTINEL tunnel, clears firewall rules, and scrubs
+        internet</span> above — it removes any leftover NorthKey tunnel, clears firewall rules, and scrubs
         the routes and DNS policy WireGuard can leave behind (the app also does this automatically on
         disconnect and on launch). Last resort if it persists: uninstall WireGuard (Settings → Apps) and
         reboot, which removes any stuck adapter.
@@ -374,7 +374,7 @@ function SplitTunnel({ s, patch }: { s: SettingsT; patch: (p: Partial<SettingsT>
           {hint && <p className="mt-1 text-[11px] text-[var(--danger)]">{hint}</p>}
           <p className="mt-2 text-[11px] text-[var(--text-muted)]">
             Example: <span className="mono">10.0.0.0/8</span>, <span className="mono">192.168.0.0/16</span>.
-            If this list is empty (or every entry is invalid), SENTINEL safely falls back to full tunnel
+            If this list is empty (or every entry is invalid), NorthKey safely falls back to full tunnel
             so you're never left routing nothing.
           </p>
         </div>
@@ -436,7 +436,7 @@ function RealVpn() {
       <p className="mb-3 text-xs text-[var(--text-secondary)]">
         Experimental. Paste a Linode API token to make Connect spin up a real, ephemeral WireGuard
         exit node (billed ~$0.01/hr while connected, destroyed on Disconnect). Requires{" "}
-        <span className="mono">WireGuard for Windows</span> installed, and SENTINEL run as
+        <span className="mono">WireGuard for Windows</span> installed, and NorthKey run as
         administrator. Leave blank and Save to clear the token and return to the simulation. The
         token is stored only in Windows Credential Manager.
       </p>
@@ -626,7 +626,7 @@ function Updates() {
         Updates {ver && <Badge tone="accent">v{ver}</Badge>}
       </div>
       <p className="mb-3 text-xs text-[var(--text-secondary)]">
-        SENTINEL checks for signed updates on launch and installs them automatically. You can also check now.
+        NorthKey checks for signed updates on launch and installs them automatically. You can also check now.
       </p>
       <div className="flex items-center gap-3">
         <button
@@ -732,7 +732,7 @@ function AppLock() {
         </Badge>
       </div>
       <p className="mb-3 text-xs text-[var(--text-secondary)]">
-        SENTINEL opens without a login by default. Add a <span className="font-medium">master password</span>{" "}
+        NorthKey opens without a login by default. Add a <span className="font-medium">master password</span>{" "}
         to encrypt the vault behind it, and optionally require a code from your{" "}
         <span className="font-medium">authenticator app</span> (Google Authenticator, Authy…) as a second step.
       </p>
@@ -906,7 +906,7 @@ function HelloRow() {
       setSt({ ...st, enabled: !st.enabled });
       setMsg(
         !st.enabled
-          ? "On — SENTINEL will ask for Windows Hello to unlock."
+          ? "On — NorthKey will ask for Windows Hello to unlock."
           : "Off — the vault opens with your Windows sign-in.",
       );
     } catch (e) {

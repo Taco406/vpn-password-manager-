@@ -105,7 +105,7 @@ function NetGuard() {
         <Badge tone={auto ? "ok" : "accent"}>{auto ? "On · untrusted Wi-Fi" : "Off"}</Badge>
       </div>
       <p className="mb-3 text-xs text-[var(--text-secondary)]">
-        Experimental (Windows-first) and only active in real-VPN (Linode) mode. When on, SENTINEL
+        Experimental (Windows-first) and only active in real-VPN (Linode) mode. When on, NorthKey
         watches your Wi-Fi and automatically spins up the tunnel to your default region whenever
         you join a network that isn't on your trusted list — coffee shops, airports, hotels. It
         never auto-connects on a trusted network, and it waits a few minutes after you manually
@@ -192,7 +192,7 @@ function NetGuard() {
         <p className="mb-2 text-xs text-[var(--text-secondary)]">
           When the kill switch is on (Security → &ldquo;Kill switch on by default&rdquo;), connecting
           adds Windows Firewall rules that block traffic outside the tunnel, so a dropped VPN can't
-          leak. SENTINEL removes them on disconnect, on launch, and on exit. If you ever get stuck
+          leak. NorthKey removes them on disconnect, on launch, and on exit. If you ever get stuck
           without internet, this button force-removes every rule right away.
         </p>
         <button onClick={clearKs} disabled={busy} className={btnCls}>
@@ -243,7 +243,7 @@ function BrowserAutofill() {
       await autofillUninstall();
       const s = await autofillStatus();
       setInstalled(s.installed);
-      setStatus("Disabled. Chrome and Edge will no longer talk to SENTINEL.");
+      setStatus("Disabled. Chrome and Edge will no longer talk to NorthKey.");
     } catch (e) {
       setStatus(`Couldn't disable: ${errMsg(e)}`);
     }
@@ -269,7 +269,7 @@ function BrowserAutofill() {
         <Badge tone={installed ? "ok" : "accent"}>{installed ? "On · Chrome + Edge" : "Off"}</Badge>
       </div>
       <p className="mb-3 text-xs text-[var(--text-secondary)]">
-        Experimental (Windows-first). Fill logins straight into Chrome and Edge. SENTINEL acts as
+        Experimental (Windows-first). Fill logins straight into Chrome and Edge. NorthKey acts as
         the browser's native-messaging host itself — no extra program to install. A site only ever
         receives its own credentials, and nothing is available while the vault is locked.
       </p>

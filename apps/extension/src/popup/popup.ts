@@ -103,7 +103,7 @@ async function render(query = "") {
   if (!status || status.locked) {
     app.replaceChildren();
     const box = node("div", "locked");
-    box.appendChild(node("b", undefined, "SENTINEL is locked"));
+    box.appendChild(node("b", undefined, "NorthKey is locked"));
     box.appendChild(
       node("span", undefined, "Open the desktop app and unlock to search your vault."),
     );

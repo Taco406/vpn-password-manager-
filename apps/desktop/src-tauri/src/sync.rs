@@ -128,7 +128,7 @@ fn device_name() -> String {
         .or_else(|| std::env::var("HOSTNAME").ok())
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| "SENTINEL desktop".to_string())
+        .unwrap_or_else(|| "NorthKey desktop".to_string())
 }
 
 /// Decode the `email` claim from a Google id_token (a JWT) for display only. No signature
@@ -318,15 +318,15 @@ impl TokenExchanger for HttpTokenExchanger {
 // loopback listener for the OAuth redirect
 // ---------------------------------------------------------------------------
 
-const CALLBACK_OK_HTML: &str = "<!doctype html><html><head><meta charset=utf-8><title>SENTINEL</title>\
+const CALLBACK_OK_HTML: &str = "<!doctype html><html><head><meta charset=utf-8><title>NorthKey</title>\
 <style>body{font-family:system-ui,sans-serif;background:#0a0f14;color:#e6edf3;display:grid;place-items:center;height:100vh;margin:0}\
 .c{text-align:center}h1{color:#22d3ee;font-weight:600}</style></head>\
-<body><div class=c><h1>Signed in</h1><p>You can close this tab and return to SENTINEL.</p></div></body></html>";
+<body><div class=c><h1>Signed in</h1><p>You can close this tab and return to NorthKey.</p></div></body></html>";
 
-const CALLBACK_ERR_HTML: &str = "<!doctype html><html><head><meta charset=utf-8><title>SENTINEL</title>\
+const CALLBACK_ERR_HTML: &str = "<!doctype html><html><head><meta charset=utf-8><title>NorthKey</title>\
 <style>body{font-family:system-ui,sans-serif;background:#0a0f14;color:#e6edf3;display:grid;place-items:center;height:100vh;margin:0}\
 .c{text-align:center}h1{color:#f87171;font-weight:600}</style></head>\
-<body><div class=c><h1>Sign-in failed</h1><p>You can close this tab and try again in SENTINEL.</p></div></body></html>";
+<body><div class=c><h1>Sign-in failed</h1><p>You can close this tab and try again in NorthKey.</p></div></body></html>";
 
 /// Run the full PKCE loop: bind an ephemeral loopback port, open the browser, wait for the
 /// single `/callback` GET, then exchange the code for tokens. ~2-minute overall timeout.
@@ -1399,7 +1399,7 @@ pub async fn sync_server_destroy(state: State<'_, AppState>) -> Result<(), Strin
 // and pull the vault. The code is a full-access secret (like the recovery kit) — shown once.
 // ---------------------------------------------------------------------------
 
-/// Prefix identifying a SENTINEL device-join code (version 1).
+/// Prefix identifying a NorthKey device-join code (version 1).
 const JOIN_PREFIX: &str = "SNTL1.";
 
 /// The payload packed into a device-join code. base64url(JSON) of this, behind `JOIN_PREFIX`.
@@ -1540,7 +1540,7 @@ pub async fn sync_pair_complete(
 ) -> Result<PairCompleteOut, String> {
     // Parse + validate the code first — no state changes on malformed/typo'd input.
     let body = code.trim().strip_prefix(JOIN_PREFIX).ok_or(
-        "That doesn't look like a SENTINEL device code. Copy the whole code from the other device.",
+        "That doesn't look like a NorthKey device code. Copy the whole code from the other device.",
     )?;
     let json = URL_SAFE_NO_PAD.decode(body.as_bytes()).map_err(|_| {
         "The device code is malformed or was cut off. Copy the whole thing and try again."
@@ -1551,7 +1551,7 @@ pub async fn sync_pair_complete(
     })?;
     if bundle.v != 1 {
         return Err(
-            "This device code is from a newer version of SENTINEL. Update this app and try again."
+            "This device code is from a newer version of NorthKey. Update this app and try again."
                 .into(),
         );
     }
