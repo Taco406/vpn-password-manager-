@@ -8,6 +8,31 @@ The format follows [Keep a Changelog](https://keepachangelog.com/). Versions are
 [semantic](https://semver.org/). **Add a new `## [x.y.z]` section at the top in the same PR
 that bumps the app version** — that's how "the changelog updates on every merge."
 
+## [0.1.41] — 2026-07-21
+
+### Added
+- **Attack monitor for your sync server.** A new **Attack monitor** panel on the Devices screen
+  shows what's happening at your sign-in door: a 24-hour tally of **failed sign-ins**, **token
+  replays**, **blocked IPs**, and successful **sign-ins**, plus a live feed of recent attempts
+  (each with its outcome, source IP, and time). The server now records the outcome of every
+  sign-in attempt — a wrong bootstrap token, a rejected Google token, a bad 2FA code, a
+  rate-limit trip, or a **refresh-token replay** (a strong signal that a session token was
+  stolen). Nothing sensitive is stored: no passwords and no vault data, only the outcome, the IP,
+  and the timestamp — and your vault stays end-to-end encrypted exactly as before.
+- **Block / unblock IPs.** Paste an address to block it (permanently, or type nothing to keep it
+  simple), or hit **Block** next to any suspicious entry in the feed. Unblock the same way. A
+  blocked IP is turned away before it ever reaches the password check.
+- **Opt-in auto-ban.** Set `SENTINEL_AUTOBAN_THRESHOLD` on the server (e.g. `20`) and it will
+  automatically, temporarily ban an IP that racks up that many failed attempts in a short window
+  — with a built-in guard that never bans an address that has signed in successfully in the last
+  day, so you can't lock yourself out by fat-fingering a code. Off by default (detection only);
+  the panel shows which mode your server is in.
+
+### Notes
+- Servers deployed before this release don't have the monitor yet — the panel says so; redeploy
+  (Destroy, then Deploy) to enable it. Your vault is untouched and re-uploads after you sign back
+  in.
+
 ## [0.1.40] — 2026-07-21
 
 ### Added

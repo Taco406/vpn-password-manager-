@@ -2,8 +2,9 @@
 
 use crate::auth;
 use crate::error::{ApiError, ApiResult};
+use crate::security;
 use crate::state::{AppState, Auth, PendingAuth};
-use axum::extract::{ConnectInfo, Path, State};
+use axum::extract::{ConnectInfo, Path, Query, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::routing::{get, post};
 use axum::{Json, Router};
@@ -37,6 +38,10 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/unlock-requests/{id}", get(unlock_get))
         .route("/v1/unlock-requests/{id}/respond", post(unlock_respond))
         .route("/v1/push/register", post(push_register))
+        .route("/v1/security-events", get(security_events_list))
+        .route("/v1/security-summary", get(security_summary))
+        .route("/v1/security-events/ban", post(security_ban))
+        .route("/v1/security-events/unban", post(security_unban))
         .with_state(state)
 }
 
@@ -74,11 +79,18 @@ async fn auth_google(
     peer: PeerAddr,
     Json(req): Json<GoogleReq>,
 ) -> ApiResult<Json<PendingResp>> {
-    rate_limit(&st, &headers, peer.0, "auth_google", 10, 60)?;
+    let ip = guard(&st, &headers, peer.0, "auth_google", 10, 60).await?;
     if req.device.name.len() > 64 || !valid_platform(&req.device.platform) {
         return Err(ApiError::BadRequest("invalid device".into()));
     }
-    let claims = st.google.verify(&req.id_token).await?;
+    let claims = match st.google.verify(&req.id_token).await {
+        Ok(c) => c,
+        Err(e) => {
+            security::record(&st.pool, None, "google_reject", &ip, None).await;
+            security::maybe_autoban(&st, &ip).await;
+            return Err(e);
+        }
+    };
 
     // Upsert account by google_sub.
     let account: Uuid = sqlx::query_scalar(
@@ -136,13 +148,15 @@ async fn auth_bootstrap(
     peer: PeerAddr,
     Json(req): Json<BootstrapReq>,
 ) -> ApiResult<Json<TokensResp>> {
-    rate_limit(&st, &headers, peer.0, "auth_bootstrap", 10, 60)?;
+    let ip = guard(&st, &headers, peer.0, "auth_bootstrap", 10, 60).await?;
     let expected = st
         .config
         .bootstrap_token
         .as_deref()
         .ok_or(ApiError::Unauthorized)?;
     if !auth::constant_time_eq(req.token.as_bytes(), expected.as_bytes()) {
+        security::record(&st.pool, None, "login_fail_bootstrap", &ip, None).await;
+        security::maybe_autoban(&st, &ip).await;
         return Err(ApiError::Unauthorized);
     }
     if req.device.name.len() > 64 || !valid_platform(&req.device.platform) {
@@ -169,7 +183,9 @@ async fn auth_bootstrap(
     .bind(&req.device.platform)
     .fetch_one(&st.pool)
     .await?;
-    Ok(Json(mint_session(&st, account, device, None).await?))
+    let tokens = mint_session(&st, account, device, None).await?;
+    security::record(&st.pool, Some(account), "login_ok", &ip, Some("bootstrap")).await;
+    Ok(Json(tokens))
 }
 
 // --- auth: totp -----------------------------------------------------------
@@ -265,14 +281,15 @@ async fn totp_verify(
     p: PendingAuth,
     Json(req): Json<TotpVerifyReq>,
 ) -> ApiResult<Json<TokensResp>> {
-    rate_limit(
+    let ip = guard(
         &st,
         &headers,
         peer.0,
         &format!("totp:{}", p.account),
         10,
         60,
-    )?;
+    )
+    .await?;
 
     // Enforce lockout.
     let locked: Option<time::OffsetDateTime> =
@@ -283,6 +300,7 @@ async fn totp_verify(
             .flatten();
     if let Some(until) = locked {
         if until > time::OffsetDateTime::now_utc() {
+            security::record(&st.pool, Some(p.account), "totp_lockout", &ip, None).await;
             return Err(ApiError::LockedOut);
         }
     }
@@ -308,6 +326,8 @@ async fn totp_verify(
         .bind(p.account)
         .execute(&st.pool)
         .await?;
+        security::record(&st.pool, Some(p.account), "totp_fail", &ip, None).await;
+        security::maybe_autoban(&st, &ip).await;
         return Err(ApiError::Unauthorized);
     }
 
@@ -328,6 +348,7 @@ async fn totp_verify(
         .await?;
 
     let tokens = mint_session(&st, p.account, p.device, None).await?;
+    security::record(&st.pool, Some(p.account), "login_ok", &ip, Some("totp")).await;
     Ok(Json(tokens))
 }
 
@@ -367,8 +388,11 @@ struct RefreshReq {
 
 async fn auth_refresh(
     State(st): State<AppState>,
+    headers: HeaderMap,
+    peer: PeerAddr,
     Json(req): Json<RefreshReq>,
 ) -> ApiResult<Json<TokensResp>> {
+    let ip = guard(&st, &headers, peer.0, "auth_refresh", 30, 60).await?;
     let hash = auth::hash_refresh(&req.refresh_token);
     let row: Option<(
         Uuid,
@@ -394,6 +418,8 @@ async fn auth_refresh(
         .bind(device)
         .execute(&st.pool)
         .await?;
+        security::record(&st.pool, Some(account), "refresh_reuse", &ip, None).await;
+        security::maybe_autoban(&st, &ip).await;
         return Err(ApiError::Unauthorized);
     }
     if expires < time::OffsetDateTime::now_utc() {
@@ -806,6 +832,109 @@ async fn push_register(
 
 // --- helpers --------------------------------------------------------------
 
+// --- attack monitor (security events + IP bans) ---------------------------
+
+#[derive(Deserialize)]
+struct EventsQuery {
+    /// Only events after this unix timestamp (default 0 = all recent).
+    since: Option<i64>,
+    limit: Option<i64>,
+}
+
+/// One row from `security_events` as read for the API: id, kind, ip (text), detail, created_at.
+type EventRow = (
+    Uuid,
+    String,
+    Option<String>,
+    Option<String>,
+    time::OffsetDateTime,
+);
+
+/// Recent security events, newest first. Authed (any signed-in device on the personal account).
+async fn security_events_list(
+    State(st): State<AppState>,
+    _a: Auth,
+    Query(q): Query<EventsQuery>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let limit = q.limit.unwrap_or(100).clamp(1, 500);
+    let since = q.since.unwrap_or(0);
+    let rows: Vec<EventRow> = sqlx::query_as(
+        "SELECT id, kind, ip::text, detail, created_at FROM security_events
+             WHERE created_at > to_timestamp($1) ORDER BY created_at DESC LIMIT $2",
+    )
+    .bind(since as f64)
+    .bind(limit)
+    .fetch_all(&st.pool)
+    .await?;
+    let events: Vec<_> = rows
+        .into_iter()
+        .map(|(id, kind, ip, detail, created)| {
+            json!({
+                "id": id, "kind": kind, "ip": ip, "detail": detail,
+                "createdAt": created.unix_timestamp(),
+            })
+        })
+        .collect();
+    Ok(Json(json!({ "events": events })))
+}
+
+/// 24h counts per event kind + the number of currently-active IP bans (for the panel headline).
+async fn security_summary(
+    State(st): State<AppState>,
+    _a: Auth,
+) -> ApiResult<Json<serde_json::Value>> {
+    let rows: Vec<(String, i64)> = sqlx::query_as(
+        "SELECT kind, count(*) FROM security_events
+         WHERE created_at > now() - interval '24 hours' GROUP BY kind",
+    )
+    .fetch_all(&st.pool)
+    .await?;
+    let mut counts = serde_json::Map::new();
+    for (kind, n) in rows {
+        counts.insert(kind, json!(n));
+    }
+    let banned: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM banned_ips WHERE until IS NULL OR until > now()")
+            .fetch_one(&st.pool)
+            .await?;
+    let autoban = st.config.autoban_threshold > 0;
+    Ok(Json(json!({
+        "last24h": counts,
+        "bannedActive": banned,
+        "autobanEnabled": autoban,
+    })))
+}
+
+#[derive(Deserialize)]
+struct BanReq {
+    ip: String,
+    /// Ban duration in minutes; omit for a permanent ban.
+    minutes: Option<i64>,
+}
+
+async fn security_ban(
+    State(st): State<AppState>,
+    _a: Auth,
+    Json(req): Json<BanReq>,
+) -> ApiResult<StatusCode> {
+    security::ban(&st.pool, &req.ip, req.minutes).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+#[derive(Deserialize)]
+struct UnbanReq {
+    ip: String,
+}
+
+async fn security_unban(
+    State(st): State<AppState>,
+    _a: Auth,
+    Json(req): Json<UnbanReq>,
+) -> ApiResult<StatusCode> {
+    security::unban(&st.pool, &req.ip).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
 /// The peer socket address from the TCP connection, if the server was started with connection
 /// info (`into_make_service_with_connect_info`, i.e. production). `None` under the in-process
 /// test harness (`oneshot`). Infallible so it never blocks a request.
@@ -838,6 +967,34 @@ fn rate_limit(
     if st.limiter.check(&key, max, Duration::from_secs(secs)) {
         Ok(())
     } else {
+        Err(ApiError::RateLimited)
+    }
+}
+
+/// Attack-monitor guard for an auth endpoint: reject banned IPs, enforce the rate limit, and
+/// record the outcome. Returns the caller's IP so the handler can attribute later events to it.
+/// Ban check first (a banned IP never even reaches the limiter or the password compare).
+async fn guard(
+    st: &AppState,
+    headers: &HeaderMap,
+    peer: Option<std::net::SocketAddr>,
+    action: &str,
+    max: usize,
+    secs: u64,
+) -> ApiResult<String> {
+    let ip = client_ip(st, headers, peer);
+    if security::is_banned(&st.pool, &ip).await {
+        security::record(&st.pool, None, "banned_block", &ip, Some(action)).await;
+        return Err(ApiError::Forbidden);
+    }
+    if st
+        .limiter
+        .check(&format!("{action}:{ip}"), max, Duration::from_secs(secs))
+    {
+        Ok(ip)
+    } else {
+        security::record(&st.pool, None, "rate_limited", &ip, Some(action)).await;
+        security::maybe_autoban(st, &ip).await;
         Err(ApiError::RateLimited)
     }
 }

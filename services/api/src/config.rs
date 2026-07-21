@@ -24,6 +24,14 @@ pub struct Config {
     /// `SENTINEL_CORS_ALLOWED_ORIGINS`). Empty = allow no browser origin (the desktop app is a
     /// native client and is unaffected by CORS).
     pub cors_allowed_origins: Vec<String>,
+    /// Attack monitor: auto-ban an IP after this many failed auth events within
+    /// `autoban_window_secs`. `0` disables auto-ban entirely (detection + alerts still run).
+    /// `SENTINEL_AUTOBAN_THRESHOLD`.
+    pub autoban_threshold: u32,
+    /// Sliding window (seconds) counted for auto-ban. `SENTINEL_AUTOBAN_WINDOW_SECS` (default 300).
+    pub autoban_window_secs: i64,
+    /// How long an auto-ban lasts, in minutes. `SENTINEL_AUTOBAN_MINUTES` (default 60).
+    pub autoban_minutes: i64,
 }
 
 /// The ES256 keypair used to sign/verify access JWTs (D18).
@@ -115,6 +123,20 @@ impl Config {
             })
             .unwrap_or_default();
 
+        let env_i64 = |name: &str, default: i64| -> i64 {
+            std::env::var(name)
+                .ok()
+                .and_then(|v| v.trim().parse::<i64>().ok())
+                .filter(|n| *n > 0)
+                .unwrap_or(default)
+        };
+        let autoban_threshold = std::env::var("SENTINEL_AUTOBAN_THRESHOLD")
+            .ok()
+            .and_then(|v| v.trim().parse::<u32>().ok())
+            .unwrap_or(0);
+        let autoban_window_secs = env_i64("SENTINEL_AUTOBAN_WINDOW_SECS", 300);
+        let autoban_minutes = env_i64("SENTINEL_AUTOBAN_MINUTES", 60);
+
         Ok(Config {
             bind,
             database_url,
@@ -124,6 +146,9 @@ impl Config {
             production,
             trust_forwarded_for,
             cors_allowed_origins,
+            autoban_threshold,
+            autoban_window_secs,
+            autoban_minutes,
         })
     }
 
@@ -169,6 +194,9 @@ mod tests {
             production,
             trust_forwarded_for: false,
             cors_allowed_origins: Vec::new(),
+            autoban_threshold: 0,
+            autoban_window_secs: 300,
+            autoban_minutes: 60,
         }
     }
 

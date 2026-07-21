@@ -9,6 +9,9 @@ import {
   UserPlus,
   Link2,
   PlugZap,
+  Shield,
+  ShieldAlert,
+  Ban,
 } from "lucide-react";
 import {
   syncServerStatus,
@@ -31,9 +34,15 @@ import {
   syncRestore,
   syncDevices,
   syncDeviceRevoke,
+  syncSecurityEvents,
+  syncSecuritySummary,
+  syncBanIp,
+  syncUnbanIp,
   type SyncServerStatus,
   type SyncStatusInfo,
   type SyncDevice,
+  type SecurityEvent,
+  type SecuritySummary,
 } from "../bridge";
 import { Card, SectionTitle, Badge } from "../components/ui";
 import { inputCls, btnCls, errMsg } from "../components/kit";
@@ -61,7 +70,237 @@ export function Devices() {
       <SectionTitle hint="sync &amp; devices">Devices</SectionTitle>
       <SyncServer sync={sync} onSyncChange={refreshSync} />
       <AccountSync sync={sync} onSyncChange={refreshSync} />
+      <SecurityMonitor sync={sync} />
     </div>
+  );
+}
+
+// How each recorded event kind is labelled and coloured in the panel.
+const EVENT_META: Record<string, { label: string; tone: "danger" | "warn" | "ok" | "muted" }> = {
+  login_ok: { label: "Signed in", tone: "ok" },
+  login_fail_bootstrap: { label: "Failed sign-in", tone: "warn" },
+  google_reject: { label: "Rejected Google token", tone: "warn" },
+  totp_fail: { label: "Wrong 2FA code", tone: "warn" },
+  totp_lockout: { label: "2FA locked out", tone: "warn" },
+  refresh_reuse: { label: "Token replay — possible theft", tone: "danger" },
+  rate_limited: { label: "Rate-limited", tone: "warn" },
+  banned_block: { label: "Blocked attempt", tone: "muted" },
+  auto_ban: { label: "Auto-banned IP", tone: "danger" },
+};
+
+const FAIL_KINDS = ["login_fail_bootstrap", "google_reject", "totp_fail", "totp_lockout"];
+
+function toneClasses(tone: "danger" | "warn" | "ok" | "muted"): string {
+  switch (tone) {
+    case "danger":
+      return "border-[var(--danger)]/40 bg-[var(--danger)]/10 text-[var(--danger)]";
+    case "warn":
+      return "border-[var(--warn)]/40 bg-[var(--warn)]/10 text-[var(--warn)]";
+    case "ok":
+      return "border-[var(--ok,var(--accent))]/40 bg-[var(--accent)]/10 text-[var(--accent)]";
+    default:
+      return "border-[var(--border-subtle)] bg-[var(--bg-inset)] text-[var(--text-muted)]";
+  }
+}
+
+/** A single big-number tile in the 24h summary strip. */
+function StatTile({ n, label, danger }: { n: number; label: string; danger?: boolean }) {
+  return (
+    <div className="flex-1 rounded-[10px] border border-[var(--border-subtle)] bg-[var(--bg-inset)] px-3 py-2 text-center">
+      <div className={`text-lg font-semibold ${danger && n > 0 ? "text-[var(--danger)]" : "text-[var(--text-primary)]"}`}>{n}</div>
+      <div className="text-[10px] uppercase tracking-wide text-[var(--text-muted)]">{label}</div>
+    </div>
+  );
+}
+
+/**
+ * Attack monitor for the sync server. Reads the server's recorded auth outcomes
+ * (failed sign-ins, token replays, rate-limit trips) and lets you block/unblock IPs.
+ * Only meaningful when signed in; older servers (pre-monitor) are handled gracefully.
+ */
+function SecurityMonitor({ sync }: { sync: SyncStatusInfo | null }) {
+  const signedIn = !!sync?.signedIn;
+  const [summary, setSummary] = useState<SecuritySummary | null>(null);
+  const [events, setEvents] = useState<SecurityEvent[]>([]);
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState("");
+  const [unavailable, setUnavailable] = useState(false);
+  const [blockIp, setBlockIp] = useState("");
+
+  const load = async () => {
+    setBusy(true);
+    setMsg("");
+    try {
+      const [s, e] = await Promise.all([syncSecuritySummary(), syncSecurityEvents()]);
+      setSummary(s);
+      setEvents(e);
+      setUnavailable(false);
+    } catch (err) {
+      const m = errMsg(err);
+      // A server deployed before this feature has no /security-* routes yet.
+      if (/HTTP 40[45]/.test(m)) setUnavailable(true);
+      else setMsg(m);
+    }
+    setBusy(false);
+  };
+
+  useEffect(() => {
+    if (signedIn) void load();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [signedIn]);
+
+  if (!signedIn) return null;
+
+  const c = summary?.last24h ?? {};
+  const failed = FAIL_KINDS.reduce((n, k) => n + (c[k] || 0), 0);
+  const replays = c["refresh_reuse"] || 0;
+  const signins = c["login_ok"] || 0;
+  const rateLimited = c["rate_limited"] || 0;
+
+  const block = async (ip: string, minutes?: number) => {
+    const target = ip.trim();
+    if (!target) return;
+    setBusy(true);
+    setMsg("");
+    try {
+      await syncBanIp(target, minutes);
+      setBlockIp("");
+      setMsg(`Blocked ${target}.`);
+      await load();
+    } catch (e) {
+      setMsg(errMsg(e));
+      setBusy(false);
+    }
+  };
+
+  const unblock = async (ip: string) => {
+    const target = ip.trim();
+    if (!target) return;
+    setBusy(true);
+    setMsg("");
+    try {
+      await syncUnbanIp(target);
+      setBlockIp("");
+      setMsg(`Unblocked ${target}.`);
+      await load();
+    } catch (e) {
+      setMsg(errMsg(e));
+      setBusy(false);
+    }
+  };
+
+  return (
+    <Card className="mb-4">
+      <div className="mb-2 flex items-center justify-between text-sm font-medium">
+        <span className="flex items-center gap-2">
+          <Shield size={15} /> Attack monitor <span className="text-[11px] font-normal text-[var(--text-muted)]">(sync server)</span>
+        </span>
+        <div className="flex items-center gap-2">
+          {summary && (
+            <Badge tone={summary.autobanEnabled ? "ok" : "neutral"}>
+              {summary.autobanEnabled ? "Auto-ban on" : "Detection only"}
+            </Badge>
+          )}
+          <button onClick={() => void load()} disabled={busy} className={btnCls}>
+            {busy ? "…" : "Refresh"}
+          </button>
+        </div>
+      </div>
+
+      {unavailable ? (
+        <p className="text-xs text-[var(--text-secondary)]">
+          Your sync server was deployed before the attack monitor was added. Redeploy it (Destroy, then Deploy, in the
+          Sync server card above) to enable it — your vault is untouched and re-uploads after you sign back in.
+        </p>
+      ) : (
+        <>
+          <p className="mb-3 text-xs text-[var(--text-secondary)]">
+            The server records every sign-in attempt so you can spot break-in attempts. Nothing sensitive is stored — no
+            passwords or vault data, only the outcome, the IP, and the time. Your vault stays end-to-end encrypted regardless.
+          </p>
+
+          <div className="mb-3 flex gap-2">
+            <StatTile n={failed} label="Failed 24h" danger />
+            <StatTile n={replays} label="Token replays" danger />
+            <StatTile n={summary?.bannedActive ?? 0} label="Blocked IPs" />
+            <StatTile n={signins} label="Sign-ins" />
+          </div>
+
+          {replays > 0 && (
+            <div className="mb-3 flex items-start gap-2 rounded-[10px] border border-[var(--danger)]/40 bg-[var(--danger)]/10 p-2.5 text-[11px] text-[var(--danger)]">
+              <ShieldAlert size={14} className="mt-0.5 shrink-0" />
+              <span>
+                A refresh token was replayed — a sign-in token may have been stolen. The affected device’s session was
+                revoked automatically. Consider revoking devices above and signing in again.
+              </span>
+            </div>
+          )}
+
+          {!summary?.autobanEnabled && (
+            <p className="mb-3 text-[11px] text-[var(--text-muted)]">
+              Auto-ban is off. The monitor still records and shows attacks; to make the server block abusive IPs
+              automatically, set <span className="mono">SENTINEL_AUTOBAN_THRESHOLD</span> on it (e.g. 20) and redeploy.
+              {rateLimited > 0 ? ` ${rateLimited} request${rateLimited === 1 ? "" : "s"} were rate-limited in the last 24h.` : ""}
+            </p>
+          )}
+
+          {/* Manual block / unblock */}
+          <div className="mb-3 flex items-center gap-2">
+            <input
+              value={blockIp}
+              onChange={(e) => setBlockIp(e.target.value)}
+              placeholder="Block an IP address — e.g. 203.0.113.5"
+              className={`${inputCls} flex-1`}
+            />
+            <button onClick={() => void block(blockIp)} disabled={busy || !blockIp.trim()} className="inline-flex items-center gap-1.5 rounded-[10px] border border-[var(--danger)]/40 px-3 py-2 text-sm text-[var(--danger)] hover:bg-[var(--danger)]/10 disabled:opacity-50">
+              <Ban size={14} /> Block
+            </button>
+            <button onClick={() => void unblock(blockIp)} disabled={busy || !blockIp.trim()} className={btnCls}>
+              Unblock
+            </button>
+          </div>
+
+          {/* Recent events */}
+          <div className="mb-1 text-xs font-medium">Recent activity</div>
+          {events.length === 0 ? (
+            <p className="text-xs text-[var(--text-muted)]">Nothing recorded yet — no sign-in attempts since the monitor started.</p>
+          ) : (
+            <ul className="space-y-1">
+              {events.slice(0, 25).map((e) => {
+                const meta = EVENT_META[e.kind] ?? { label: e.kind, tone: "muted" as const };
+                return (
+                  <li
+                    key={e.id}
+                    className="flex items-center justify-between gap-2 rounded-[10px] border border-[var(--border-subtle)] bg-[var(--bg-inset)] px-3 py-1.5 text-xs"
+                  >
+                    <span className="flex min-w-0 items-center gap-2">
+                      <span className={`shrink-0 rounded-[6px] border px-1.5 py-0.5 text-[10px] ${toneClasses(meta.tone)}`}>{meta.label}</span>
+                      {e.ip && <span className="mono text-[var(--text-secondary)]">{e.ip}</span>}
+                      {e.detail && <span className="truncate text-[var(--text-muted)]">{e.detail}</span>}
+                    </span>
+                    <span className="flex shrink-0 items-center gap-2">
+                      <span className="text-[var(--text-muted)]">{new Date(e.createdAt).toLocaleString()}</span>
+                      {e.ip && (
+                        <button
+                          onClick={() => void block(e.ip as string)}
+                          disabled={busy}
+                          title={`Block ${e.ip}`}
+                          className="rounded-[6px] border border-[var(--danger)]/30 px-1.5 py-0.5 text-[10px] text-[var(--danger)] hover:bg-[var(--danger)]/10 disabled:opacity-50"
+                        >
+                          Block
+                        </button>
+                      )}
+                    </span>
+                  </li>
+                );
+              })}
+            </ul>
+          )}
+        </>
+      )}
+
+      {msg && <p className="mt-2 text-xs text-[var(--text-muted)]">{msg}</p>}
+    </Card>
   );
 }
 

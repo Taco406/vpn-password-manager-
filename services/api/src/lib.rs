@@ -9,6 +9,7 @@ pub mod config;
 pub mod error;
 pub mod ratelimit;
 pub mod routes;
+pub mod security;
 pub mod state;
 
 use config::{Config, JwtKeys};
