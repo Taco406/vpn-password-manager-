@@ -198,14 +198,17 @@ impl CloudProvider for MockCloud {
 // ---------------------------------------------------------------------------
 
 use super::manager::{
-    MetricPoint, PowerAction, Provider, ServerInfo, ServerManager, ServerMetrics,
+    MetricPoint, PowerAction, Provider, ServerEvent, ServerInfo, ServerManager, ServerMetrics,
+    Snapshot,
 };
 
 /// A fixed 3-server fleet with sine-wave metrics. States are mutable so power actions
-/// can be exercised in tests.
+/// can be exercised in tests; Stage 3 snapshots/protection are held in-memory too.
 #[derive(Clone)]
 pub struct MockServerManager {
     states: Arc<Mutex<HashMap<String, InstanceState>>>,
+    snapshots: Arc<Mutex<HashMap<String, Vec<Snapshot>>>>,
+    protection: Arc<Mutex<HashMap<String, bool>>>,
     provider: Provider,
 }
 
@@ -223,6 +226,8 @@ impl MockServerManager {
         states.insert("m-3".to_string(), InstanceState::Stopped);
         MockServerManager {
             states: Arc::new(Mutex::new(states)),
+            snapshots: Arc::new(Mutex::new(HashMap::new())),
+            protection: Arc::new(Mutex::new(HashMap::new())),
             provider,
         }
     }
@@ -287,6 +292,60 @@ impl ServerManager for MockServerManager {
             PowerAction::Shutdown => InstanceState::Stopped,
         };
         Ok(())
+    }
+
+    async fn snapshot(&self, id: &str, label: &str) -> Result<()> {
+        let mut snaps = self.snapshots.lock().unwrap();
+        let list = snaps.entry(id.to_string()).or_default();
+        let next = 900 + list.len() as u64;
+        // Newest first, matching the live parsers.
+        list.insert(
+            0,
+            Snapshot {
+                id: next.to_string(),
+                label: label.to_string(),
+                created_at: Some(1_700_000_000 + next as i64),
+                size_gb: Some(2.5),
+                status: "available".into(),
+            },
+        );
+        Ok(())
+    }
+
+    async fn list_snapshots(&self, id: &str) -> Result<Vec<Snapshot>> {
+        Ok(self
+            .snapshots
+            .lock()
+            .unwrap()
+            .get(id)
+            .cloned()
+            .unwrap_or_default())
+    }
+
+    async fn set_rdns(&self, _id: &str, _ip: &str, _ptr: &str) -> Result<()> {
+        Ok(())
+    }
+
+    async fn set_protection(&self, id: &str, on: bool) -> Result<()> {
+        self.protection.lock().unwrap().insert(id.to_string(), on);
+        Ok(())
+    }
+
+    async fn recent_events(&self, _id: &str) -> Result<Vec<ServerEvent>> {
+        Ok(vec![
+            ServerEvent {
+                action: "reboot".into(),
+                status: "success".into(),
+                created_at: Some(1_700_000_000),
+                progress: Some(100.0),
+            },
+            ServerEvent {
+                action: "create_image".into(),
+                status: "success".into(),
+                created_at: Some(1_699_990_000),
+                progress: Some(100.0),
+            },
+        ])
     }
 }
 
@@ -378,5 +437,23 @@ mod tests {
         let metrics = m.metrics("m-1", 3600).await.unwrap();
         assert_eq!(metrics.cpu_pct.len(), 90);
         assert!(m.power("nope", PowerAction::Reboot).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn mock_server_manager_stage3_roundtrips() {
+        let m = MockServerManager::default();
+        // Snapshots: empty, then two — newest first.
+        assert!(m.list_snapshots("m-1").await.unwrap().is_empty());
+        m.snapshot("m-1", "first").await.unwrap();
+        m.snapshot("m-1", "second").await.unwrap();
+        let snaps = m.list_snapshots("m-1").await.unwrap();
+        assert_eq!(snaps.len(), 2);
+        assert_eq!(snaps[0].label, "second"); // newest first
+                                              // rDNS + protection succeed; events come back non-empty.
+        m.set_rdns("m-1", "203.0.113.9", "host.example.com")
+            .await
+            .unwrap();
+        m.set_protection("m-1", true).await.unwrap();
+        assert_eq!(m.recent_events("m-1").await.unwrap().len(), 2);
     }
 }

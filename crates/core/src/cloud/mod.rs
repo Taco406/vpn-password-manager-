@@ -14,7 +14,10 @@ pub mod hetzner;
 pub mod linode;
 
 pub use latency::{LatencyProbe, MockLatencyProbe};
-pub use manager::{MetricPoint, PowerAction, Provider, ServerInfo, ServerManager, ServerMetrics};
+pub use manager::{
+    MetricPoint, PowerAction, Provider, ServerEvent, ServerInfo, ServerManager, ServerMetrics,
+    Snapshot,
+};
 pub use mock::{MockCloud, MockServerManager};
 pub use netdata::{NetdataAlarm, NetdataEndpoint, NetdataInfo, NetdataSeries};
 pub use provider::{

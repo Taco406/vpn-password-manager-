@@ -290,6 +290,64 @@ export async function serversPower(provider: string, id: string, action: string)
   await inv("servers_power", { provider, id, action });
 }
 
+// --- Server lifecycle: snapshots, reverse DNS, protection, activity, terminal (stage 3) ------
+
+export interface Snapshot {
+  id: string;
+  label: string;
+  createdAt: number | null;
+  sizeGb: number | null;
+  status: string;
+}
+
+export interface ServerEventItem {
+  action: string;
+  status: string;
+  createdAt: number | null;
+  progress: number | null;
+}
+
+/** Take a labelled snapshot/image of a server. */
+export async function serversSnapshot(provider: string, id: string, label: string): Promise<void> {
+  if (!inTauri()) throw new Error("Server management is only available in the desktop app.");
+  await inv("servers_snapshot", { provider, id, label });
+}
+
+/** List a server's snapshots, newest first. */
+export async function serversListSnapshots(provider: string, id: string): Promise<Snapshot[]> {
+  if (!inTauri()) return [];
+  return inv<Snapshot[]>("servers_list_snapshots", { provider, id });
+}
+
+/** Recent activity/actions for a server, newest first. */
+export async function serversEvents(provider: string, id: string): Promise<ServerEventItem[]> {
+  if (!inTauri()) return [];
+  return inv<ServerEventItem[]>("servers_events", { provider, id });
+}
+
+/** Set the reverse-DNS (PTR) record for a server's public IP. */
+export async function serversSetRdns(
+  provider: string,
+  id: string,
+  ip: string,
+  ptr: string,
+): Promise<void> {
+  if (!inTauri()) throw new Error("Server management is only available in the desktop app.");
+  await inv("servers_set_rdns", { provider, id, ip, ptr });
+}
+
+/** Turn Hetzner delete/rebuild protection on or off. */
+export async function serversSetProtection(provider: string, id: string, on: boolean): Promise<void> {
+  if (!inTauri()) throw new Error("Server management is only available in the desktop app.");
+  await inv("servers_set_protection", { provider, id, on });
+}
+
+/** Open an interactive terminal SSHed into the server as root (Windows). */
+export async function serversOpenTerminal(ip: string): Promise<void> {
+  if (!inTauri()) throw new Error("Opening a terminal is only available in the desktop app.");
+  await inv("servers_open_terminal", { ip });
+}
+
 // --- Server watchdog + Netdata (stage 2) -------------------------------------
 
 export interface WatchdogCfg {

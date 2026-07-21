@@ -8,7 +8,9 @@
 
 #![cfg(feature = "live-hetzner")]
 
-use super::manager::{MetricPoint, PowerAction, Provider, ServerInfo, ServerMetrics};
+use super::manager::{
+    MetricPoint, PowerAction, Provider, ServerEvent, ServerInfo, ServerMetrics, Snapshot,
+};
 use super::provider::InstanceState;
 use crate::error::{CoreError, Result};
 use async_trait::async_trait;
@@ -290,6 +292,94 @@ fn parse_metrics(body: &str) -> Result<ServerMetrics> {
     })
 }
 
+// --- /images (snapshots) ----------------------------------------------------
+
+#[derive(Deserialize)]
+struct ImagesPage {
+    #[serde(default)]
+    images: Vec<HetznerImage>,
+}
+#[derive(Deserialize)]
+struct HetznerImage {
+    id: u64,
+    #[serde(default)]
+    description: Option<String>,
+    #[serde(default)]
+    created: Option<String>,
+    #[serde(default)]
+    image_size: Option<f64>,
+    #[serde(default)]
+    status: Option<String>,
+}
+
+/// Parse a `/images?type=snapshot&bound_to={id}` body → snapshots, newest first.
+fn parse_images(body: &str) -> Result<Vec<Snapshot>> {
+    let page: ImagesPage = serde_json::from_str(body)
+        .map_err(|e| CoreError::Network(format!("Hetzner API: bad response ({e})")))?;
+    let mut out: Vec<Snapshot> = page
+        .images
+        .into_iter()
+        .map(|i| Snapshot {
+            id: i.id.to_string(),
+            label: i.description.unwrap_or_else(|| format!("image {}", i.id)),
+            created_at: i
+                .created
+                .as_deref()
+                .and_then(|c| OffsetDateTime::parse(c, &Rfc3339).ok())
+                .map(|t| t.unix_timestamp()),
+            size_gb: i.image_size,
+            status: i.status.unwrap_or_default(),
+        })
+        .collect();
+    out.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+    Ok(out)
+}
+
+// --- /servers/{id}/actions (activity feed) ----------------------------------
+
+#[derive(Deserialize)]
+struct ActionsPage {
+    #[serde(default)]
+    actions: Vec<HetznerAction>,
+}
+#[derive(Deserialize)]
+struct HetznerAction {
+    #[serde(default)]
+    command: Option<String>,
+    #[serde(default)]
+    status: Option<String>,
+    #[serde(default)]
+    progress: Option<f64>,
+    #[serde(default)]
+    started: Option<String>,
+    #[serde(default)]
+    finished: Option<String>,
+}
+
+/// Parse a `/servers/{id}/actions` body → events, newest first.
+fn parse_actions(body: &str) -> Result<Vec<ServerEvent>> {
+    let page: ActionsPage = serde_json::from_str(body)
+        .map_err(|e| CoreError::Network(format!("Hetzner API: bad response ({e})")))?;
+    let mut out: Vec<ServerEvent> = page
+        .actions
+        .into_iter()
+        .map(|a| ServerEvent {
+            action: a.command.unwrap_or_else(|| "action".into()),
+            status: a.status.unwrap_or_default(),
+            // Prefer finished time, else started.
+            created_at: a
+                .finished
+                .as_deref()
+                .or(a.started.as_deref())
+                .and_then(|c| OffsetDateTime::parse(c, &Rfc3339).ok())
+                .map(|t| t.unix_timestamp()),
+            progress: a.progress,
+        })
+        .collect();
+    out.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+    Ok(out)
+}
+
 // --- the client -------------------------------------------------------------
 
 #[async_trait]
@@ -352,6 +442,68 @@ impl super::manager::ServerManager for HetznerClient {
             .await
             .map_err(Self::net)?;
         Self::body_ok(resp).await.map(|_| ())
+    }
+
+    async fn snapshot(&self, id: &str, label: &str) -> Result<()> {
+        let resp = self
+            .http
+            .post(format!("{API}/servers/{id}/actions/create_image"))
+            .bearer_auth(&self.token)
+            .json(&serde_json::json!({ "type": "snapshot", "description": label }))
+            .send()
+            .await
+            .map_err(Self::net)?;
+        Self::body_ok(resp).await.map(|_| ())
+    }
+
+    async fn list_snapshots(&self, id: &str) -> Result<Vec<Snapshot>> {
+        let resp = self
+            .http
+            .get(format!("{API}/images?type=snapshot&bound_to={id}"))
+            .bearer_auth(&self.token)
+            .send()
+            .await
+            .map_err(Self::net)?;
+        let body = Self::body_ok(resp).await?;
+        parse_images(&body)
+    }
+
+    async fn set_rdns(&self, id: &str, ip: &str, ptr: &str) -> Result<()> {
+        let resp = self
+            .http
+            .post(format!("{API}/servers/{id}/actions/change_dns_ptr"))
+            .bearer_auth(&self.token)
+            .json(&serde_json::json!({ "ip": ip, "dns_ptr": ptr }))
+            .send()
+            .await
+            .map_err(Self::net)?;
+        Self::body_ok(resp).await.map(|_| ())
+    }
+
+    async fn set_protection(&self, id: &str, on: bool) -> Result<()> {
+        let resp = self
+            .http
+            .post(format!("{API}/servers/{id}/actions/change_protection"))
+            .bearer_auth(&self.token)
+            .json(&serde_json::json!({ "delete": on, "rebuild": on }))
+            .send()
+            .await
+            .map_err(Self::net)?;
+        Self::body_ok(resp).await.map(|_| ())
+    }
+
+    async fn recent_events(&self, id: &str) -> Result<Vec<ServerEvent>> {
+        let resp = self
+            .http
+            .get(format!(
+                "{API}/servers/{id}/actions?per_page=15&sort=started:desc"
+            ))
+            .bearer_auth(&self.token)
+            .send()
+            .await
+            .map_err(Self::net)?;
+        let body = Self::body_ok(resp).await?;
+        parse_actions(&body)
     }
 }
 
@@ -450,5 +602,44 @@ mod tests {
         assert_eq!(map_state("off"), InstanceState::Stopped);
         assert_eq!(map_state("stopping"), InstanceState::Deleting);
         assert_eq!(map_state("migrating"), InstanceState::Provisioning);
+    }
+
+    #[test]
+    fn parses_snapshot_images_newest_first() {
+        let body = r#"{"images": [
+            {"id": 100, "description": "before-upgrade", "created": "2024-05-01T10:00:00+00:00", "image_size": 2.5, "status": "available"},
+            {"id": 101, "description": "nightly", "created": "2024-06-01T10:00:00+00:00", "image_size": 3.0, "status": "creating"}
+        ]}"#;
+        let snaps = parse_images(body).unwrap();
+        assert_eq!(snaps.len(), 2);
+        // Newest (June) sorts first.
+        assert_eq!(snaps[0].label, "nightly");
+        assert_eq!(snaps[0].id, "101");
+        assert_eq!(snaps[0].status, "creating");
+        assert!((snaps[0].size_gb.unwrap() - 3.0).abs() < 1e-9);
+        assert_eq!(snaps[1].label, "before-upgrade");
+        assert!(snaps[1].created_at.unwrap() < snaps[0].created_at.unwrap());
+    }
+
+    #[test]
+    fn parses_actions_feed_prefers_finished_time() {
+        let body = r#"{"actions": [
+            {"command": "create_image", "status": "success", "progress": 100,
+             "started": "2024-06-01T10:00:00+00:00", "finished": "2024-06-01T10:05:00+00:00"},
+            {"command": "reboot", "status": "running", "progress": 40,
+             "started": "2024-06-02T09:00:00+00:00", "finished": null}
+        ]}"#;
+        let evs = parse_actions(body).unwrap();
+        assert_eq!(evs.len(), 2);
+        // The running reboot (started later) sorts newest-first over the finished create_image.
+        assert_eq!(evs[0].action, "reboot");
+        assert_eq!(evs[0].status, "running");
+        assert!((evs[0].progress.unwrap() - 40.0).abs() < 1e-9);
+        assert_eq!(evs[1].action, "create_image");
+        // create_image uses its finished timestamp (10:05), not started (10:00).
+        let finished = OffsetDateTime::parse("2024-06-01T10:05:00+00:00", &Rfc3339)
+            .unwrap()
+            .unix_timestamp();
+        assert_eq!(evs[1].created_at, Some(finished));
     }
 }

@@ -287,8 +287,17 @@ impl LinodeClient {
 // ---------------------------------------------------------------------------
 
 use super::manager::{
-    MetricPoint, PowerAction, Provider, ServerInfo, ServerManager, ServerMetrics,
+    MetricPoint, PowerAction, Provider, ServerEvent, ServerInfo, ServerManager, ServerMetrics,
+    Snapshot,
 };
+
+/// Parse a Linode datetime ("YYYY-MM-DDTHH:MM:SS", UTC, no offset) → unix seconds.
+fn linode_time(c: &str) -> Option<i64> {
+    let fmt = time::macros::format_description!("[year]-[month]-[day]T[hour]:[minute]:[second]");
+    time::PrimitiveDateTime::parse(c, &fmt)
+        .ok()
+        .map(|t| t.assume_utc().unix_timestamp())
+}
 
 /// Known monthly caps (Linode bills hourly up to a fixed monthly price).
 fn linode_monthly(instance_type: &str, hourly: f64) -> f64 {
@@ -302,14 +311,7 @@ fn linode_monthly(instance_type: &str, hourly: f64) -> f64 {
 }
 
 fn server_info(l: LinodeInstance, hourly: f64) -> ServerInfo {
-    // Linode datetimes are "YYYY-MM-DDTHH:MM:SS" (UTC, no offset).
-    let created_at = l.created.as_deref().and_then(|c| {
-        let fmt =
-            time::macros::format_description!("[year]-[month]-[day]T[hour]:[minute]:[second]");
-        time::PrimitiveDateTime::parse(c, &fmt)
-            .ok()
-            .map(|t| t.assume_utc().unix_timestamp())
-    });
+    let created_at = l.created.as_deref().and_then(linode_time);
     let specs = l.specs.as_ref();
     ServerInfo {
         provider: Provider::Linode,
@@ -388,6 +390,118 @@ fn parse_stats(body: &str) -> Result<ServerMetrics> {
     })
 }
 
+// --- Stage 3 parsers (snapshots via backups, activity via account events) ---
+
+/// Parse a `/linode/instances/{id}/backups` body → the manual-snapshot slot (in-progress first,
+/// then the current completed snapshot). Automatic daily backups are intentionally excluded.
+fn parse_linode_backups(body: &str) -> Result<Vec<Snapshot>> {
+    #[derive(Deserialize)]
+    struct Resp {
+        #[serde(default)]
+        snapshot: Option<Slot>,
+    }
+    #[derive(Deserialize)]
+    struct Slot {
+        #[serde(default)]
+        current: Option<Backup>,
+        #[serde(default)]
+        in_progress: Option<Backup>,
+    }
+    #[derive(Deserialize)]
+    struct Backup {
+        id: u64,
+        #[serde(default)]
+        label: Option<String>,
+        #[serde(default)]
+        status: Option<String>,
+        #[serde(default)]
+        created: Option<String>,
+        #[serde(default)]
+        finished: Option<String>,
+    }
+    let resp: Resp = serde_json::from_str(body)
+        .map_err(|e| CoreError::Network(format!("Linode API: bad response ({e})")))?;
+    let to_snap = |b: Backup| Snapshot {
+        id: b.id.to_string(),
+        label: b.label.unwrap_or_else(|| format!("snapshot {}", b.id)),
+        created_at: b
+            .finished
+            .as_deref()
+            .or(b.created.as_deref())
+            .and_then(linode_time),
+        size_gb: None, // Linode doesn't report per-snapshot size on this endpoint.
+        status: b.status.unwrap_or_default(),
+    };
+    let slot = resp.snapshot.unwrap_or(Slot {
+        current: None,
+        in_progress: None,
+    });
+    Ok([slot.in_progress, slot.current]
+        .into_iter()
+        .flatten()
+        .map(to_snap)
+        .collect())
+}
+
+/// Parse a `/account/events` body, keeping only events for `linode_id`, newest first.
+fn parse_linode_events(body: &str, linode_id: &str) -> Result<Vec<ServerEvent>> {
+    #[derive(Deserialize)]
+    struct Page {
+        #[serde(default)]
+        data: Vec<Event>,
+    }
+    #[derive(Deserialize)]
+    struct Event {
+        #[serde(default)]
+        action: Option<String>,
+        #[serde(default)]
+        status: Option<String>,
+        #[serde(default)]
+        created: Option<String>,
+        #[serde(default)]
+        percent_complete: Option<f64>,
+        #[serde(default)]
+        entity: Option<Entity>,
+    }
+    #[derive(Deserialize)]
+    struct Entity {
+        #[serde(default)]
+        id: Option<serde_json::Value>,
+        #[serde(default, rename = "type")]
+        kind: Option<String>,
+    }
+    let page: Page = serde_json::from_str(body)
+        .map_err(|e| CoreError::Network(format!("Linode API: bad response ({e})")))?;
+    Ok(page
+        .data
+        .into_iter()
+        .filter(|e| {
+            let ent = match &e.entity {
+                Some(en) => en,
+                None => return false,
+            };
+            if ent.kind.as_deref() != Some("linode") {
+                return false;
+            }
+            // entity.id is a JSON number; compare as a string against our id.
+            ent.id
+                .as_ref()
+                .map(|v| match v {
+                    serde_json::Value::Number(n) => n.to_string() == linode_id,
+                    serde_json::Value::String(s) => s == linode_id,
+                    _ => false,
+                })
+                .unwrap_or(false)
+        })
+        .map(|e| ServerEvent {
+            action: e.action.unwrap_or_else(|| "event".into()),
+            status: e.status.unwrap_or_default(),
+            created_at: e.created.as_deref().and_then(linode_time),
+            progress: e.percent_complete,
+        })
+        .collect())
+}
+
 #[async_trait]
 impl ServerManager for LinodeClient {
     async fn list_all(&self) -> Result<Vec<ServerInfo>> {
@@ -440,6 +554,63 @@ impl ServerManager for LinodeClient {
             PowerAction::Reboot => "reboot",
         };
         LinodeClient::power(self, id, name).await
+    }
+
+    async fn snapshot(&self, id: &str, label: &str) -> Result<()> {
+        // Requires the Backups add-on to be enabled; if it isn't, linode_reason surfaces that.
+        let resp = self
+            .http
+            .post(format!("{API}/linode/instances/{id}/snapshots"))
+            .bearer_auth(&self.token)
+            .json(&serde_json::json!({ "label": label }))
+            .send()
+            .await
+            .map_err(Self::net)?;
+        Self::empty_ok(resp).await
+    }
+
+    async fn list_snapshots(&self, id: &str) -> Result<Vec<Snapshot>> {
+        let resp = self
+            .http
+            .get(format!("{API}/linode/instances/{id}/backups"))
+            .bearer_auth(&self.token)
+            .send()
+            .await
+            .map_err(Self::net)?;
+        let status = resp.status();
+        let text = resp.text().await.map_err(Self::net)?;
+        if !status.is_success() {
+            return Err(Self::linode_reason(status, &text));
+        }
+        parse_linode_backups(&text)
+    }
+
+    async fn set_rdns(&self, _id: &str, ip: &str, ptr: &str) -> Result<()> {
+        let resp = self
+            .http
+            .put(format!("{API}/networking/ips/{ip}"))
+            .bearer_auth(&self.token)
+            .json(&serde_json::json!({ "rdns": ptr }))
+            .send()
+            .await
+            .map_err(Self::net)?;
+        Self::empty_ok(resp).await
+    }
+
+    async fn recent_events(&self, id: &str) -> Result<Vec<ServerEvent>> {
+        let resp = self
+            .http
+            .get(format!("{API}/account/events"))
+            .bearer_auth(&self.token)
+            .send()
+            .await
+            .map_err(Self::net)?;
+        let status = resp.status();
+        let text = resp.text().await.map_err(Self::net)?;
+        if !status.is_success() {
+            return Err(Self::linode_reason(status, &text));
+        }
+        parse_linode_events(&text, id)
     }
 }
 
@@ -497,5 +668,45 @@ mod manager_tests {
         assert!((m.net_in_bps[0].value - 1000.0).abs() < 1e-9); // bits → bytes
         assert!((m.net_out_bps[0].value - 2000.0).abs() < 1e-9);
         assert!((m.disk_io[0].value - 42.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn parses_manual_snapshot_slot_in_progress_first() {
+        let body = r#"{
+          "automatic": [{"id": 1, "label": null, "status": "successful", "type": "auto"}],
+          "snapshot": {
+            "current": {"id": 900, "label": "release-cut", "status": "successful",
+                        "created": "2025-01-01T00:00:00", "finished": "2025-01-01T00:10:00"},
+            "in_progress": {"id": 901, "label": "hotfix", "status": "pending",
+                            "created": "2025-02-01T00:00:00", "finished": null}
+          }
+        }"#;
+        let snaps = parse_linode_backups(body).unwrap();
+        // Only the manual snapshot slot (2 entries), automatic backups excluded, in-progress first.
+        assert_eq!(snaps.len(), 2);
+        assert_eq!(snaps[0].id, "901");
+        assert_eq!(snaps[0].label, "hotfix");
+        assert_eq!(snaps[0].status, "pending");
+        assert_eq!(snaps[1].id, "900");
+        // current uses its finished time (00:10), not created (00:00).
+        assert_eq!(snaps[1].created_at, linode_time("2025-01-01T00:10:00"));
+    }
+
+    #[test]
+    fn filters_account_events_to_the_target_linode() {
+        let body = r#"{"data": [
+            {"action": "linode_reboot", "status": "finished", "percent_complete": 100,
+             "created": "2025-03-01T12:00:00", "entity": {"id": 777, "type": "linode", "label": "web"}},
+            {"action": "linode_boot", "status": "started", "percent_complete": 30,
+             "created": "2025-03-02T12:00:00", "entity": {"id": 888, "type": "linode", "label": "other"}},
+            {"action": "account_settings_update", "status": "notification",
+             "created": "2025-03-03T12:00:00", "entity": null}
+        ]}"#;
+        let evs = parse_linode_events(body, "777").unwrap();
+        assert_eq!(evs.len(), 1, "only the id=777 linode event");
+        assert_eq!(evs[0].action, "linode_reboot");
+        assert_eq!(evs[0].status, "finished");
+        assert!((evs[0].progress.unwrap() - 100.0).abs() < 1e-9);
+        assert_eq!(evs[0].created_at, linode_time("2025-03-01T12:00:00"));
     }
 }

@@ -12,12 +12,23 @@ import {
   Activity,
   BellRing,
   Copy,
+  Camera,
+  ShieldCheck,
+  Globe,
+  History,
+  TerminalSquare,
 } from "lucide-react";
 import {
   serversConfig,
   serversList,
   serversMetrics,
   serversPower,
+  serversSnapshot,
+  serversListSnapshots,
+  serversEvents,
+  serversSetRdns,
+  serversSetProtection,
+  serversOpenTerminal,
   serversWatchdogGet,
   serversWatchdogSet,
   netdataGet,
@@ -29,6 +40,8 @@ import {
   netMyIp,
   type ManagedServer,
   type ServerMetricsOut,
+  type Snapshot,
+  type ServerEventItem,
   type NetdataCfg,
   type NetdataProbe,
   type WatchdogCfg,
@@ -352,6 +365,279 @@ function ServerCharts({ s }: { s: ManagedServer }) {
       )}
 
       {s.ipv4 && <NetdataPanel s={s} />}
+
+      <ServerLifecycle s={s} />
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Stage 3: per-server lifecycle — snapshots, protection, reverse DNS, activity,
+// and SSH access. Collapsed by default so it only hits the provider APIs on demand.
+// ---------------------------------------------------------------------------
+
+function fmtWhen(unix: number | null): string {
+  if (!unix) return "";
+  const secs = Math.floor(Date.now() / 1000) - unix;
+  if (secs < 60) return "just now";
+  if (secs < 3600) return `${Math.floor(secs / 60)}m ago`;
+  if (secs < 86400) return `${Math.floor(secs / 3600)}h ago`;
+  return `${Math.floor(secs / 86400)}d ago`;
+}
+
+function ServerLifecycle({ s }: { s: ManagedServer }) {
+  const [open, setOpen] = useState(false);
+  const [snaps, setSnaps] = useState<Snapshot[] | null>(null);
+  const [events, setEvents] = useState<ServerEventItem[] | null>(null);
+  const [label, setLabel] = useState("");
+  const [ptr, setPtr] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState("");
+  const isHetzner = s.provider === "hetzner";
+
+  const load = useCallback(async () => {
+    try {
+      const [sn, ev] = await Promise.all([
+        serversListSnapshots(s.provider, s.id),
+        serversEvents(s.provider, s.id),
+      ]);
+      setSnaps(sn);
+      setEvents(ev);
+    } catch (e) {
+      setMsg(errMsg(e));
+    }
+  }, [s.provider, s.id]);
+
+  useEffect(() => {
+    if (open && snaps === null) void load();
+  }, [open, snaps, load]);
+
+  const doSnapshot = async () => {
+    if (!label.trim()) return;
+    setBusy(true);
+    setMsg("");
+    try {
+      await serversSnapshot(s.provider, s.id, label.trim());
+      setLabel("");
+      setMsg("Snapshot started — it may take a few minutes to finish.");
+      await load();
+    } catch (e) {
+      setMsg(errMsg(e));
+    }
+    setBusy(false);
+  };
+
+  const doRdns = async () => {
+    if (!s.ipv4 || !ptr.trim()) return;
+    setBusy(true);
+    setMsg("");
+    try {
+      await serversSetRdns(s.provider, s.id, s.ipv4, ptr.trim());
+      setMsg(`Reverse DNS for ${s.ipv4} set to ${ptr.trim()}.`);
+    } catch (e) {
+      setMsg(errMsg(e));
+    }
+    setBusy(false);
+  };
+
+  const doProtection = async (on: boolean) => {
+    if (
+      !window.confirm(
+        on
+          ? `Turn ON delete/rebuild protection for "${s.label}"? The provider will refuse to destroy or rebuild it until you turn this off.`
+          : `Turn OFF delete/rebuild protection for "${s.label}"?`,
+      )
+    )
+      return;
+    setBusy(true);
+    setMsg("");
+    try {
+      await serversSetProtection(s.provider, s.id, on);
+      setMsg(on ? "Delete protection is now ON." : "Delete protection is now OFF.");
+    } catch (e) {
+      setMsg(errMsg(e));
+    }
+    setBusy(false);
+  };
+
+  const doTerminal = async () => {
+    if (!s.ipv4) return;
+    setBusy(true);
+    setMsg("");
+    try {
+      await serversOpenTerminal(s.ipv4);
+    } catch (e) {
+      setMsg(errMsg(e));
+    }
+    setBusy(false);
+  };
+
+  const extras: { name: string; cmd: string }[] = [
+    { name: "Netdata (live monitoring)", cmd: "curl -Ss https://get.netdata.cloud/kickstart.sh | sh" },
+    {
+      name: "Uptime Kuma (status page)",
+      cmd: "docker run -d --restart=always -p 3001:3001 -v uptime-kuma:/app/data --name uptime-kuma louislam/uptime-kuma:1",
+    },
+    {
+      name: "Dozzle (live Docker logs)",
+      cmd: "docker run -d --name dozzle --restart=always -v /var/run/docker.sock:/var/run/docker.sock -p 8080:8080 amir20/dozzle",
+    },
+    { name: "fail2ban (block brute-force)", cmd: "apt-get update && apt-get install -y fail2ban && systemctl enable --now fail2ban" },
+  ];
+
+  return (
+    <div className="mt-4 border-t border-[var(--border-subtle)] pt-3">
+      <button
+        onClick={() => setOpen((v) => !v)}
+        className="flex items-center gap-1.5 text-xs font-medium text-[var(--text-secondary)] hover:text-[var(--accent)]"
+      >
+        {open ? <ChevronDown size={14} /> : <ChevronRight size={14} />} Manage server
+      </button>
+
+      {open && (
+        <div className="mt-3 space-y-4">
+          {/* Snapshots */}
+          <section>
+            <div className="mb-1.5 flex items-center gap-1.5 text-xs font-medium">
+              <Camera size={13} /> Snapshots
+            </div>
+            <div className="flex items-center gap-2">
+              <input
+                value={label}
+                onChange={(e) => setLabel(e.target.value)}
+                placeholder="Snapshot name — e.g. before-upgrade"
+                className={`${inputCls} flex-1`}
+              />
+              <button onClick={() => void doSnapshot()} disabled={busy || !label.trim()} className={btnCls}>
+                {busy ? "…" : "Snapshot"}
+              </button>
+            </div>
+            <p className="mt-1 text-[11px] text-[var(--text-muted)]">
+              {isHetzner
+                ? "Hetzner snapshots bill ~€0.0119/GB per month until you delete them."
+                : "Linode manual snapshots require the paid Backups add-on to be enabled on this Linode."}
+            </p>
+            {snaps && snaps.length > 0 && (
+              <ul className="mt-2 space-y-1">
+                {snaps.map((sn) => (
+                  <li
+                    key={sn.id}
+                    className="flex items-center justify-between rounded-[8px] bg-[var(--bg-inset)] px-2 py-1 text-[11px]"
+                  >
+                    <span className="min-w-0 truncate">
+                      {sn.label} <span className="text-[var(--text-muted)]">· {sn.status}</span>
+                    </span>
+                    <span className="shrink-0 text-[var(--text-muted)]">
+                      {sn.sizeGb ? `${sn.sizeGb.toFixed(1)} GB · ` : ""}
+                      {fmtWhen(sn.createdAt)}
+                    </span>
+                  </li>
+                ))}
+              </ul>
+            )}
+            {snaps && snaps.length === 0 && (
+              <p className="mt-1 text-[11px] text-[var(--text-muted)]">No snapshots yet.</p>
+            )}
+          </section>
+
+          {/* Protection (Hetzner only) */}
+          {isHetzner && (
+            <section>
+              <div className="mb-1.5 flex items-center gap-1.5 text-xs font-medium">
+                <ShieldCheck size={13} /> Delete protection
+              </div>
+              <div className="flex items-center gap-2">
+                <button onClick={() => void doProtection(true)} disabled={busy} className={btnCls}>
+                  Enable
+                </button>
+                <button onClick={() => void doProtection(false)} disabled={busy} className={btnCls}>
+                  Disable
+                </button>
+              </div>
+              <p className="mt-1 text-[11px] text-[var(--text-muted)]">
+                When on, Hetzner refuses to delete or rebuild this server. NorthKey can’t read the
+                current setting, so choose explicitly.
+              </p>
+            </section>
+          )}
+
+          {/* Reverse DNS */}
+          {s.ipv4 && (
+            <section>
+              <div className="mb-1.5 flex items-center gap-1.5 text-xs font-medium">
+                <Globe size={13} /> Reverse DNS <span className="mono text-[var(--text-muted)]">({s.ipv4})</span>
+              </div>
+              <div className="flex items-center gap-2">
+                <input
+                  value={ptr}
+                  onChange={(e) => setPtr(e.target.value)}
+                  placeholder="PTR hostname — e.g. mail.example.com"
+                  className={`${inputCls} flex-1`}
+                />
+                <button onClick={() => void doRdns()} disabled={busy || !ptr.trim()} className={btnCls}>
+                  {busy ? "…" : "Save"}
+                </button>
+              </div>
+            </section>
+          )}
+
+          {/* Activity */}
+          <section>
+            <div className="mb-1.5 flex items-center gap-1.5 text-xs font-medium">
+              <History size={13} /> Recent activity
+            </div>
+            {events && events.length > 0 ? (
+              <ul className="space-y-1">
+                {events.slice(0, 10).map((e, i) => (
+                  <li
+                    key={i}
+                    className="flex items-center justify-between rounded-[8px] bg-[var(--bg-inset)] px-2 py-1 text-[11px]"
+                  >
+                    <span className="min-w-0 truncate">
+                      {e.action} <span className="text-[var(--text-muted)]">· {e.status}</span>
+                    </span>
+                    <span className="shrink-0 text-[var(--text-muted)]">{fmtWhen(e.createdAt)}</span>
+                  </li>
+                ))}
+              </ul>
+            ) : (
+              <p className="text-[11px] text-[var(--text-muted)]">
+                {events ? "No recent activity." : "Loading…"}
+              </p>
+            )}
+          </section>
+
+          {/* Access */}
+          {s.ipv4 && (
+            <section>
+              <div className="mb-1.5 flex items-center gap-1.5 text-xs font-medium">
+                <TerminalSquare size={13} /> Access
+              </div>
+              <CopyLine text={`ssh root@${s.ipv4}`} />
+              <button
+                onClick={() => void doTerminal()}
+                disabled={busy}
+                className={`${btnCls} mt-2 inline-flex items-center gap-1.5`}
+              >
+                <TerminalSquare size={13} /> Open terminal
+              </button>
+              <div className="mt-3 space-y-2">
+                <div className="text-[11px] text-[var(--text-muted)]">
+                  One-line installs for free tools (paste into the server’s terminal):
+                </div>
+                {extras.map((x) => (
+                  <div key={x.name}>
+                    <div className="mb-0.5 text-[11px] text-[var(--text-secondary)]">{x.name}</div>
+                    <CopyLine text={x.cmd} />
+                  </div>
+                ))}
+              </div>
+            </section>
+          )}
+
+          {msg && <p className="text-[11px] text-[var(--text-muted)]">{msg}</p>}
+        </div>
+      )}
     </div>
   );
 }

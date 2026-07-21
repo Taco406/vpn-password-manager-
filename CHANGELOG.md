@@ -8,6 +8,26 @@ The format follows [Keep a Changelog](https://keepachangelog.com/). Versions are
 [semantic](https://semver.org/). **Add a new `## [x.y.z]` section at the top in the same PR
 that bumps the app version** — that's how "the changelog updates on every merge."
 
+## [0.1.42] — 2026-07-21
+
+### Added
+- **Manage your servers, not just watch them.** Expand any server on the Servers screen →
+  **Manage server** for a full lifecycle drawer that works across both Linode and Hetzner Cloud:
+  - **Snapshots** — take a named snapshot before risky work and see your existing ones. (Hetzner
+    snapshots bill per GB/month; Linode manual snapshots need the Backups add-on enabled.)
+  - **Delete protection** (Hetzner) — turn on delete/rebuild protection so the provider refuses to
+    destroy the box until you turn it back off.
+  - **Reverse DNS** — set the PTR record for a server's IP (handy for mail servers).
+  - **Recent activity** — the last several provider actions (reboots, snapshots, …) with status
+    and time.
+  - **Access** — a copy-paste `ssh root@<ip>`, a one-click **Open terminal** button (launches
+    Windows Terminal into SSH, or falls back to PowerShell), and copy-paste one-line installers for
+    free tools you can add to a box (Netdata, Uptime Kuma, Dozzle, fail2ban).
+
+### Notes
+- NorthKey never stores an SSH password — the terminal button just launches your own `ssh`, and
+  the install one-liners are copy-paste you run on the server yourself.
+
 ## [0.1.41] — 2026-07-21
 
 ### Added
