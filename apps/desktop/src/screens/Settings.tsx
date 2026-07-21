@@ -23,6 +23,8 @@ import {
   logTail,
   logClear,
   logDirPath,
+  serversConfig,
+  serversSetHetznerToken,
   type WgStatusInfo,
   type AppLockStatus,
   type LockTotpEnroll,
@@ -139,6 +141,7 @@ export function Settings() {
       {tab === "vpn" && (
         <>
           <RealVpn />
+          <HetznerCloud />
           <WireGuardMonitor />
           <SplitTunnel s={s} patch={patch} />
         </>
@@ -446,6 +449,73 @@ function RealVpn() {
           value={token}
           onChange={(e) => setToken(e.target.value)}
           placeholder={enabled ? "•••••••• (token saved)" : "Linode API token"}
+          className="mono flex-1 rounded-[10px] border border-[var(--border-subtle)] bg-[var(--bg-inset)] px-3 py-2 text-sm outline-none focus:border-[var(--accent)]/50"
+        />
+        <button
+          onClick={save}
+          disabled={busy}
+          className="rounded-[10px] border border-[var(--border-strong)] px-3 py-2 text-sm hover:border-[var(--accent)]/50 disabled:opacity-50"
+        >
+          {busy ? "Saving…" : "Save"}
+        </button>
+      </div>
+      {status && <p className="mt-2 text-xs text-[var(--text-muted)]">{status}</p>}
+    </Card>
+  );
+}
+
+/** Hetzner Cloud API token — powers the Servers screen for the user's Hetzner fleet. */
+function HetznerCloud() {
+  const [enabled, setEnabled] = useState(false);
+  const [token, setToken] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [status, setStatus] = useState("");
+
+  useEffect(() => {
+    void serversConfig()
+      .then((c) => setEnabled(c.hetznerEnabled))
+      .catch(() => {});
+  }, []);
+
+  const save = async () => {
+    setBusy(true);
+    setStatus("");
+    try {
+      await serversSetHetznerToken(token.trim());
+      const c = await serversConfig();
+      setEnabled(c.hetznerEnabled);
+      setToken("");
+      setStatus(
+        c.hetznerEnabled
+          ? "Saved. Your Hetzner servers now show on the Servers screen."
+          : "Token cleared.",
+      );
+    } catch (e) {
+      setStatus(`Couldn't save: ${e instanceof Error ? e.message : String(e)}`);
+    }
+    setBusy(false);
+  };
+
+  return (
+    <Card className="mb-4">
+      <div className="mb-2 flex items-center justify-between text-sm font-medium">
+        <span className="flex items-center gap-2">
+          <Globe size={15} /> Hetzner Cloud
+        </span>
+        <Badge tone={enabled ? "ok" : "neutral"}>{enabled ? "Connected" : "Off"}</Badge>
+      </div>
+      <p className="mb-3 text-xs text-[var(--text-secondary)]">
+        Paste a Hetzner Cloud API token (console.hetzner.cloud → your project → Security → API
+        tokens → Generate, with <span className="font-medium">Read &amp; Write</span>) to manage and
+        monitor your Hetzner servers on the <span className="font-medium">Servers</span> screen.
+        Leave blank and Save to clear. The token is stored only in Windows Credential Manager.
+      </p>
+      <div className="flex items-center gap-2">
+        <input
+          type="password"
+          value={token}
+          onChange={(e) => setToken(e.target.value)}
+          placeholder={enabled ? "•••••••• (token saved)" : "Hetzner Cloud API token"}
           className="mono flex-1 rounded-[10px] border border-[var(--border-subtle)] bg-[var(--bg-inset)] px-3 py-2 text-sm outline-none focus:border-[var(--accent)]/50"
         />
         <button

@@ -8,6 +8,24 @@ The format follows [Keep a Changelog](https://keepachangelog.com/). Versions are
 [semantic](https://semver.org/). **Add a new `## [x.y.z]` section at the top in the same PR
 that bumps the app version** — that's how "the changelog updates on every merge."
 
+## [0.1.39] — 2026-07-21
+
+### Added
+- **New Servers screen — manage every server you own, in one place.** All your Linode instances
+  (including NorthKey's own VPN and sync nodes, labeled so you can tell them apart) **and your
+  Hetzner Cloud servers**, together: live state, IPs (click to copy), specs, and monthly cost per
+  provider (in each provider's own currency).
+  - **Start / Stop / Reboot** any server, with confirmations. The node carrying your active VPN
+    connection is protected — the app points you at the VPN screen instead of yanking your tunnel.
+  - **Real utilization graphs** — CPU and network in/out over 1h / 6h / 24h, straight from each
+    provider's metrics API (no simulated data). Expand any server row to see them; they refresh
+    every minute while open.
+  - **Hetzner Cloud token** field under Settings → VPN (stored only in Windows Credential
+    Manager, like the Linode one).
+  - This is stage 1 of the server manager. Coming next: background watchdog with Windows
+    notifications (server down / CPU pegged / disk full), per-second live graphs and alarms from
+    Netdata on servers that run it, snapshots, and more.
+
 ## [0.1.38] — 2026-07-21
 
 ### Changed

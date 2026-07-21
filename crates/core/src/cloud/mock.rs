@@ -193,6 +193,103 @@ impl CloudProvider for MockCloud {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Deterministic full-account server manager (the Servers screen, demo/tests).
+// ---------------------------------------------------------------------------
+
+use super::manager::{
+    MetricPoint, PowerAction, Provider, ServerInfo, ServerManager, ServerMetrics,
+};
+
+/// A fixed 3-server fleet with sine-wave metrics. States are mutable so power actions
+/// can be exercised in tests.
+#[derive(Clone)]
+pub struct MockServerManager {
+    states: Arc<Mutex<HashMap<String, InstanceState>>>,
+    provider: Provider,
+}
+
+impl Default for MockServerManager {
+    fn default() -> Self {
+        Self::new(Provider::Hetzner)
+    }
+}
+
+impl MockServerManager {
+    pub fn new(provider: Provider) -> Self {
+        let mut states = HashMap::new();
+        states.insert("m-1".to_string(), InstanceState::Running);
+        states.insert("m-2".to_string(), InstanceState::Running);
+        states.insert("m-3".to_string(), InstanceState::Stopped);
+        MockServerManager {
+            states: Arc::new(Mutex::new(states)),
+            provider,
+        }
+    }
+}
+
+#[async_trait]
+impl ServerManager for MockServerManager {
+    async fn list_all(&self) -> Result<Vec<ServerInfo>> {
+        let states = self.states.lock().unwrap();
+        let mut ids: Vec<&String> = states.keys().collect();
+        ids.sort();
+        Ok(ids
+            .into_iter()
+            .map(|id| ServerInfo {
+                provider: self.provider,
+                id: id.clone(),
+                label: format!("mock-{id}"),
+                region: "fsn1".into(),
+                instance_type: "cx22".into(),
+                state: states[id],
+                ipv4: Some("203.0.113.9".into()),
+                ipv6: None,
+                tags: vec![],
+                created_at: Some(1_700_000_000),
+                vcpus: 2,
+                memory_mb: 4096,
+                disk_gb: 40,
+                hourly: 0.008,
+                monthly: 4.99,
+                currency: "EUR",
+            })
+            .collect())
+    }
+
+    async fn metrics(&self, _id: &str, window_secs: u32) -> Result<ServerMetrics> {
+        // 90 sine-wave points across the window, anchored to a fixed epoch (deterministic).
+        let end: i64 = 1_700_000_000;
+        let step = (window_secs.max(90) / 90) as i64;
+        let mk = |amp: f64, base: f64| -> Vec<MetricPoint> {
+            (0..90)
+                .map(|i| MetricPoint {
+                    ts: end - (89 - i) * step,
+                    value: base + amp * ((i as f64) / 7.0).sin().abs(),
+                })
+                .collect()
+        };
+        Ok(ServerMetrics {
+            cpu_pct: mk(35.0, 5.0),
+            net_in_bps: mk(400_000.0, 20_000.0),
+            net_out_bps: mk(150_000.0, 10_000.0),
+            disk_io: mk(30.0, 2.0),
+        })
+    }
+
+    async fn power(&self, id: &str, action: PowerAction) -> Result<()> {
+        let mut states = self.states.lock().unwrap();
+        let st = states
+            .get_mut(id)
+            .ok_or(CoreError::Network("no such server".into()))?;
+        *st = match action {
+            PowerAction::Boot | PowerAction::Reboot => InstanceState::Running,
+            PowerAction::Shutdown => InstanceState::Stopped,
+        };
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -268,5 +365,18 @@ mod tests {
         );
         // power ops on a missing node error
         assert!(cloud.shutdown("nope").await.is_err());
+    }
+
+    #[tokio::test]
+    async fn mock_server_manager_lists_and_powers() {
+        let m = MockServerManager::default();
+        let fleet = m.list_all().await.unwrap();
+        assert_eq!(fleet.len(), 3);
+        assert_eq!(fleet[2].state, InstanceState::Stopped);
+        m.power("m-3", PowerAction::Boot).await.unwrap();
+        assert_eq!(m.list_all().await.unwrap()[2].state, InstanceState::Running);
+        let metrics = m.metrics("m-1", 3600).await.unwrap();
+        assert_eq!(metrics.cpu_pct.len(), 90);
+        assert!(m.power("nope", PowerAction::Reboot).await.is_err());
     }
 }

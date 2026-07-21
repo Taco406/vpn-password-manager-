@@ -222,6 +222,74 @@ export async function netDns(host: string): Promise<string[]> {
   return core.invoke("net_dns", { host }) as Promise<string[]>;
 }
 
+// --- Servers (multi-provider manager: Linode + Hetzner Cloud) ----------------
+
+export interface ManagedServer {
+  provider: "linode" | "hetzner";
+  id: string;
+  label: string;
+  region: string;
+  instanceType: string;
+  state: string; // provisioning | booting | running | stopped | deleting | gone
+  ipv4: string | null;
+  ipv6: string | null;
+  /** NorthKey roles from tags: "vpn" | "sync" | "vpn-always-on" | "external". */
+  roles: string[];
+  createdAt: number | null;
+  vcpus: number;
+  memoryMb: number;
+  diskGb: number;
+  hourly: number;
+  monthly: number;
+  currency: string; // "USD" | "EUR"
+}
+
+export interface ServersList {
+  servers: ManagedServer[];
+  errors: { provider: string; message: string }[];
+}
+
+export interface ServerMetricsOut {
+  cpuPct: [number, number][];
+  netInBps: [number, number][];
+  netOutBps: [number, number][];
+  diskIo: [number, number][];
+}
+
+/** Which providers have API tokens saved. */
+export async function serversConfig(): Promise<{ linodeEnabled: boolean; hetznerEnabled: boolean }> {
+  if (!inTauri()) return { linodeEnabled: false, hetznerEnabled: false };
+  return inv("servers_config");
+}
+
+/** Save (or clear, with "") the Hetzner Cloud API token. */
+export async function serversSetHetznerToken(token: string): Promise<void> {
+  if (!inTauri()) throw new Error("Server management is only available in the desktop app.");
+  await inv("servers_set_hetzner_token", { token });
+}
+
+/** Every server on every configured provider (per-provider errors reported alongside). */
+export async function serversList(): Promise<ServersList> {
+  if (!inTauri()) return { servers: [], errors: [] };
+  return inv<ServersList>("servers_list");
+}
+
+/** Utilization time series for one server, ~windowSecs back. */
+export async function serversMetrics(
+  provider: string,
+  id: string,
+  windowSecs: number,
+): Promise<ServerMetricsOut> {
+  if (!inTauri()) throw new Error("Server management is only available in the desktop app.");
+  return inv<ServerMetricsOut>("servers_metrics", { provider, id, windowSecs });
+}
+
+/** Power a server: "start" | "stop" | "reboot". */
+export async function serversPower(provider: string, id: string, action: string): Promise<void> {
+  if (!inTauri()) throw new Error("Server management is only available in the desktop app.");
+  await inv("servers_power", { provider, id, action });
+}
+
 /**
  * Instant local vault audit (reused / weak / old, no network) so the Health tab renders without
  * waiting on the HIBP breach check. The full `bridge.healthAudit()` runs after and fills breaches.
