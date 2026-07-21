@@ -7,8 +7,8 @@
 //! active VPN tunnel is refused (that teardown path lives on the VPN screen).
 
 use sentinel_core::cloud::{
-    netdata, watchdog, HetznerClient, LinodeClient, NetdataEndpoint, PowerAction, ServerInfo,
-    ServerManager,
+    netdata, watchdog, HetznerClient, LinodeClient, NetdataEndpoint, PowerAction, ServerEvent,
+    ServerInfo, ServerManager, Snapshot,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -94,6 +94,44 @@ pub struct MetricsOut {
     net_in_bps: Vec<[f64; 2]>,
     net_out_bps: Vec<[f64; 2]>,
     disk_io: Vec<[f64; 2]>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SnapshotOut {
+    id: String,
+    label: String,
+    created_at: Option<i64>,
+    size_gb: Option<f64>,
+    status: String,
+}
+
+fn snapshot_out(s: Snapshot) -> SnapshotOut {
+    SnapshotOut {
+        id: s.id,
+        label: s.label,
+        created_at: s.created_at,
+        size_gb: s.size_gb,
+        status: s.status,
+    }
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ServerEventOut {
+    action: String,
+    status: String,
+    created_at: Option<i64>,
+    progress: Option<f64>,
+}
+
+fn event_out(e: ServerEvent) -> ServerEventOut {
+    ServerEventOut {
+        action: e.action,
+        status: e.status,
+        created_at: e.created_at,
+        progress: e.progress,
+    }
 }
 
 fn state_label(s: sentinel_core::cloud::InstanceState) -> &'static str {
@@ -306,6 +344,107 @@ pub async fn servers_power(
         &format!("{provider}/{id}: {action} requested"),
     );
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Stage 3: server lifecycle — snapshots, reverse DNS, delete-protection,
+// activity feed, and a one-click SSH terminal. (Snapshot/rDNS/protection do NOT
+// power-cycle the node, so the active-VPN guard on servers_power isn't needed here.)
+// ---------------------------------------------------------------------------
+
+/// Take a labelled snapshot/image of a server.
+#[tauri::command]
+pub async fn servers_snapshot(provider: String, id: String, label: String) -> Result<(), String> {
+    let label = label.trim();
+    if label.is_empty() {
+        return Err("Enter a name for the snapshot.".into());
+    }
+    if label.len() > 64 {
+        return Err("Snapshot name is too long (max 64 characters).".into());
+    }
+    let mgr = manager_for(&provider)?;
+    mgr.snapshot(&id, label).await.map_err(|e| e.to_string())?;
+    crate::applog::info("servers.snapshot", &format!("{provider}/{id}: {label}"));
+    Ok(())
+}
+
+/// List a server's snapshots, newest first.
+#[tauri::command]
+pub async fn servers_list_snapshots(
+    provider: String,
+    id: String,
+) -> Result<Vec<SnapshotOut>, String> {
+    let mgr = manager_for(&provider)?;
+    let snaps = mgr.list_snapshots(&id).await.map_err(|e| e.to_string())?;
+    Ok(snaps.into_iter().map(snapshot_out).collect())
+}
+
+/// Recent activity/actions for a server, newest first.
+#[tauri::command]
+pub async fn servers_events(provider: String, id: String) -> Result<Vec<ServerEventOut>, String> {
+    let mgr = manager_for(&provider)?;
+    let evs = mgr.recent_events(&id).await.map_err(|e| e.to_string())?;
+    Ok(evs.into_iter().map(event_out).collect())
+}
+
+/// Set the reverse-DNS (PTR) record for a server's public IP.
+#[tauri::command]
+pub async fn servers_set_rdns(
+    provider: String,
+    id: String,
+    ip: String,
+    ptr: String,
+) -> Result<(), String> {
+    if ip.parse::<std::net::IpAddr>().is_err() {
+        return Err("That doesn't look like a valid IP address.".into());
+    }
+    let ptr = ptr.trim();
+    if ptr.is_empty() || ptr.len() > 253 {
+        return Err("Enter a valid hostname for the reverse-DNS record.".into());
+    }
+    let mgr = manager_for(&provider)?;
+    mgr.set_rdns(&id, &ip, ptr).await.map_err(|e| e.to_string())
+}
+
+/// Turn delete/rebuild protection on or off (Hetzner; Linode reports not-supported).
+#[tauri::command]
+pub async fn servers_set_protection(provider: String, id: String, on: bool) -> Result<(), String> {
+    let mgr = manager_for(&provider)?;
+    mgr.set_protection(&id, on).await.map_err(|e| e.to_string())
+}
+
+/// Open an interactive terminal SSHed into the server as root. The window is VISIBLE on purpose
+/// (no `CREATE_NO_WINDOW`). Windows tries Windows Terminal, then falls back to a PowerShell window.
+/// Other platforms return a friendly message (the UI always shows a copy-paste `ssh` line too).
+#[tauri::command]
+pub fn servers_open_terminal(ip: String) -> Result<(), String> {
+    let _parsed: std::net::IpAddr = ip
+        .parse()
+        .map_err(|_| "That doesn't look like a valid IP address.".to_string())?;
+    #[cfg(target_os = "windows")]
+    {
+        let target = format!("root@{ip}");
+        if std::process::Command::new("wt.exe")
+            .args(["ssh", &target])
+            .spawn()
+            .is_ok()
+        {
+            Ok(())
+        } else {
+            std::process::Command::new("powershell")
+                .args(["-NoExit", "-Command", &format!("ssh {target}")])
+                .spawn()
+                .map(|_| ())
+                .map_err(|e| format!("open terminal: {e}"))
+        }
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        Err(
+            "Open terminal is available in the Windows app — use the copy-paste SSH command below."
+                .into(),
+        )
+    }
 }
 
 // ---------------------------------------------------------------------------
