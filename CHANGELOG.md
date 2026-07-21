@@ -8,6 +8,22 @@ The format follows [Keep a Changelog](https://keepachangelog.com/). Versions are
 [semantic](https://semver.org/). **Add a new `## [x.y.z]` section at the top in the same PR
 that bumps the app version** — that's how "the changelog updates on every merge."
 
+## [0.1.40] — 2026-07-21
+
+### Added
+- **Server watchdog with Windows notifications.** Turn it on at the bottom of the Servers screen
+  and NorthKey checks all your servers in the background (every 2 minutes by default): a toast
+  fires when a server goes **down** (and again when it **recovers**), when **CPU stays pegged**
+  past your threshold, when a **disk runs full**, or when **Netdata raises an alarm**. Alerts are
+  latched — one notification per incident, not one per check — and also collect in a "Recent
+  alerts" feed on the screen. (Alerts fire only while NorthKey is running.)
+- **Netdata live monitoring.** Expand a server row → **Live monitoring**: if the server runs the
+  free Netdata agent, you get a per-second live CPU chart, RAM/load/disk gauges, and Netdata's
+  own active alarms as badges — the same data Netdata's dashboard shows, inside NorthKey. A
+  one-click check tells you whether the agent is reachable; if it isn't, you get copy-paste
+  commands to install Netdata and open port 19999 **to your IP only** (plus an SSH-tunnel
+  alternative), and fields for a custom port or proxy auth.
+
 ## [0.1.39] — 2026-07-21
 
 ### Added

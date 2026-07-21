@@ -6,9 +6,14 @@
 //! ever fed to the ephemeral orphan sweep, and powering the node that carries the
 //! active VPN tunnel is refused (that teardown path lives on the VPN screen).
 
-use sentinel_core::cloud::{HetznerClient, LinodeClient, PowerAction, ServerInfo, ServerManager};
-use serde::Serialize;
-use tauri::State;
+use sentinel_core::cloud::{
+    netdata, watchdog, HetznerClient, LinodeClient, NetdataEndpoint, PowerAction, ServerInfo,
+    ServerManager,
+};
+use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
+use tauri::{AppHandle, Emitter, Manager, State};
 
 use crate::state::AppState;
 
@@ -301,4 +306,420 @@ pub async fn servers_power(
         &format!("{provider}/{id}: {action} requested"),
     );
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Stage 2: per-server monitor config (servers-config.json), Netdata bridge
+// commands, and the background watchdog with native-toast alerts.
+// ---------------------------------------------------------------------------
+
+const CONFIG_FILE: &str = "servers-config.json";
+
+#[derive(Serialize, Deserialize, Clone, Copy)]
+#[serde(rename_all = "camelCase", default)]
+pub struct WatchdogFileCfg {
+    pub enabled: bool,
+    pub interval_secs: u32,
+    pub cpu_pct: f64,
+    pub cpu_sustain_ticks: u32,
+    pub disk_pct: f64,
+}
+
+impl Default for WatchdogFileCfg {
+    fn default() -> Self {
+        WatchdogFileCfg {
+            enabled: false,
+            interval_secs: 120,
+            cpu_pct: 90.0,
+            cpu_sustain_ticks: 3,
+            disk_pct: 90.0,
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize, Clone, Copy)]
+#[serde(rename_all = "camelCase", default)]
+pub struct NetdataFileCfg {
+    pub enabled: bool,
+    pub port: u16,
+    pub https: bool,
+    pub has_auth: bool,
+}
+
+impl Default for NetdataFileCfg {
+    fn default() -> Self {
+        NetdataFileCfg {
+            enabled: false,
+            port: 19999,
+            https: false,
+            has_auth: false,
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize, Default, Clone)]
+#[serde(rename_all = "camelCase", default)]
+struct ServersFileCfg {
+    watchdog: WatchdogFileCfg,
+    /// Keyed by `"provider:id"`.
+    netdata: BTreeMap<String, NetdataFileCfg>,
+}
+
+fn cfg_path(dir: &Path) -> PathBuf {
+    dir.join(CONFIG_FILE)
+}
+
+fn load_cfg(dir: &Path) -> ServersFileCfg {
+    std::fs::read_to_string(cfg_path(dir))
+        .ok()
+        .and_then(|t| serde_json::from_str(&t).ok())
+        .unwrap_or_default()
+}
+
+fn save_cfg(dir: &Path, cfg: &ServersFileCfg) -> Result<(), String> {
+    std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+    std::fs::write(
+        cfg_path(dir),
+        serde_json::to_string_pretty(cfg).map_err(|e| e.to_string())?,
+    )
+    .map_err(|e| e.to_string())
+}
+
+fn data_dir(state: &State<'_, AppState>) -> PathBuf {
+    state.inner.lock().unwrap().data_dir.clone()
+}
+
+fn netdata_key(provider: &str, id: &str) -> String {
+    format!("{provider}:{id}")
+}
+
+fn netdata_auth_account(provider: &str, id: &str) -> String {
+    format!("netdata-auth-{provider}-{id}")
+}
+
+/// Build the endpoint for one server from its stored config (+ keychain auth header).
+fn endpoint_for(
+    dir: &Path,
+    provider: &str,
+    id: &str,
+    host: &str,
+) -> (NetdataEndpoint, NetdataFileCfg) {
+    let cfg = load_cfg(dir)
+        .netdata
+        .get(&netdata_key(provider, id))
+        .copied()
+        .unwrap_or_default();
+    let auth_header = if cfg.has_auth {
+        keyring::Entry::new(KC_SERVICE, &netdata_auth_account(provider, id))
+            .ok()
+            .and_then(|e| e.get_password().ok())
+            .filter(|s| !s.trim().is_empty())
+    } else {
+        None
+    };
+    (
+        NetdataEndpoint {
+            https: cfg.https,
+            host: host.to_string(),
+            port: cfg.port,
+            auth_header,
+        },
+        cfg,
+    )
+}
+
+#[tauri::command]
+pub fn servers_watchdog_get(state: State<AppState>) -> WatchdogFileCfg {
+    load_cfg(&data_dir(&state)).watchdog
+}
+
+#[tauri::command]
+pub fn servers_watchdog_set(state: State<AppState>, cfg: WatchdogFileCfg) -> Result<(), String> {
+    let dir = data_dir(&state);
+    let mut file = load_cfg(&dir);
+    file.watchdog = cfg;
+    save_cfg(&dir, &file)
+}
+
+#[tauri::command]
+pub fn netdata_get(state: State<AppState>, provider: String, id: String) -> NetdataFileCfg {
+    load_cfg(&data_dir(&state))
+        .netdata
+        .get(&netdata_key(&provider, &id))
+        .copied()
+        .unwrap_or_default()
+}
+
+/// Save one server's Netdata config. `auth_value`: `None` leaves the stored credential
+/// untouched; `Some("")` clears it; `Some(v)` stores `v` as the raw Authorization header
+/// value in the keychain (never in the JSON).
+#[tauri::command]
+pub fn netdata_set(
+    state: State<AppState>,
+    provider: String,
+    id: String,
+    cfg: NetdataFileCfg,
+    auth_value: Option<String>,
+) -> Result<(), String> {
+    let dir = data_dir(&state);
+    let mut file = load_cfg(&dir);
+    let key = netdata_key(&provider, &id);
+    let prev_has_auth = file.netdata.get(&key).map(|c| c.has_auth).unwrap_or(false);
+    let mut stored = cfg;
+    match auth_value {
+        None => stored.has_auth = prev_has_auth,
+        Some(v) => {
+            let account = netdata_auth_account(&provider, &id);
+            let entry = keyring::Entry::new(KC_SERVICE, &account).map_err(|e| e.to_string())?;
+            if v.trim().is_empty() {
+                let _ = entry.delete_credential();
+                stored.has_auth = false;
+            } else {
+                entry.set_password(v.trim()).map_err(|e| e.to_string())?;
+                stored.has_auth = true;
+            }
+        }
+    }
+    file.netdata.insert(key, stored);
+    save_cfg(&dir, &file)
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NetdataProbeOut {
+    reachable: bool,
+    version: String,
+    hostname: String,
+    url: String,
+    https: bool,
+    error: Option<String>,
+}
+
+/// Try to reach a server's Netdata agent: the configured scheme first, then the other.
+/// On success the working scheme is saved back to the config.
+#[tauri::command]
+pub async fn netdata_probe(
+    state: State<'_, AppState>,
+    provider: String,
+    id: String,
+    host: String,
+) -> Result<NetdataProbeOut, String> {
+    let dir = data_dir(&state);
+    let (ep, cfg) = endpoint_for(&dir, &provider, &id, &host);
+    let mut last_err = String::new();
+    for https in [ep.https, !ep.https] {
+        let try_ep = NetdataEndpoint {
+            https,
+            ..ep.clone()
+        };
+        match try_ep.info().await {
+            Ok(info) => {
+                // Persist the working scheme so future fetches skip the fallback.
+                let mut file = load_cfg(&dir);
+                file.netdata
+                    .insert(netdata_key(&provider, &id), NetdataFileCfg { https, ..cfg });
+                let _ = save_cfg(&dir, &file);
+                return Ok(NetdataProbeOut {
+                    reachable: true,
+                    version: info.version,
+                    hostname: info.hostname,
+                    url: try_ep.base_url(),
+                    https,
+                    error: None,
+                });
+            }
+            Err(e) => last_err = e.to_string(),
+        }
+    }
+    Ok(NetdataProbeOut {
+        reachable: false,
+        version: String::new(),
+        hostname: String::new(),
+        url: ep.base_url(),
+        https: ep.https,
+        error: Some(last_err),
+    })
+}
+
+/// One aggregated Netdata metric series, ready to chart. `kind`: cpu | ram | net | load | disk.
+#[tauri::command]
+pub async fn netdata_metric(
+    state: State<'_, AppState>,
+    provider: String,
+    id: String,
+    host: String,
+    kind: String,
+    after_secs: u32,
+    points: u32,
+) -> Result<Vec<[f64; 2]>, String> {
+    let dir = data_dir(&state);
+    let (ep, _) = endpoint_for(&dir, &provider, &id, &host);
+    let (chart, agg): (
+        &str,
+        fn(&netdata::NetdataSeries) -> Vec<sentinel_core::cloud::MetricPoint>,
+    ) = match kind.as_str() {
+        "cpu" => ("system.cpu", netdata::cpu_total_pct),
+        "ram" => ("system.ram", netdata::ram_used_pct),
+        "net" => ("system.net", netdata::net_total_bps),
+        "load" => ("system.load", netdata::load1),
+        "disk" => ("disk_space._", netdata::disk_used_pct),
+        k => return Err(format!("unknown metric kind: {k}")),
+    };
+    let series = ep
+        .data(chart, after_secs.clamp(10, 86_400), points.clamp(2, 600))
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(points_out(&agg(&series)))
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AlarmOut {
+    name: String,
+    status: String,
+    value: String,
+}
+
+#[tauri::command]
+pub async fn netdata_alarms(
+    state: State<'_, AppState>,
+    provider: String,
+    id: String,
+    host: String,
+) -> Result<Vec<AlarmOut>, String> {
+    let dir = data_dir(&state);
+    let (ep, _) = endpoint_for(&dir, &provider, &id, &host);
+    Ok(ep
+        .alarms_active()
+        .await
+        .map_err(|e| e.to_string())?
+        .into_iter()
+        .map(|a| AlarmOut {
+            name: a.name,
+            status: a.status,
+            value: a.value,
+        })
+        .collect())
+}
+
+// ---------------------------------------------------------------------------
+// the watchdog poller
+// ---------------------------------------------------------------------------
+
+/// One watchdog tick: list fleets, sample Netdata where enabled, evaluate, alert.
+async fn watchdog_tick(
+    app: &AppHandle,
+    dir: &Path,
+    file: &ServersFileCfg,
+    wd: &mut watchdog::WatchdogState,
+) {
+    let mut samples: Vec<watchdog::ServerSample> = Vec::new();
+    let mut providers_ok: Vec<&'static str> = Vec::new();
+
+    let mut fleets: Vec<(&'static str, Vec<ServerInfo>)> = Vec::new();
+    if let Some(token) = crate::vpn::get_token() {
+        match ServerManager::list_all(&LinodeClient::new(token)).await {
+            Ok(list) => {
+                providers_ok.push("linode");
+                fleets.push(("linode", list));
+            }
+            Err(e) => crate::applog::info("servers.watchdog", &format!("linode list failed: {e}")),
+        }
+    }
+    if let Some(token) = hetzner_get_token() {
+        match HetznerClient::new(token).list_all().await {
+            Ok(list) => {
+                providers_ok.push("hetzner");
+                fleets.push(("hetzner", list));
+            }
+            Err(e) => crate::applog::info("servers.watchdog", &format!("hetzner list failed: {e}")),
+        }
+    }
+
+    for (provider, list) in &fleets {
+        for info in list {
+            let key = netdata_key(provider, &info.id);
+            let mut sample = watchdog::ServerSample {
+                key: key.clone(),
+                label: info.label.clone(),
+                state: info.state,
+                cpu_pct: None,
+                disk_used_pct: None,
+                netdata_alarms: None,
+            };
+            // Netdata deep-sample only where explicitly enabled and the server has an IP.
+            let nd_enabled = file.netdata.get(&key).map(|c| c.enabled).unwrap_or(false);
+            if nd_enabled {
+                if let Some(host) = &info.ipv4 {
+                    let (ep, _) = endpoint_for(dir, provider, &info.id, host);
+                    if let Ok(s) = ep.data("system.cpu", 60, 4).await {
+                        sample.cpu_pct = netdata::cpu_total_pct(&s).last().map(|p| p.value);
+                    }
+                    if let Ok(s) = ep.data("disk_space._", 60, 2).await {
+                        sample.disk_used_pct = netdata::disk_used_pct(&s).last().map(|p| p.value);
+                    }
+                    if let Ok(alarms) = ep.alarms_active().await {
+                        sample.netdata_alarms = Some(alarms.len() as u32);
+                    }
+                }
+            }
+            samples.push(sample);
+        }
+    }
+
+    let cfg = watchdog::WatchdogCfg {
+        cpu_pct: file.watchdog.cpu_pct,
+        cpu_sustain_ticks: file.watchdog.cpu_sustain_ticks.max(1),
+        disk_pct: file.watchdog.disk_pct,
+    };
+    for alert in watchdog::evaluate(wd, &samples, &providers_ok, &cfg) {
+        let (kind, key, label) = match &alert {
+            watchdog::Alert::Down { key, label } => ("down", key, label),
+            watchdog::Alert::Recovered { key, label } => ("recovered", key, label),
+            watchdog::Alert::CpuHigh { key, label, .. } => ("cpu", key, label),
+            watchdog::Alert::DiskHigh { key, label, .. } => ("disk", key, label),
+            watchdog::Alert::NetdataAlarm { key, label, .. } => ("netdata", key, label),
+        };
+        let message = alert.message();
+        crate::applog::info("servers.alert", &message);
+        let _ = app.emit(
+            "servers:alert",
+            serde_json::json!({
+                "kind": kind,
+                "key": key,
+                "label": label,
+                "message": message,
+                "ts": time::OffsetDateTime::now_utc().unix_timestamp(),
+            }),
+        );
+        // Native toast (Windows). Failures are non-fatal — the in-app feed + log always get it.
+        use tauri_plugin_notification::NotificationExt;
+        let _ = app
+            .notification()
+            .builder()
+            .title("NorthKey — server alert")
+            .body(&message)
+            .show();
+    }
+}
+
+/// Background watchdog: self-gating loop (config re-read every tick, like the VPN
+/// auto-connect poller). Alerts only while the app runs — stated in the UI.
+pub fn spawn_servers_watchdog(app: AppHandle) {
+    tauri::async_runtime::spawn(async move {
+        let mut wd = watchdog::WatchdogState::default();
+        loop {
+            let dir = {
+                let s = app.state::<AppState>();
+                let d = s.inner.lock().unwrap().data_dir.clone();
+                d
+            };
+            let file = load_cfg(&dir);
+            if file.watchdog.enabled {
+                watchdog_tick(&app, &dir, &file, &mut wd).await;
+            }
+            let sleep_secs = file.watchdog.interval_secs.clamp(60, 3600) as u64;
+            tokio::time::sleep(std::time::Duration::from_secs(sleep_secs)).await;
+        }
+    });
 }

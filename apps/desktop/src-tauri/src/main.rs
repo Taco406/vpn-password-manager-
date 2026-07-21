@@ -37,6 +37,7 @@ fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
+        .plugin(tauri_plugin_notification::init())
         .setup(|app| {
             // SAFETY: unconditionally clear any stale kill-switch firewall rules FIRST, before
             // anything else, so a crash/kill while connected can never leave the user offline.
@@ -63,6 +64,8 @@ fn main() {
             vpn::sweep_on_launch(data_dir);
             // Background poller: auto-connect on untrusted Wi-Fi (opt-in; self-gating each tick).
             vpn::spawn_autoconnect_poller(app.handle().clone());
+            // Background server watchdog: down/CPU/disk/Netdata alerts (opt-in; self-gating).
+            servers::spawn_servers_watchdog(app.handle().clone());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -156,6 +159,13 @@ fn main() {
             servers::servers_list,
             servers::servers_metrics,
             servers::servers_power,
+            servers::servers_watchdog_get,
+            servers::servers_watchdog_set,
+            servers::netdata_get,
+            servers::netdata_set,
+            servers::netdata_probe,
+            servers::netdata_metric,
+            servers::netdata_alarms,
         ])
         .build(tauri::generate_context!())
         .expect("error while building NorthKey")

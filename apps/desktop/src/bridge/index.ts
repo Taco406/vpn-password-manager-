@@ -290,6 +290,101 @@ export async function serversPower(provider: string, id: string, action: string)
   await inv("servers_power", { provider, id, action });
 }
 
+// --- Server watchdog + Netdata (stage 2) -------------------------------------
+
+export interface WatchdogCfg {
+  enabled: boolean;
+  intervalSecs: number;
+  cpuPct: number;
+  cpuSustainTicks: number;
+  diskPct: number;
+}
+
+export interface NetdataCfg {
+  enabled: boolean;
+  port: number;
+  https: boolean;
+  hasAuth: boolean;
+}
+
+export interface NetdataProbe {
+  reachable: boolean;
+  version: string;
+  hostname: string;
+  url: string;
+  https: boolean;
+  error: string | null;
+}
+
+export interface ServerAlert {
+  kind: string; // down | recovered | cpu | disk | netdata
+  key: string;
+  label: string;
+  message: string;
+  ts: number;
+}
+
+export async function serversWatchdogGet(): Promise<WatchdogCfg> {
+  if (!inTauri())
+    return { enabled: false, intervalSecs: 120, cpuPct: 90, cpuSustainTicks: 3, diskPct: 90 };
+  return inv<WatchdogCfg>("servers_watchdog_get");
+}
+
+export async function serversWatchdogSet(cfg: WatchdogCfg): Promise<void> {
+  if (!inTauri()) return;
+  await inv("servers_watchdog_set", { cfg });
+}
+
+export async function netdataGet(provider: string, id: string): Promise<NetdataCfg> {
+  if (!inTauri()) return { enabled: false, port: 19999, https: false, hasAuth: false };
+  return inv<NetdataCfg>("netdata_get", { provider, id });
+}
+
+/** `authValue`: undefined = keep stored credential; "" = clear; else = store. */
+export async function netdataSet(
+  provider: string,
+  id: string,
+  cfg: NetdataCfg,
+  authValue?: string,
+): Promise<void> {
+  if (!inTauri()) return;
+  await inv("netdata_set", { provider, id, cfg, authValue: authValue ?? null });
+}
+
+export async function netdataProbe(provider: string, id: string, host: string): Promise<NetdataProbe> {
+  if (!inTauri()) throw new Error("Netdata monitoring is only available in the desktop app.");
+  return inv<NetdataProbe>("netdata_probe", { provider, id, host });
+}
+
+/** One aggregated series, ready to chart. kind: cpu | ram | net | load | disk. */
+export async function netdataMetric(
+  provider: string,
+  id: string,
+  host: string,
+  kind: string,
+  afterSecs: number,
+  points: number,
+): Promise<[number, number][]> {
+  if (!inTauri()) throw new Error("Netdata monitoring is only available in the desktop app.");
+  return inv<[number, number][]>("netdata_metric", { provider, id, host, kind, afterSecs, points });
+}
+
+export async function netdataAlarms(
+  provider: string,
+  id: string,
+  host: string,
+): Promise<{ name: string; status: string; value: string }[]> {
+  if (!inTauri()) return [];
+  return inv("netdata_alarms", { provider, id, host });
+}
+
+/** Subscribe to watchdog alerts; returns an unsubscribe fn. */
+export async function onServersAlert(cb: (a: ServerAlert) => void): Promise<() => void> {
+  if (!inTauri()) return () => {};
+  const { listen } = await import("@tauri-apps/api/event");
+  return listen<ServerAlert>("servers:alert", (ev) => cb(ev.payload));
+}
+
 /**
  * Instant local vault audit (reused / weak / old, no network) so the Health tab renders without
  * waiting on the HIBP breach check. The full `bridge.healthAudit()` runs after and fills breaches.
