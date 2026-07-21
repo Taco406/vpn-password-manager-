@@ -755,6 +755,49 @@ export async function syncDeviceRevoke(id: string): Promise<void> {
   await inv("sync_device_revoke", { id });
 }
 
+// --- Attack monitor (security events + IP bans on the sync server) ---------------------------
+
+export interface SecurityEvent {
+  id: string;
+  kind: string;
+  ip: string | null;
+  detail: string | null;
+  createdAt: string;
+}
+
+export interface SecuritySummary {
+  /** Counts per event kind over the last 24h (e.g. { login_ok: 3, login_fail_bootstrap: 12 }). */
+  last24h: Record<string, number>;
+  /** Number of IPs currently under an active ban. */
+  bannedActive: number;
+  /** Whether the server has auto-ban enabled (SENTINEL_AUTOBAN_THRESHOLD > 0). */
+  autobanEnabled: boolean;
+}
+
+/** Recent security events on the sync server, newest first. `since` = unix seconds. */
+export async function syncSecurityEvents(since?: number): Promise<SecurityEvent[]> {
+  if (!inTauri()) return [];
+  return inv<SecurityEvent[]>("sync_security_events", { since: since ?? null });
+}
+
+/** 24h summary counts + active-ban count for the Security panel headline. */
+export async function syncSecuritySummary(): Promise<SecuritySummary> {
+  if (!inTauri()) return { last24h: {}, bannedActive: 0, autobanEnabled: false };
+  return inv<SecuritySummary>("sync_security_summary");
+}
+
+/** Block an IP on the sync server. `minutes` omitted = permanent. */
+export async function syncBanIp(ip: string, minutes?: number): Promise<void> {
+  if (!inTauri()) return;
+  await inv("sync_ban_ip", { ip, minutes: minutes ?? null });
+}
+
+/** Remove any block on an IP. */
+export async function syncUnbanIp(ip: string): Promise<void> {
+  if (!inTauri()) return;
+  await inv("sync_unban_ip", { ip });
+}
+
 /**
  * Finish (or repair) sign-in to an already-deployed one-click sync server whose initial
  * sign-in didn't complete (e.g. the server was still installing when the deploy timed out).

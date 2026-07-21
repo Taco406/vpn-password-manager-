@@ -53,6 +53,10 @@ async fn setup() -> (Router, PgPool) {
 }
 
 async fn setup_with(bootstrap_token: Option<&str>) -> (Router, PgPool) {
+    setup_full(bootstrap_token, 0).await
+}
+
+async fn setup_full(bootstrap_token: Option<&str>, autoban_threshold: u32) -> (Router, PgPool) {
     let pool = sentinel_api::connect(&database_url())
         .await
         .expect("db connect");
@@ -67,6 +71,9 @@ async fn setup_with(bootstrap_token: Option<&str>) -> (Router, PgPool) {
         production: false,
         trust_forwarded_for: false,
         cors_allowed_origins: Vec::new(),
+        autoban_threshold,
+        autoban_window_secs: 300,
+        autoban_minutes: 60,
     };
     let google: Arc<dyn GoogleVerifier> = Arc::new(MockGoogleVerifier);
     let app = sentinel_api::build_app(pool.clone(), JwtKeys::ephemeral(), config, google);
@@ -499,4 +506,198 @@ async fn unlock_relay_lifecycle_is_opaque() {
     assert_eq!(s, StatusCode::OK);
     assert_eq!(v["state"], "approved");
     assert_eq!(v["response_payload_b64"], resp_payload);
+}
+
+// --- attack monitor -------------------------------------------------------
+
+#[tokio::test]
+async fn security_events_recorded_and_listed() {
+    let (app, _pool) = setup_with(Some("watch-bootstrap")).await;
+
+    // A wrong bootstrap token must be recorded as a failure event…
+    let (s, _v) = call(
+        &app,
+        post(
+            "/v1/auth/bootstrap",
+            None,
+            json!({ "token": "wrong", "device": { "name": "D", "platform": "linux" } }),
+        ),
+    )
+    .await;
+    assert_eq!(s, StatusCode::UNAUTHORIZED);
+
+    // …and a correct one signs in (recorded as login_ok).
+    let (s, v) = call(
+        &app,
+        post(
+            "/v1/auth/bootstrap",
+            None,
+            json!({ "token": "watch-bootstrap", "device": { "name": "D", "platform": "linux" } }),
+        ),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "bootstrap: {v}");
+    let access = v["access_token"].as_str().unwrap().to_string();
+
+    // The authed device can read the security event log.
+    let (s, v) = call(
+        &app,
+        Request::builder()
+            .uri("/v1/security-events")
+            .header("authorization", format!("Bearer {access}"))
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "events: {v}");
+    let kinds: Vec<&str> = v["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|e| e["kind"].as_str())
+        .collect();
+    assert!(kinds.contains(&"login_fail_bootstrap"), "kinds: {kinds:?}");
+    assert!(kinds.contains(&"login_ok"), "kinds: {kinds:?}");
+
+    // The summary endpoint aggregates and reports auto-ban off by default.
+    let (s, v) = call(
+        &app,
+        Request::builder()
+            .uri("/v1/security-summary")
+            .header("authorization", format!("Bearer {access}"))
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "summary: {v}");
+    assert_eq!(v["autobanEnabled"], false);
+    assert!(v["last24h"]["login_fail_bootstrap"].as_i64().unwrap() >= 1);
+}
+
+#[tokio::test]
+async fn manual_ban_endpoint_and_unban() {
+    let (app, pool) = setup_with(Some("ban-bootstrap")).await;
+    let (_s, v) = call(
+        &app,
+        post(
+            "/v1/auth/bootstrap",
+            None,
+            json!({ "token": "ban-bootstrap", "device": { "name": "D", "platform": "linux" } }),
+        ),
+    )
+    .await;
+    let access = v["access_token"].as_str().unwrap().to_string();
+
+    // Use a distinctive IP so parallel tests don't collide.
+    let ip = "203.0.113.77";
+    sentinel_api::security::unban(&pool, ip).await.unwrap(); // clean slate
+
+    let (s, _v) = call(
+        &app,
+        post(
+            "/v1/security-events/ban",
+            Some(&access),
+            json!({ "ip": ip, "minutes": 60 }),
+        ),
+    )
+    .await;
+    assert_eq!(s, StatusCode::NO_CONTENT);
+    assert!(sentinel_api::security::is_banned(&pool, ip).await);
+
+    let (s, _v) = call(
+        &app,
+        post(
+            "/v1/security-events/unban",
+            Some(&access),
+            json!({ "ip": ip }),
+        ),
+    )
+    .await;
+    assert_eq!(s, StatusCode::NO_CONTENT);
+    assert!(!sentinel_api::security::is_banned(&pool, ip).await);
+}
+
+#[tokio::test]
+async fn permanent_and_expired_bans_behave() {
+    let (_app, pool) = setup_with(None).await;
+    let ip = "203.0.113.88";
+    sentinel_api::security::unban(&pool, ip).await.unwrap();
+
+    // Permanent (no minutes) → banned.
+    sentinel_api::security::ban(&pool, ip, None).await.unwrap();
+    assert!(sentinel_api::security::is_banned(&pool, ip).await);
+
+    // An already-expired ban (0 minutes falls back to permanent per ban(), so set via SQL).
+    sqlx::query("UPDATE banned_ips SET until = now() - interval '1 minute' WHERE ip = $1::inet")
+        .bind(ip)
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert!(
+        !sentinel_api::security::is_banned(&pool, ip).await,
+        "expired ban must not block"
+    );
+
+    sentinel_api::security::unban(&pool, ip).await.unwrap();
+}
+
+/// Auto-ban only triggers once failures reach the threshold, and the owner-lockout guard keeps a
+/// recently-successful IP from being banned. Driven directly (the in-process HTTP harness has no
+/// peer IP, so `client_ip` is `"local"` and never auto-bans).
+#[tokio::test]
+async fn auto_ban_threshold_and_owner_guard() {
+    use sentinel_api::security;
+    let (_app, pool) = setup_full(None, 3).await;
+
+    // An AppState mirroring `build_app`, but with auto-ban threshold 3 so we can exercise it.
+    let config = Config {
+        bind: "127.0.0.1:0".into(),
+        database_url: database_url(),
+        google_client_id: None,
+        bootstrap_token: None,
+        totp_enc_key: [7u8; 32],
+        production: false,
+        trust_forwarded_for: false,
+        cors_allowed_origins: Vec::new(),
+        autoban_threshold: 3,
+        autoban_window_secs: 300,
+        autoban_minutes: 60,
+    };
+    let google: Arc<dyn GoogleVerifier> = Arc::new(MockGoogleVerifier);
+    let st = sentinel_api::state::AppState {
+        pool: pool.clone(),
+        keys: JwtKeys::ephemeral(),
+        config,
+        google,
+        limiter: sentinel_api::ratelimit::RateLimiter::new(),
+    };
+
+    let ip = "203.0.113.99";
+    security::unban(&pool, ip).await.unwrap(); // clean slate
+
+    // Two failures is below the threshold ⇒ no ban.
+    for _ in 0..2 {
+        security::record(&pool, None, "totp_fail", ip, None).await;
+    }
+    security::maybe_autoban(&st, ip).await;
+    assert!(!security::is_banned(&pool, ip).await, "below threshold");
+
+    // The third failure reaches the threshold ⇒ auto-ban.
+    security::record(&pool, None, "totp_fail", ip, None).await;
+    security::maybe_autoban(&st, ip).await;
+    assert!(security::is_banned(&pool, ip).await, "threshold reached");
+
+    // Owner guard: a recent successful sign-in from the same IP prevents a ban even past threshold.
+    security::unban(&pool, ip).await.unwrap();
+    security::record(&pool, None, "login_ok", ip, None).await;
+    for _ in 0..5 {
+        security::record(&pool, None, "totp_fail", ip, None).await;
+    }
+    security::maybe_autoban(&st, ip).await;
+    assert!(
+        !security::is_banned(&pool, ip).await,
+        "owner guard must protect a recently-successful IP"
+    );
+
+    security::unban(&pool, ip).await.unwrap();
 }

@@ -1060,6 +1060,143 @@ pub async fn sync_device_revoke(state: State<'_, AppState>, id: String) -> Resul
 }
 
 // ---------------------------------------------------------------------------
+// Attack monitor — read the sync server's security event log and manage IP bans.
+// The server records auth outcomes (failed sign-ins, refresh-token replays, rate-limit
+// trips) and — when enabled — auto-bans abusive IPs. These commands surface that on the
+// Devices screen and drive the manual Block/Unblock control.
+// ---------------------------------------------------------------------------
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SecurityEventOut {
+    id: String,
+    kind: String,
+    ip: Option<String>,
+    detail: Option<String>,
+    created_at: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SecuritySummaryOut {
+    last24h: std::collections::HashMap<String, i64>,
+    banned_active: i64,
+    autoban_enabled: bool,
+}
+
+#[tauri::command]
+pub async fn sync_security_events(
+    state: State<'_, AppState>,
+    since: Option<i64>,
+) -> Result<Vec<SecurityEventOut>, String> {
+    let api = api_for(&state)?;
+    let path = match since {
+        Some(s) => format!("/security-events?since={s}"),
+        None => "/security-events".to_string(),
+    };
+    let resp = api.authed(reqwest::Method::GET, &path, &[], None).await?;
+    if !resp.status().is_success() {
+        return Err(format!("security events: HTTP {}", resp.status()));
+    }
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct E {
+        id: String,
+        kind: String,
+        #[serde(default)]
+        ip: Option<String>,
+        #[serde(default)]
+        detail: Option<String>,
+        #[serde(default)]
+        created_at: i64,
+    }
+    #[derive(Deserialize)]
+    struct Resp {
+        events: Vec<E>,
+    }
+    let r: Resp = resp.json().await.map_err(estr)?;
+    Ok(r.events
+        .into_iter()
+        .map(|e| SecurityEventOut {
+            id: e.id,
+            kind: e.kind,
+            ip: e.ip,
+            detail: e.detail,
+            created_at: iso(e.created_at),
+        })
+        .collect())
+}
+
+#[tauri::command]
+pub async fn sync_security_summary(
+    state: State<'_, AppState>,
+) -> Result<SecuritySummaryOut, String> {
+    let api = api_for(&state)?;
+    let resp = api
+        .authed(reqwest::Method::GET, "/security-summary", &[], None)
+        .await?;
+    if !resp.status().is_success() {
+        return Err(format!("security summary: HTTP {}", resp.status()));
+    }
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Resp {
+        #[serde(default)]
+        last24h: std::collections::HashMap<String, i64>,
+        #[serde(default)]
+        banned_active: i64,
+        #[serde(default)]
+        autoban_enabled: bool,
+    }
+    let r: Resp = resp.json().await.map_err(estr)?;
+    Ok(SecuritySummaryOut {
+        last24h: r.last24h,
+        banned_active: r.banned_active,
+        autoban_enabled: r.autoban_enabled,
+    })
+}
+
+#[tauri::command]
+pub async fn sync_ban_ip(
+    state: State<'_, AppState>,
+    ip: String,
+    minutes: Option<i64>,
+) -> Result<(), String> {
+    let api = api_for(&state)?;
+    let body = json!({ "ip": ip, "minutes": minutes });
+    let resp = api
+        .authed(
+            reqwest::Method::POST,
+            "/security-events/ban",
+            &[],
+            Some(body),
+        )
+        .await?;
+    if !resp.status().is_success() {
+        return Err(format!("block IP: HTTP {}", resp.status()));
+    }
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn sync_unban_ip(state: State<'_, AppState>, ip: String) -> Result<(), String> {
+    let api = api_for(&state)?;
+    let body = json!({ "ip": ip });
+    let resp = api
+        .authed(
+            reqwest::Method::POST,
+            "/security-events/unban",
+            &[],
+            Some(body),
+        )
+        .await?;
+    if !resp.status().is_success() {
+        return Err(format!("unblock IP: HTTP {}", resp.status()));
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
 // "Deploy my sync server" — one-click durable Linode running the prebuilt image over
 // self-signed HTTPS, authed by a generated bootstrap token. No Google client id, no domain.
 // ---------------------------------------------------------------------------
