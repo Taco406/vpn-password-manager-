@@ -1,5 +1,5 @@
 import { NavLink, Outlet } from "react-router-dom";
-import { Shield, KeyRound, Globe2, HeartPulse, Smartphone, Settings as Cog, Lock, FlaskConical, Radar } from "lucide-react";
+import { Mountain, KeyRound, Globe2, HeartPulse, Smartphone, Settings as Cog, Lock, FlaskConical, Radar } from "lucide-react";
 import { useApp } from "../stores/app";
 import { bridge } from "../bridge";
 import { ClipboardCountdown } from "./ClipboardCountdown";
@@ -21,9 +21,16 @@ export function Layout() {
   return (
     <div className="flex h-full">
       <aside className="flex w-[220px] shrink-0 flex-col border-r border-[var(--border-subtle)] bg-[var(--bg-raised)] px-3 py-5">
-        <div className="mb-7 flex items-center gap-2 px-2">
-          <Shield className="text-accent" size={22} />
-          <span className="text-lg font-bold tracking-tight">SENTINEL</span>
+        <div className="mb-7 px-2">
+          <div className="flex items-center gap-2">
+            <Mountain className="text-accent" size={22} />
+            <span className="text-lg font-bold tracking-tight">
+              NORTH<span className="text-accent">KEY</span>
+            </span>
+          </div>
+          <div className="mt-0.5 text-[10px] leading-tight text-[var(--text-muted)]">
+            Your network. Your passwords. <span className="text-accent">Your control.</span>
+          </div>
         </div>
         <nav className="flex flex-col gap-1">
           {nav.map(({ to, label, icon: Icon }) => (

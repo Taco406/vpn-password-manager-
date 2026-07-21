@@ -8,6 +8,17 @@ The format follows [Keep a Changelog](https://keepachangelog.com/). Versions are
 [semantic](https://semver.org/). **Add a new `## [x.y.z]` section at the top in the same PR
 that bumps the app version** — that's how "the changelog updates on every merge."
 
+## [0.1.38] — 2026-07-21
+
+### Changed
+- **SENTINEL is now NorthKey.** New name, new mountain‑and‑keyhole logo, new motto — *Your
+  network. Your passwords. Your control.* The app window, installer, sidebar, browser extension,
+  and all icons carry the new brand. Everything under the hood is unchanged: your vault, settings,
+  sync server, devices, and sign‑ins all carry over — the update installs over the old SENTINEL
+  version like any other update (the installer keeps the same upgrade identity). Two cosmetic
+  notes: Start‑menu/desktop shortcuts are recreated under the new name, and if you use browser
+  autofill the extension shows its new name after the app restages it.
+
 ## [0.1.37] — 2026-07-20
 
 ### Fixed

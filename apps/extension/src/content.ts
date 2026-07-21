@@ -1,9 +1,9 @@
-// Content script: makes SENTINEL feel like a real password manager in the page.
+// Content script: makes NorthKey feel like a real password manager in the page.
 //
 //  - a small key badge appears inside the focused username/password field; clicking it opens
 //    a fill menu (matching logins, an "unlock" hint when the app is locked, an empty state,
 //    and a "generate password" action),
-//  - on form submit with a password it offers an in-page "Save to SENTINEL?" bar,
+//  - on form submit with a password it offers an in-page "Save to NorthKey?" bar,
 //  - the popup can ask us to fill a specific item on the active tab.
 //
 // It never auto-fills on load and never holds secrets: every credential is fetched from the
@@ -140,7 +140,7 @@ function showBadge(anchor: HTMLInputElement) {
     const img = el("img", "width:15px;height:15px;");
     (img as HTMLImageElement).src = KEY_SVG;
     badge.appendChild(img);
-    badge.title = "Fill with SENTINEL";
+    badge.title = "Fill with NorthKey";
     badge.addEventListener("mousedown", (e) => e.preventDefault()); // keep field focus
     badge.addEventListener("click", (e) => {
       e.preventDefault();
@@ -201,7 +201,7 @@ function panel(anchor: HTMLElement): HTMLDivElement {
     "div",
     `display:flex;align-items:center;gap:6px;padding:6px 8px 8px;color:${MUTED};font-size:11px;` +
       "letter-spacing:.04em;text-transform:uppercase;",
-    "SENTINEL",
+    "NorthKey",
   );
   box.appendChild(head);
   menu = box;
@@ -245,7 +245,7 @@ async function openMenu(anchor: HTMLInputElement) {
 
   if (locked) {
     box.appendChild(
-      row("Unlock SENTINEL to fill", "Open the desktop app and unlock your vault", () => {
+      row("Unlock NorthKey to fill", "Open the desktop app and unlock your vault", () => {
         closeMenu();
       }),
     );
@@ -323,7 +323,7 @@ function showSaveBar(username: string, password: string, title: string) {
   const icon = el("img", "width:16px;height:16px;");
   (icon as HTMLImageElement).src = KEY_SVG;
   top.appendChild(icon);
-  top.appendChild(el("span", "font-weight:600;", "Save password to SENTINEL?"));
+  top.appendChild(el("span", "font-weight:600;", "Save password to NorthKey?"));
   bar.appendChild(top);
   bar.appendChild(
     el(

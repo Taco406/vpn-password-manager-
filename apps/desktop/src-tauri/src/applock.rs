@@ -215,7 +215,7 @@ pub fn applock_totp_enroll(state: State<AppState>) -> R<TotpEnroll> {
     let _ = data_dir(&state); // ensure state is live
     let secret = totp::generate_base32_secret();
     state::totp_secret_store(&secret)?;
-    let uri = totp::otpauth_uri(&secret, "vault", "SENTINEL");
+    let uri = totp::otpauth_uri(&secret, "vault", "NorthKey");
     let qr_svg = qr_svg(&uri)?;
     Ok(TotpEnroll {
         otpauth_uri: uri,

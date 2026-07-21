@@ -34,7 +34,7 @@ export function Onboarding() {
       <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} className="w-[560px]">
         <div className="mb-6 flex items-center gap-3">
           <Shield className="text-accent" size={26} />
-          <span className="text-xl font-bold tracking-tight">Set up SENTINEL</span>
+          <span className="text-xl font-bold tracking-tight">Set up NorthKey</span>
         </div>
 
         <div className="mb-5 flex items-center gap-2">
@@ -52,7 +52,7 @@ export function Onboarding() {
           <Card>
             <h2 className="text-lg font-semibold">A vault with no master password</h2>
             <p className="mt-2 text-sm text-[var(--text-secondary)]">
-              SENTINEL generates a random 256-bit key that never leaves your control. It's wrapped by your device biometric, your iPhone, and a printed recovery kit — never by a password you could forget or reuse.
+              NorthKey generates a random 256-bit key that never leaves your control. It's wrapped by your device biometric, your iPhone, and a printed recovery kit — never by a password you could forget or reuse.
             </p>
             <div className="mt-4 flex flex-col gap-2">
               <FeatureRow icon={<Fingerprint size={16} />} title="Touch ID" desc="Daily unlock, TPM-backed" />

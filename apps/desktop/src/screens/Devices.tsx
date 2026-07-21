@@ -977,7 +977,7 @@ function AccountSync({ sync, onSyncChange }: { sync: SyncStatusInfo | null; onSy
           ) : (
             <div className="space-y-2 border-t border-[var(--border-subtle)] pt-3">
               <p className="text-[11px] text-[var(--text-muted)]">
-                For a server you host yourself with a real domain. Point SENTINEL at its URL and a Google OAuth client id you
+                For a server you host yourself with a real domain. Point NorthKey at its URL and a Google OAuth client id you
                 create, then sign in with Google.
               </p>
               <div>

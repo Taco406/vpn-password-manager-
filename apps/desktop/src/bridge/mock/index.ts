@@ -98,7 +98,7 @@ class MockBridge implements SentinelBridge {
   }
   async authTotpEnroll() {
     return {
-      otpauthUri: "otpauth://totp/SENTINEL:jackson?secret=JBSWY3DPEHPK3PXP&issuer=SENTINEL",
+      otpauthUri: "otpauth://totp/NorthKey:jackson?secret=JBSWY3DPEHPK3PXP&issuer=NorthKey",
       secret: "JBSW Y3DP EHPK 3PXP",
     };
   }

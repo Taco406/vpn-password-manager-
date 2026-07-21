@@ -145,7 +145,7 @@ jobs:
         with:
           projectPath: apps/desktop
           tagName: ${{ steps.rel.outputs.tag }}
-          releaseName: "SENTINEL ${{ steps.rel.outputs.tag }}"
+          releaseName: "NorthKey ${{ steps.rel.outputs.tag }}"
           releaseBody: ${{ steps.notes.outputs.body }}
           releaseDraft: false
           prerelease: false
