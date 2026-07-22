@@ -589,8 +589,8 @@ async fn wrapped_put(
     Json(req): Json<WrappedPutReq>,
 ) -> ApiResult<StatusCode> {
     require_approved_device(&st, a.device).await?;
-    if !(1..=3).contains(&wt) {
-        return Err(ApiError::BadRequest("wrapper_type must be 1..3".into()));
+    if !(1..=4).contains(&wt) {
+        return Err(ApiError::BadRequest("wrapper_type must be 1..4".into()));
     }
     let blob = base64::engine::general_purpose::STANDARD
         .decode(req.blob_b64.as_bytes())

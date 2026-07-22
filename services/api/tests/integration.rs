@@ -352,6 +352,43 @@ async fn wrapped_keys_round_trip() {
 }
 
 #[tokio::test]
+async fn password_wrapped_key_escrow_round_trips() {
+    // Wrapper D (master password, type 4) must be storable + fetchable so a second device can
+    // "sign in + master password" and unwrap the vault key. The server never unwraps it.
+    let (app, _) = setup().await;
+    let sub = format!("user-{}", uuid::Uuid::new_v4());
+    let (access, _) = onboard(&app, &sub).await;
+
+    // A canonical 96-byte SNTL Password blob (8 header + 16 params + 24 nonce + 48 ct).
+    let mut blob = vec![0u8; 96];
+    blob[0..4].copy_from_slice(b"SNTL");
+    blob[4] = 1; // version
+    blob[5] = 4; // wrapper_type = Password
+    blob[6] = 16; // params_len LE (16-byte salt)
+    let blob_b64 = base64::engine::general_purpose::STANDARD.encode(&blob);
+
+    let (s, _) = call(
+        &app,
+        Request::builder()
+            .method("PUT")
+            .uri("/v1/wrapped-keys/4")
+            .header("authorization", format!("Bearer {access}"))
+            .header("content-type", "application/json")
+            .body(Body::from(json!({ "blob_b64": blob_b64 }).to_string()))
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(s, StatusCode::NO_CONTENT, "type-4 escrow must be accepted");
+
+    let (s, v) = call(&app, authed_req("GET", "/v1/wrapped-keys/4", &access)).await;
+    assert_eq!(s, StatusCode::OK);
+    let got = base64::engine::general_purpose::STANDARD
+        .decode(v["blob_b64"].as_str().unwrap())
+        .unwrap();
+    assert_eq!(got, blob);
+}
+
+#[tokio::test]
 async fn refresh_reuse_revokes_chain() {
     let (app, _) = setup().await;
     let sub = format!("user-{}", uuid::Uuid::new_v4());
