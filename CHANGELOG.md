@@ -8,6 +8,41 @@ The format follows [Keep a Changelog](https://keepachangelog.com/). Versions are
 [semantic](https://semver.org/). **Add a new `## [x.y.z]` section at the top in the same PR
 that bumps the app version** — that's how "the changelog updates on every merge."
 
+## [0.1.47] — 2026-07-22
+
+### Added
+- **One login on every device.** The whole multi-device story is now a single mental model:
+  *connect → sign in → master password → your vault*. The Devices screen is one **Account &
+  Sync** experience — status, **Add a device**, **Sync now** — with server management, the
+  attack monitor, and recovery tooling folded into collapsed **Advanced** sections instead of
+  five overlapping cards.
+- **Add a device now shows a QR.** The desktop mints a one-time enrollment code (5-minute,
+  single-use, hashed at rest) and renders it as a QR carrying the server address + certificate
+  pin — the iPhone scans it and is enrolled with **no tokens to type**. The copyable text code
+  for computers sits right next to it; both connect to the *same account*.
+- **The iPhone is a real vault app.** Scan the QR, enter the same master password you use on
+  the desktop, and your passwords are there: browse, search, copy (auto-expiring clipboard),
+  live TOTP codes, add/edit logins and notes, delete — synced end-to-end-encrypted through the
+  same `PUT /v1/vault` the desktops use. Face ID unlock is an optional toggle. The crypto
+  (Argon2id, XChaCha20-Poly1305, HKDF, zstd) is vendored reference C + CryptoKit, proven
+  byte-identical to the desktop by golden-vector unit tests (⌘U) generated from the Rust core.
+- **Sync servers update themselves.** New deploys install a host-side updater (daily timer + an
+  **Update server to the latest version** button under Advanced) with no Docker socket exposed
+  to the API container. Servers deployed before v0.1.47 need one last manual redeploy — the
+  morning-test script (docs/morning-test.md) walks through it.
+
+### Fixed
+- **"0 passwords synced" on a second computer — the root cause.** Google sign-in and the
+  built-in login used to create *two different accounts* on your own server, so a joined device
+  looked at an empty vault. One personal server is now **one account** regardless of how each
+  device signs in (covered by integration tests in both orders), the vault auto-pushes after
+  sign-in/deploy/join instead of waiting for a manual backup, and vault edits auto-sync
+  (debounced) so "Sync now" is a refresh, not a chore.
+- The unlock screen no longer shows "Approve on iPhone" / "Recovery kit" rows that silently
+  ignored input and unlocked from the OS keychain — only real unlock methods are listed.
+- Removed a dead second onboarding flow that contradicted the setup wizard, and the recovery
+  kit PDF is now named `northkey-recovery-kit.pdf`.
+
 ## [0.1.46] — 2026-07-22
 
 ### Added
