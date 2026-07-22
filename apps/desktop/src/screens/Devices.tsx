@@ -114,9 +114,19 @@ const EVENT_META: Record<string, { label: string; tone: "danger" | "warn" | "ok"
   rate_limited: { label: "Rate-limited", tone: "warn" },
   banned_block: { label: "Blocked attempt", tone: "muted" },
   auto_ban: { label: "Auto-banned IP", tone: "danger" },
+  enroll_fail: { label: "Bad device-enroll code", tone: "warn" },
 };
 
-const FAIL_KINDS = ["login_fail_bootstrap", "google_reject", "totp_fail", "totp_lockout"];
+const FAIL_KINDS = ["login_fail_bootstrap", "google_reject", "totp_fail", "totp_lockout", "enroll_fail"];
+
+/** The one-shot output of "Add a device": the desktop text code + (when the server supports
+ *  enrollment codes) the phone-onboarding QR. */
+type PairCodeInfo = {
+  code: string;
+  createdAt: string;
+  qrSvg?: string | null;
+  qrExpiresAt?: number | null;
+};
 
 function toneClasses(tone: "danger" | "warn" | "ok" | "muted"): string {
   switch (tone) {
@@ -909,18 +919,47 @@ function GoogleGuideSteps() {
 }
 
 /** "Add a device" affordance: mint a join code and show it with copy + a sensitivity warning. */
-function AddDeviceBlock({ busy, pairCode, onAdd }: { busy: boolean; pairCode: { code: string; createdAt: string } | null; onAdd: () => void }) {
+function AddDeviceBlock({
+  busy,
+  pairCode,
+  onAdd,
+}: {
+  busy: boolean;
+  pairCode: PairCodeInfo | null;
+  onAdd: () => void;
+}) {
   return (
     <div className="!mt-2">
       {!pairCode ? (
-        <button onClick={onAdd} disabled={busy} className="inline-flex items-center gap-1.5 rounded-[10px] border border-[var(--border-strong)] px-3 py-1.5 text-sm hover:border-[var(--accent)]/50 disabled:opacity-50">
-          <UserPlus size={14} /> {busy ? "Working…" : "Add a device"}
-        </button>
+        <div>
+          <div className="mb-1 text-sm font-medium text-[var(--text-primary)]">Add a device</div>
+          <p className="mb-2 text-xs text-[var(--text-secondary)]">
+            Put your vault on another computer or your iPhone. Your phone scans a QR; another computer pastes a code.
+          </p>
+          <button onClick={onAdd} disabled={busy} className="inline-flex items-center gap-1.5 rounded-[10px] border border-[var(--border-strong)] px-3 py-1.5 text-sm hover:border-[var(--accent)]/50 disabled:opacity-50">
+            <UserPlus size={14} /> {busy ? "Working…" : "Add a device"}
+          </button>
+        </div>
       ) : (
         <div className="space-y-2">
+          {pairCode.qrSvg && (
+            <div>
+              <div className="mb-1 text-xs font-medium text-[var(--text-primary)]">iPhone — scan this QR</div>
+              <p className="mb-2 text-[11px] text-[var(--text-secondary)]">
+                In NorthKey on your phone, tap <span className="font-medium">Scan QR from desktop</span> and point it here.
+                It connects the phone to your account (expires in ~5 minutes); your master password then unlocks the vault.
+              </p>
+              <div
+                className="w-fit rounded-[10px] bg-white p-2"
+                // eslint-disable-next-line react/no-danger
+                dangerouslySetInnerHTML={{ __html: pairCode.qrSvg }}
+              />
+            </div>
+          )}
           <div className="rounded-[10px] border border-[var(--warn)]/40 bg-[var(--warn)]/10 p-2 text-[11px] text-[var(--warn)]">
-            This code unlocks your vault on another device — treat it like a password. It’s shown once; paste it into
-            <span className="font-medium"> Devices → Join with a device code</span> on the other computer, then close this.
+            Another computer instead? This code unlocks your vault on another device — treat it like a password. It’s shown
+            once; paste it into <span className="font-medium">Account &amp; Sync → Join with a device code</span> on the
+            other computer, then close this.
           </div>
           <CodeBox code={pairCode.code} />
         </div>
@@ -946,7 +985,7 @@ function AccountSync({ sync, onSyncChange }: { sync: SyncStatusInfo | null; onSy
   const [backup, setBackup] = useState<{ recoveryCode: string; pdfBase64: string; version: number } | null>(null);
   const [restoreCode, setRestoreCode] = useState("");
   const [pwUnlock, setPwUnlock] = useState("");
-  const [pairCode, setPairCode] = useState<{ code: string; createdAt: string } | null>(null);
+  const [pairCode, setPairCode] = useState<PairCodeInfo | null>(null);
   const [devices, setDevices] = useState<SyncDevice[]>([]);
 
   useEffect(() => {

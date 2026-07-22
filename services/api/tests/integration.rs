@@ -579,6 +579,72 @@ async fn unlock_relay_lifecycle_is_opaque() {
 }
 
 #[tokio::test]
+async fn enroll_code_mint_redeem_single_use() {
+    let (app, _) = setup().await;
+    let sub = format!("user-{}", uuid::Uuid::new_v4());
+    let (desktop, _) = onboard(&app, &sub).await;
+
+    // Desktop pushes a vault, then mints an enrollment code (what the QR carries).
+    let ct = base64::engine::general_purpose::STANDARD.encode(vec![5u8; 48]);
+    let (s, _) = call(
+        &app,
+        Request::builder()
+            .method("PUT")
+            .uri("/v1/vault")
+            .header("authorization", format!("Bearer {desktop}"))
+            .header("content-type", "application/json")
+            .header("If-Match", "0")
+            .body(Body::from(json!({ "ciphertext_b64": ct }).to_string()))
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK);
+    let (s, v) = call(&app, post("/v1/enroll-codes", Some(&desktop), json!({}))).await;
+    assert_eq!(s, StatusCode::OK, "mint: {v}");
+    let code = v["code"].as_str().unwrap().to_string();
+    assert!(v["expires_at"].as_i64().unwrap() > 0);
+
+    // The new device (phone) redeems it → approved session on the SAME account, vault visible.
+    let (s, v) = call(
+        &app,
+        post(
+            "/v1/auth/enroll",
+            None,
+            json!({ "code": code, "device": { "name": "iPhone", "platform": "ios" } }),
+        ),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "redeem: {v}");
+    let phone = v["access_token"].as_str().unwrap().to_string();
+    let (s, v) = call(&app, authed_req("GET", "/v1/vault", &phone)).await;
+    assert_eq!(s, StatusCode::OK, "enrolled device must see the vault: {v}");
+
+    // Single-use: a second redeem of the same code is rejected.
+    let (s, _) = call(
+        &app,
+        post(
+            "/v1/auth/enroll",
+            None,
+            json!({ "code": code, "device": { "name": "Evil", "platform": "ios" } }),
+        ),
+    )
+    .await;
+    assert_eq!(s, StatusCode::UNAUTHORIZED, "codes are single-use");
+
+    // Garbage codes are rejected.
+    let (s, _) = call(
+        &app,
+        post(
+            "/v1/auth/enroll",
+            None,
+            json!({ "code": "not-a-code", "device": { "name": "X", "platform": "ios" } }),
+        ),
+    )
+    .await;
+    assert_eq!(s, StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
 async fn phone_pins_key_and_desktop_reads_it() {
     let (app, _) = setup().await;
     let sub = format!("user-{}", uuid::Uuid::new_v4());

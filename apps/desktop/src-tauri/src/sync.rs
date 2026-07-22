@@ -1656,6 +1656,11 @@ pub struct SyncReconnectOut {
 pub struct PairCodeOut {
     code: String,
     created_at: String,
+    /// SVG of the phone-onboarding QR: `{v:2, ip, cert, enroll, ts}` — server address, TLS pin,
+    /// and a one-time enrollment code. No key material (the vault needs the master password).
+    /// `None` when the server predates `/v1/enroll-codes` (text code still works).
+    qr_svg: Option<String>,
+    qr_expires_at: Option<i64>,
 }
 
 #[derive(Serialize)]
@@ -1753,6 +1758,41 @@ pub async fn sync_pair_begin(state: State<'_, AppState>) -> Result<PairCodeOut, 
     }
     let vkey = STANDARD.encode(vk.key().as_bytes());
     let ts = now_unix();
+
+    // Phone-onboarding QR: mint a one-time enrollment code and render {v:2, ip, cert, enroll, ts}
+    // as a QR the iPhone scans instead of hand-typing a URL + token. Best-effort — a server that
+    // predates /v1/enroll-codes just gets no QR (the desktop text code below still works).
+    let (qr_svg, qr_expires_at) = {
+        let api = api_for(&state)?;
+        match api
+            .authed(reqwest::Method::POST, "/enroll-codes", &[], Some(json!({})))
+            .await
+        {
+            Ok(resp) if resp.status().is_success() => {
+                #[derive(Deserialize)]
+                struct Minted {
+                    code: String,
+                    expires_at: i64,
+                }
+                match resp.json::<Minted>().await {
+                    Ok(m) => {
+                        let payload = serde_json::to_string(&json!({
+                            "v": 2,
+                            "ip": &ip,
+                            "cert": &cert,
+                            "enroll": m.code,
+                            "ts": ts,
+                        }))
+                        .map_err(estr)?;
+                        (crate::applock::qr_svg(&payload).ok(), Some(m.expires_at))
+                    }
+                    Err(_) => (None, None),
+                }
+            }
+            _ => (None, None),
+        }
+    };
+
     let bundle = JoinBundle {
         v: 1,
         ip,
@@ -1766,6 +1806,8 @@ pub async fn sync_pair_begin(state: State<'_, AppState>) -> Result<PairCodeOut, 
     Ok(PairCodeOut {
         code,
         created_at: iso(ts),
+        qr_svg,
+        qr_expires_at,
     })
 }
 

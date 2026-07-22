@@ -31,6 +31,8 @@ pub fn router(state: AppState) -> Router {
             "/v1/wrapped-keys/{wrapper_type}",
             get(wrapped_get).put(wrapped_put).delete(wrapped_delete),
         )
+        .route("/v1/enroll-codes", post(enroll_code_mint))
+        .route("/v1/auth/enroll", post(auth_enroll))
         .route("/v1/devices", get(devices_list))
         .route("/v1/devices/pin", post(device_pin))
         .route("/v1/devices/{id}/approve", post(device_approve))
@@ -674,6 +676,89 @@ async fn wrapped_delete(
         .execute(&st.pool)
         .await?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+// --- device enrollment codes (the "scan the QR on your desktop" flow) ------
+
+/// A signed-in, approved device mints a one-time enrollment code for a NEW device (typically the
+/// phone scanning the desktop's QR). The code is returned once; only its hash is stored. Redeeming
+/// grants a session on the SAME account — never any key material (the vault still needs the master
+/// password on the new device).
+async fn enroll_code_mint(
+    State(st): State<AppState>,
+    a: Auth,
+    headers: HeaderMap,
+    peer: PeerAddr,
+) -> ApiResult<Json<serde_json::Value>> {
+    require_approved_device(&st, a.device).await?;
+    rate_limit(
+        &st,
+        &headers,
+        peer.0,
+        &format!("enroll-mint:{}", a.account),
+        10,
+        3600,
+    )?;
+    let minted = auth::mint_refresh(); // same shape: URL-safe random + SHA-256 hash
+    let expires: time::OffsetDateTime = sqlx::query_scalar(
+        "INSERT INTO enroll_codes (account_id, code_hash) VALUES ($1, $2) RETURNING expires_at",
+    )
+    .bind(a.account)
+    .bind(&minted.hash)
+    .fetch_one(&st.pool)
+    .await?;
+    Ok(Json(json!({
+        "code": minted.token,
+        "expires_at": expires.unix_timestamp(),
+    })))
+}
+
+#[derive(Deserialize)]
+struct EnrollReq {
+    code: String,
+    device: DeviceReq,
+}
+
+/// Redeem a one-time enrollment code: single-use, minutes-lived, and it enrolls the new device as
+/// APPROVED on the minting user's account (the human holding both devices IS the approval). This
+/// is what the phone calls after scanning the desktop QR.
+async fn auth_enroll(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+    peer: PeerAddr,
+    Json(req): Json<EnrollReq>,
+) -> ApiResult<Json<TokensResp>> {
+    let ip = guard(&st, &headers, peer.0, "auth_enroll", 10, 60).await?;
+    if req.device.name.len() > 64 || !valid_platform(&req.device.platform) {
+        return Err(ApiError::BadRequest("invalid device".into()));
+    }
+    let hash = auth::hash_refresh(req.code.trim());
+    // Atomically consume the code (unused + unexpired only) so it can never be redeemed twice.
+    let account: Option<Uuid> = sqlx::query_scalar(
+        "UPDATE enroll_codes SET used_at = now()
+         WHERE code_hash = $1 AND used_at IS NULL AND expires_at > now()
+         RETURNING account_id",
+    )
+    .bind(&hash)
+    .fetch_optional(&st.pool)
+    .await?;
+    let Some(account) = account else {
+        security::record(&st.pool, None, "enroll_fail", &ip, None).await;
+        security::maybe_autoban(&st, &ip).await;
+        return Err(ApiError::Unauthorized);
+    };
+    let device: Uuid = sqlx::query_scalar(
+        "INSERT INTO devices (account_id, name, platform, status)
+         VALUES ($1, $2, $3, 'approved') RETURNING id",
+    )
+    .bind(account)
+    .bind(&req.device.name)
+    .bind(&req.device.platform)
+    .fetch_one(&st.pool)
+    .await?;
+    let tokens = mint_session(&st, account, device, None).await?;
+    security::record(&st.pool, Some(account), "login_ok", &ip, Some("enroll")).await;
+    Ok(Json(tokens))
 }
 
 // --- devices --------------------------------------------------------------

@@ -927,9 +927,16 @@ export async function syncReconnect(): Promise<{ signedIn: boolean }> {
 }
 
 /** Mint a one-shot device-join code so another computer can join this device's sync server. */
-export async function syncPairBegin(): Promise<{ code: string; createdAt: string }> {
+export async function syncPairBegin(): Promise<{
+  code: string;
+  createdAt: string;
+  qrSvg?: string | null;
+  qrExpiresAt?: number | null;
+}> {
   if (!inTauri()) throw new Error("Device pairing is only available in the desktop app.");
-  return inv<{ code: string; createdAt: string }>("sync_pair_begin");
+  return inv<{ code: string; createdAt: string; qrSvg?: string | null; qrExpiresAt?: number | null }>(
+    "sync_pair_begin",
+  );
 }
 
 /** Join the sync server described by a device-join code from another computer (empty vault only). */
