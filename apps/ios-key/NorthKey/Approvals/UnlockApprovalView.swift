@@ -23,7 +23,7 @@ struct UnlockApprovalView: View {
                     Image(systemName: "faceid")
                         .font(.system(size: 40))
                         .foregroundColor(Color(hex: 0x22D3EE))
-                    Text("Unlock SENTINEL on your Mac").font(.headline)
+                    Text("Unlock NorthKey on your Mac").font(.headline)
                     Text(status).font(.caption).foregroundColor(.gray)
                     HStack(spacing: 12) {
                         Button("Deny", role: .destructive) { deny() }
@@ -43,21 +43,28 @@ struct UnlockApprovalView: View {
         let ctx = LAContext()
         ctx.evaluatePolicy(.deviceOwnerAuthenticationWithBiometrics,
                            localizedReason: "Release your vault key share") { ok, _ in
-            DispatchQueue.main.async {
-                if ok {
-                    status = "Approved — releasing share…"
-                    // The Enclave ECDH inside the channel already required Face ID; here
-                    // we seal the released share and POST it to /unlock-requests/:id/respond.
+            Task { @MainActor in
+                guard ok else { status = "Face ID failed"; return }
+                status = "Approved — notifying your Mac…"
+                // iOS-1 wires the approval transport and the Face ID gate. Sealing the actual vault
+                // key share over the pinned channel is the next increment — it needs the desktop to
+                // emit a per-unlock ECDH payload — so this response carries no share payload yet.
+                do {
+                    try await ApiClient.shared.respondUnlock(
+                        id: request.id, approved: true, responsePayloadB64: nil)
                     model.pendingUnlock = nil
-                } else {
-                    status = "Face ID failed"
+                } catch {
+                    status = "Couldn't reach your Mac: \(error.localizedDescription)"
                 }
             }
         }
     }
 
     private func deny() {
-        // POST state="denied" with no payload.
-        model.pendingUnlock = nil
+        Task { @MainActor in
+            try? await ApiClient.shared.respondUnlock(
+                id: request.id, approved: false, responsePayloadB64: nil)
+            model.pendingUnlock = nil
+        }
     }
 }

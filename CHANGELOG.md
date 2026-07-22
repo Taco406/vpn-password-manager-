@@ -8,6 +8,26 @@ The format follows [Keep a Changelog](https://keepachangelog.com/). Versions are
 [semantic](https://semver.org/). **Add a new `## [x.y.z]` section at the top in the same PR
 that bumps the app version** — that's how "the changelog updates on every merge."
 
+## [0.1.45] — 2026-07-22
+
+### Added
+- **NorthKey for iPhone is a real, buildable app (iOS-1).** The companion in `apps/ios-key` now has
+  a generated Xcode project (`xcodegen generate` from `project.yml`), an Info.plist, and hardened
+  entitlements, so it builds and installs on an iPhone. On first run you connect it to your sync
+  server with your personal setup token; it then enrolls as an approved iOS device, registers for
+  push, and pins its Secure-Enclave key to the account — all against a live sync server. Renamed
+  SentinelKey → NorthKey throughout (the `sentinel/…` pairing-protocol strings are unchanged so the
+  desktop and phone still interoperate byte-for-byte).
+- **Sync-server endpoints the phone needs.** `POST /v1/devices/pin` lets an iOS device register its
+  pinned P-256 key; `GET /v1/devices` now returns that key so the desktop can seal to it; and
+  `GET /v1/unlock-requests/:id` now also returns the opaque request payload so the phone can approve.
+
+### Notes
+- The desktop and Windows/Linux/macOS installers are unchanged in this release — its substance is the
+  iPhone companion plus the sync-server (`sentinel-api`) relay endpoints, which ship in the published
+  server image. Sealing the actual vault **key share** on approval, the desktop-side pairing UI, and
+  the on-phone vault viewer are the next iPhone increments.
+
 ## [0.1.44] — 2026-07-22
 
 ### Added

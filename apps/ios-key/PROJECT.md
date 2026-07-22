@@ -1,43 +1,46 @@
-# SentinelKey — Xcode project settings
+# NorthKey iPhone — Xcode project
 
-The sources in `SentinelKey/` are a complete SwiftUI app. Create the Xcode project
-around them with these exact settings (there is no `.xcodeproj` in the repo because it
-cannot be built without a Mac).
+The Xcode project is **generated from [`project.yml`](project.yml)** with
+[XcodeGen](https://github.com/yonyz/XcodeGen), so there's no `.xcodeproj` checked in (it can't be
+produced or built without a Mac, and generating it keeps the repo free of `pbxproj` merge conflicts).
 
-## Target
+## Generate and open
 
-- **Product name:** SentinelKey
-- **Bundle id:** `com.<you>.sentinelkey`
+```bash
+brew install xcodegen                 # once
+cd apps/ios-key && xcodegen generate  # writes NorthKey.xcodeproj (gitignored)
+open NorthKey.xcodeproj
+```
+
+Then in Xcode → **Signing & Capabilities**, pick your **Team** and (if `com.northkey.app` is taken) a
+unique bundle id. Build to a **physical iPhone** — the Secure Enclave is unavailable in the simulator.
+
+## What `project.yml` sets
+
+- **Product / bundle id:** NorthKey / `com.northkey.app`.
 - **Deployment target:** iOS 16.0 (Secure Enclave `P256.KeyAgreement`, CryptoKit
   `hkdfDerivedSymmetricKey`).
-- **Devices:** iPhone only. The Secure Enclave is **not** available in the simulator —
-  build to a physical device.
-- **Swift language version:** 5.9+.
+- **Devices:** iPhone only (`TARGETED_DEVICE_FAMILY = 1`).
+- **Info.plist:** [`Config/Info.plist`](Config/Info.plist) — camera + Face ID usage strings and the
+  `remote-notification` background mode.
+- **Entitlements:** [`Config/NorthKey.entitlements`](Config/NorthKey.entitlements) —
+  `aps-environment` (push) and `com.apple.developer.default-data-protection = NSFileProtectionComplete`.
 
-## Capabilities / entitlements
+## One-time Apple setup
 
-- **Keychain Sharing** — for the Enclave key reference.
-- **Push Notifications** — to wake the app for unlock approvals.
-- **Background Modes → Remote notifications**.
-- **Data Protection** — `NSFileProtectionComplete` (the app writes no vault data, but
-  set the strictest default).
+- Enable **Push Notifications** on the App ID in the developer portal and create an **APNs key**
+  (`.p8`); wire it into the sync API's env (`APNS_KEY_ID`, `APNS_TEAM_ID`, `APNS_P8`).
+- For TestFlight/App Store, switch `aps-environment` in the entitlements from `development` to
+  `production`. The same Apple Team, Developer ID, and notarization credentials as the Mac app are
+  reused — see [`docs/macos-signing.md`](../../docs/macos-signing.md).
 
-## Info.plist keys
-
-- `NSCameraUsageDescription` = "Scan the pairing QR shown on your Mac."
-- `NSFaceIDUsageDescription` = "Approve unlocks and release your vault key share."
-
-## Signing
-
-- Automatic signing with your Team.
-- The App ID must have Push Notifications enabled; create an APNs auth key (.p8) and
-  configure it on the sync API (`APNS_KEY_ID`, `APNS_TEAM_ID`, `APNS_P8`).
-
-## Source → group mapping
+## Source layout (`NorthKey/`)
 
 | Group | Files |
 |---|---|
-| App | `SentinelKeyApp.swift`, `ContentView.swift` |
+| App | `NorthKeyApp.swift`, `ContentView.swift` |
+| Onboarding | `Onboarding/ServerSetupView.swift` |
+| Api | `Api/ApiClient.swift` (sync-server client + Keychain session) |
 | Crypto | `Crypto/EnclaveKey.swift`, `Crypto/Channel.swift` |
 | Pairing | `Pairing/PairingCeremony.swift`, `Pairing/QRScanner.swift` |
 | Approvals | `Approvals/UnlockApprovalView.swift`, `Approvals/PushHandler.swift` |
@@ -45,8 +48,9 @@ cannot be built without a Mac).
 
 ## Interop invariant
 
-`Crypto/Channel.swift` must stay byte-compatible with the Rust `pairing::channel`
-module: P-256 ECDH, transcript = `qr ‖ desktopPubSEC1 ‖ phonePubSEC1`, HKDF-SHA256
-salted by `SHA256(transcript)` with the info strings in `ChannelInfo`, and IETF
-ChaCha20-Poly1305 in CryptoKit's combined-box form. The Rust test
-`full_ceremony_both_roles_agree` is the reference vector.
+`Crypto/Channel.swift` must stay byte-compatible with the Rust `pairing::channel` module: P-256
+ECDH, transcript = `qr ‖ desktopPubSEC1 ‖ phonePubSEC1`, HKDF-SHA256 salted by `SHA256(transcript)`
+with the info strings in `ChannelInfo` (kept as the `sentinel/v1/pair/chan/*` protocol constants —
+**do not rebrand them**), and IETF ChaCha20-Poly1305 in CryptoKit's combined-box form. The Rust test
+`full_ceremony_both_roles_agree` is the reference vector; `just ios-docs-check` asserts the HKDF info
+strings match across `Channel.swift` and `crates/core/src/crypto/kdf.rs`.

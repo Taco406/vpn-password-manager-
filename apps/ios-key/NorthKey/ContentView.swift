@@ -11,7 +11,15 @@ struct ContentView: View {
             Color(hex: 0x0A0E14).ignoresSafeArea()
             VStack(spacing: 24) {
                 header
+                if let banner = model.banner {
+                    Text(banner)
+                        .font(.caption)
+                        .foregroundColor(Color(hex: 0xF87171))
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
                 switch model.state {
+                case .needsServer:
+                    ServerSetupView(model: model)
                 case .unpaired:
                     PairingCeremonyView(model: model)
                 case .paired:
@@ -33,7 +41,7 @@ struct ContentView: View {
         HStack {
             Image(systemName: "shield.lefthalf.filled")
                 .foregroundColor(Color(hex: 0x22D3EE))
-            Text("SENTINEL Key").font(.headline.bold())
+            Text("NorthKey").font(.headline.bold())
             Spacer()
             Circle().fill(model.state == .paired ? Color(hex: 0x2ED47A) : Color.gray)
                 .frame(width: 8, height: 8)
