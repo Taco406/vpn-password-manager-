@@ -19,6 +19,36 @@ export function getBridge(): SentinelBridge {
   return bridge;
 }
 
+// --- Auto-sync on change -----------------------------------------------------
+// Any vault mutation quietly schedules a debounced push, so "Sync now" stops being a chore the
+// user has to remember. A no-op outside the shell or when sync isn't configured/signed in (the
+// syncNow error is swallowed). Wrapping at the bridge layer covers every caller (editor, import,
+// passkeys) with one hook.
+
+let autoSyncTimer: ReturnType<typeof setTimeout> | undefined;
+export function scheduleAutoSync(delayMs = 4000): void {
+  if (!inTauri()) return;
+  clearTimeout(autoSyncTimer);
+  autoSyncTimer = setTimeout(() => {
+    void syncNow().catch(() => undefined);
+  }, delayMs);
+}
+
+{
+  const origSave = bridge.vaultSave.bind(bridge);
+  bridge.vaultSave = async (...args: Parameters<SentinelBridge["vaultSave"]>) => {
+    const r = await origSave(...args);
+    scheduleAutoSync();
+    return r;
+  };
+  const origDelete = bridge.vaultDelete.bind(bridge);
+  bridge.vaultDelete = async (...args: Parameters<SentinelBridge["vaultDelete"]>) => {
+    const r = await origDelete(...args);
+    scheduleAutoSync();
+    return r;
+  };
+}
+
 // --- Real-VPN (Linode) opt-in helpers ---------------------------------------
 // Not part of the SentinelBridge contract (they only mean something in the shell). In the
 // browser they no-op / report disabled, so Settings works in both modes.
@@ -897,9 +927,22 @@ export async function syncReconnect(): Promise<{ signedIn: boolean }> {
 }
 
 /** Mint a one-shot device-join code so another computer can join this device's sync server. */
-export async function syncPairBegin(): Promise<{ code: string; createdAt: string }> {
+export async function syncPairBegin(): Promise<{
+  code: string;
+  createdAt: string;
+  qrSvg?: string | null;
+  qrExpiresAt?: number | null;
+}> {
   if (!inTauri()) throw new Error("Device pairing is only available in the desktop app.");
-  return inv<{ code: string; createdAt: string }>("sync_pair_begin");
+  return inv<{ code: string; createdAt: string; qrSvg?: string | null; qrExpiresAt?: number | null }>(
+    "sync_pair_begin",
+  );
+}
+
+/** Ask the sync server to self-update to the latest image (host-side pull + recreate, ~30s). */
+export async function syncServerUpdate(): Promise<void> {
+  if (!inTauri()) throw new Error("Server update is only available in the desktop app.");
+  await inv<void>("sync_server_update");
 }
 
 /** Join the sync server described by a device-join code from another computer (empty vault only). */

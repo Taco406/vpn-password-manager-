@@ -146,6 +146,7 @@ fn main() {
             sync::sync_deploy,
             sync::sync_server_status,
             sync::sync_server_destroy,
+            sync::sync_server_update,
             sync::sync_reconnect,
             sync::sync_pair_begin,
             sync::sync_pair_complete,

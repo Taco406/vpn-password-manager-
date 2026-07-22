@@ -74,6 +74,7 @@ async fn setup_full(bootstrap_token: Option<&str>, autoban_threshold: u32) -> (R
         autoban_threshold,
         autoban_window_secs: 300,
         autoban_minutes: 60,
+        update_flag_dir: None,
     };
     let google: Arc<dyn GoogleVerifier> = Arc::new(MockGoogleVerifier);
     let app = sentinel_api::build_app(pool.clone(), JwtKeys::ephemeral(), config, google);
@@ -579,6 +580,117 @@ async fn unlock_relay_lifecycle_is_opaque() {
 }
 
 #[tokio::test]
+async fn admin_update_touches_flag_file() {
+    // With a flags dir configured, POST /v1/admin/update drops the flag the host updater watches.
+    let dir = std::env::temp_dir().join(format!("nk-upd-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let pool = sentinel_api::connect(&database_url()).await.unwrap();
+    ensure_migrated(&pool).await;
+    let config = Config {
+        bind: "127.0.0.1:0".into(),
+        database_url: database_url(),
+        google_client_id: None,
+        bootstrap_token: Some("upd-bootstrap".into()),
+        totp_enc_key: [7u8; 32],
+        production: false,
+        trust_forwarded_for: false,
+        cors_allowed_origins: Vec::new(),
+        autoban_threshold: 0,
+        autoban_window_secs: 300,
+        autoban_minutes: 60,
+        update_flag_dir: Some(dir.to_string_lossy().into_owned()),
+    };
+    let google: Arc<dyn GoogleVerifier> = Arc::new(MockGoogleVerifier);
+    let app = sentinel_api::build_app(pool, JwtKeys::ephemeral(), config, google);
+
+    let (s, v) = call(
+        &app,
+        post(
+            "/v1/auth/bootstrap",
+            None,
+            json!({ "token": "upd-bootstrap", "device": { "name": "D", "platform": "linux" } }),
+        ),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    let access = v["access_token"].as_str().unwrap().to_string();
+
+    let (s, _) = call(&app, post("/v1/admin/update", Some(&access), json!({}))).await;
+    assert_eq!(s, StatusCode::NO_CONTENT);
+    assert!(
+        dir.join("update-requested").exists(),
+        "flag file must be written"
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[tokio::test]
+async fn enroll_code_mint_redeem_single_use() {
+    let (app, _) = setup().await;
+    let sub = format!("user-{}", uuid::Uuid::new_v4());
+    let (desktop, _) = onboard(&app, &sub).await;
+
+    // Desktop pushes a vault, then mints an enrollment code (what the QR carries).
+    let ct = base64::engine::general_purpose::STANDARD.encode(vec![5u8; 48]);
+    let (s, _) = call(
+        &app,
+        Request::builder()
+            .method("PUT")
+            .uri("/v1/vault")
+            .header("authorization", format!("Bearer {desktop}"))
+            .header("content-type", "application/json")
+            .header("If-Match", "0")
+            .body(Body::from(json!({ "ciphertext_b64": ct }).to_string()))
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK);
+    let (s, v) = call(&app, post("/v1/enroll-codes", Some(&desktop), json!({}))).await;
+    assert_eq!(s, StatusCode::OK, "mint: {v}");
+    let code = v["code"].as_str().unwrap().to_string();
+    assert!(v["expires_at"].as_i64().unwrap() > 0);
+
+    // The new device (phone) redeems it → approved session on the SAME account, vault visible.
+    let (s, v) = call(
+        &app,
+        post(
+            "/v1/auth/enroll",
+            None,
+            json!({ "code": code, "device": { "name": "iPhone", "platform": "ios" } }),
+        ),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "redeem: {v}");
+    let phone = v["access_token"].as_str().unwrap().to_string();
+    let (s, v) = call(&app, authed_req("GET", "/v1/vault", &phone)).await;
+    assert_eq!(s, StatusCode::OK, "enrolled device must see the vault: {v}");
+
+    // Single-use: a second redeem of the same code is rejected.
+    let (s, _) = call(
+        &app,
+        post(
+            "/v1/auth/enroll",
+            None,
+            json!({ "code": code, "device": { "name": "Evil", "platform": "ios" } }),
+        ),
+    )
+    .await;
+    assert_eq!(s, StatusCode::UNAUTHORIZED, "codes are single-use");
+
+    // Garbage codes are rejected.
+    let (s, _) = call(
+        &app,
+        post(
+            "/v1/auth/enroll",
+            None,
+            json!({ "code": "not-a-code", "device": { "name": "X", "platform": "ios" } }),
+        ),
+    )
+    .await;
+    assert_eq!(s, StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
 async fn phone_pins_key_and_desktop_reads_it() {
     let (app, _) = setup().await;
     let sub = format!("user-{}", uuid::Uuid::new_v4());
@@ -950,6 +1062,7 @@ async fn auto_ban_threshold_and_owner_guard() {
         autoban_threshold: 3,
         autoban_window_secs: 300,
         autoban_minutes: 60,
+        update_flag_dir: None,
     };
     let google: Arc<dyn GoogleVerifier> = Arc::new(MockGoogleVerifier);
     let st = sentinel_api::state::AppState {

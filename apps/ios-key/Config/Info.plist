@@ -37,8 +37,8 @@
 	</array>
 	<!-- Why the app asks for the camera and Face ID (App Store requires a reason string). -->
 	<key>NSCameraUsageDescription</key>
-	<string>Scan the pairing QR shown on your Mac.</string>
+	<string>Scan the Add-a-device QR from NorthKey on your computer to connect this phone.</string>
 	<key>NSFaceIDUsageDescription</key>
-	<string>Approve unlocks and release your vault key share.</string>
+	<string>Unlock your vault with Face ID.</string>
 </dict>
 </plist>

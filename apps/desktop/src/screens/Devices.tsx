@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import {
   Cloud,
   LogIn,
@@ -17,6 +17,7 @@ import {
   syncServerStatus,
   syncDeploy,
   syncServerDestroy,
+  syncServerUpdate,
   onSyncDeploy,
   syncStatus,
   syncSetConfig,
@@ -67,12 +68,38 @@ export function Devices() {
     void refreshSync();
   }, []);
 
+  // ONE front door: while setting up (no server, or not signed in) the server card leads;
+  // once connected, the account card leads and server management folds under Advanced.
+  const settled = !!sync?.signedIn;
   return (
     <div className="mx-auto max-w-3xl px-8 py-8">
-      <SectionTitle hint="sync &amp; devices">Devices</SectionTitle>
-      <SyncServer sync={sync} onSyncChange={refreshSync} />
+      <SectionTitle hint="one account · all your devices">Account &amp; Sync</SectionTitle>
+      {!settled && <SyncServer sync={sync} onSyncChange={refreshSync} />}
       <AccountSync sync={sync} onSyncChange={refreshSync} />
-      <SecurityMonitor sync={sync} />
+      {settled ? (
+        <AdvancedZone title="Advanced — server management &amp; attack monitor">
+          <SyncServer sync={sync} onSyncChange={refreshSync} />
+          <SecurityMonitor sync={sync} />
+        </AdvancedZone>
+      ) : (
+        <SecurityMonitor sync={sync} />
+      )}
+    </div>
+  );
+}
+
+/** A collapsed container for the power-user controls, so the primary flow stays three actions. */
+function AdvancedZone({ title, children }: { title: string; children: ReactNode }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <div className="mb-4">
+      <button
+        onClick={() => setOpen((v) => !v)}
+        className="mb-2 text-xs text-[var(--text-muted)] hover:text-[var(--text-secondary)] hover:underline"
+      >
+        {open ? "▾" : "▸"} {title}
+      </button>
+      {open && children}
     </div>
   );
 }
@@ -88,9 +115,19 @@ const EVENT_META: Record<string, { label: string; tone: "danger" | "warn" | "ok"
   rate_limited: { label: "Rate-limited", tone: "warn" },
   banned_block: { label: "Blocked attempt", tone: "muted" },
   auto_ban: { label: "Auto-banned IP", tone: "danger" },
+  enroll_fail: { label: "Bad device-enroll code", tone: "warn" },
 };
 
-const FAIL_KINDS = ["login_fail_bootstrap", "google_reject", "totp_fail", "totp_lockout"];
+const FAIL_KINDS = ["login_fail_bootstrap", "google_reject", "totp_fail", "totp_lockout", "enroll_fail"];
+
+/** The one-shot output of "Add a device": the desktop text code + (when the server supports
+ *  enrollment codes) the phone-onboarding QR. */
+type PairCodeInfo = {
+  code: string;
+  createdAt: string;
+  qrSvg?: string | null;
+  qrExpiresAt?: number | null;
+};
 
 function toneClasses(tone: "danger" | "warn" | "ok" | "muted"): string {
   switch (tone) {
@@ -344,7 +381,6 @@ function SyncServer({ sync, onSyncChange }: { sync: SyncStatusInfo | null; onSyn
   const [busy, setBusy] = useState(false);
   const [progress, setProgress] = useState("");
   const [msg, setMsg] = useState("");
-  const [pairCode, setPairCode] = useState<{ code: string; createdAt: string } | null>(null);
   const [joinCode, setJoinCode] = useState("");
   const [showJoin, setShowJoin] = useState(false);
   // Google sign-in: deploy-time client id + secret, plus the interactive finish-sign-in state.
@@ -424,7 +460,6 @@ function SyncServer({ sync, onSyncChange }: { sync: SyncStatusInfo | null; onSyn
     try {
       await syncServerDestroy();
       setMsg("Sync server destroyed. Billing stopped.");
-      setPairCode(null);
       await refresh();
       await onSyncChange();
     } catch (e) {
@@ -530,17 +565,6 @@ function SyncServer({ sync, onSyncChange }: { sync: SyncStatusInfo | null; onSyn
     setBusy(false);
   };
 
-  const addDevice = async () => {
-    setBusy(true);
-    setMsg("");
-    try {
-      setPairCode(await syncPairBegin());
-    } catch (e) {
-      setMsg(errMsg(e));
-    }
-    setBusy(false);
-  };
-
   const join = async () => {
     setBusy(true);
     setMsg("Joining the sync server…");
@@ -557,13 +581,25 @@ function SyncServer({ sync, onSyncChange }: { sync: SyncStatusInfo | null; onSyn
     setBusy(false);
   };
 
+  const updateServer = async () => {
+    if (!window.confirm("Update the sync server to the latest version? It restarts its app (~30 seconds); your data is untouched.")) return;
+    setBusy(true);
+    setMsg("Asking the server to update itself…");
+    try {
+      await syncServerUpdate();
+      setMsg("Update requested. The server pulls the new version and restarts — give it about a minute.");
+    } catch (e) {
+      setMsg(errMsg(e));
+    }
+    setBusy(false);
+  };
+
   const forget = async () => {
     if (!window.confirm("Forget this sync server on this device? Your local vault stays; the server keeps running. You can deploy or join again afterward.")) return;
     setBusy(true);
     setMsg("");
     try {
       await syncForget();
-      setPairCode(null);
       setMsg("Forgotten. This device is local-only again.");
       await refresh();
       await onSyncChange();
@@ -791,7 +827,9 @@ function SyncServer({ sync, onSyncChange }: { sync: SyncStatusInfo | null; onSyn
           ) : (
             <div>This device is connected to your sync server as an added device. The server itself is managed on the computer that deployed it.</div>
           )}
-          <AddDeviceBlock busy={busy} pairCode={pairCode} onAdd={() => void addDevice()} />
+          <button onClick={() => void updateServer()} disabled={busy} className="!mt-2 block text-[var(--accent)] hover:underline disabled:opacity-50">
+            Update server to the latest version
+          </button>
           {deployed ? (
             <button onClick={() => void destroy()} disabled={busy} className="!mt-2 block text-[var(--danger)] hover:underline disabled:opacity-50">
               Destroy sync server (stop billing)
@@ -898,18 +936,47 @@ function GoogleGuideSteps() {
 }
 
 /** "Add a device" affordance: mint a join code and show it with copy + a sensitivity warning. */
-function AddDeviceBlock({ busy, pairCode, onAdd }: { busy: boolean; pairCode: { code: string; createdAt: string } | null; onAdd: () => void }) {
+function AddDeviceBlock({
+  busy,
+  pairCode,
+  onAdd,
+}: {
+  busy: boolean;
+  pairCode: PairCodeInfo | null;
+  onAdd: () => void;
+}) {
   return (
     <div className="!mt-2">
       {!pairCode ? (
-        <button onClick={onAdd} disabled={busy} className="inline-flex items-center gap-1.5 rounded-[10px] border border-[var(--border-strong)] px-3 py-1.5 text-sm hover:border-[var(--accent)]/50 disabled:opacity-50">
-          <UserPlus size={14} /> {busy ? "Working…" : "Add a device"}
-        </button>
+        <div>
+          <div className="mb-1 text-sm font-medium text-[var(--text-primary)]">Add a device</div>
+          <p className="mb-2 text-xs text-[var(--text-secondary)]">
+            Put your vault on another computer or your iPhone. Your phone scans a QR; another computer pastes a code.
+          </p>
+          <button onClick={onAdd} disabled={busy} className="inline-flex items-center gap-1.5 rounded-[10px] border border-[var(--border-strong)] px-3 py-1.5 text-sm hover:border-[var(--accent)]/50 disabled:opacity-50">
+            <UserPlus size={14} /> {busy ? "Working…" : "Add a device"}
+          </button>
+        </div>
       ) : (
         <div className="space-y-2">
+          {pairCode.qrSvg && (
+            <div>
+              <div className="mb-1 text-xs font-medium text-[var(--text-primary)]">iPhone — scan this QR</div>
+              <p className="mb-2 text-[11px] text-[var(--text-secondary)]">
+                In NorthKey on your phone, tap <span className="font-medium">Scan QR from desktop</span> and point it here.
+                It connects the phone to your account (expires in ~5 minutes); your master password then unlocks the vault.
+              </p>
+              <div
+                className="w-fit rounded-[10px] bg-white p-2"
+                // eslint-disable-next-line react/no-danger
+                dangerouslySetInnerHTML={{ __html: pairCode.qrSvg }}
+              />
+            </div>
+          )}
           <div className="rounded-[10px] border border-[var(--warn)]/40 bg-[var(--warn)]/10 p-2 text-[11px] text-[var(--warn)]">
-            This code unlocks your vault on another device — treat it like a password. It’s shown once; paste it into
-            <span className="font-medium"> Devices → Join with a device code</span> on the other computer, then close this.
+            Another computer instead? This code unlocks your vault on another device — treat it like a password. It’s shown
+            once; paste it into <span className="font-medium">Account &amp; Sync → Join with a device code</span> on the
+            other computer, then close this.
           </div>
           <CodeBox code={pairCode.code} />
         </div>
@@ -935,6 +1002,7 @@ function AccountSync({ sync, onSyncChange }: { sync: SyncStatusInfo | null; onSy
   const [backup, setBackup] = useState<{ recoveryCode: string; pdfBase64: string; version: number } | null>(null);
   const [restoreCode, setRestoreCode] = useState("");
   const [pwUnlock, setPwUnlock] = useState("");
+  const [pairCode, setPairCode] = useState<PairCodeInfo | null>(null);
   const [devices, setDevices] = useState<SyncDevice[]>([]);
 
   useEffect(() => {
@@ -1053,6 +1121,17 @@ function AccountSync({ sync, onSyncChange }: { sync: SyncStatusInfo | null; onSy
     setBusy(false);
   };
 
+  const addDevice = async () => {
+    setBusy(true);
+    setMsg("");
+    try {
+      setPairCode(await syncPairBegin());
+    } catch (e) {
+      setMsg(errMsg(e));
+    }
+    setBusy(false);
+  };
+
   const doEnablePwUnlock = async () => {
     setBusy(true);
     setMsg("Enabling master-password unlock…");
@@ -1127,8 +1206,45 @@ function AccountSync({ sync, onSyncChange }: { sync: SyncStatusInfo | null; onSy
             </button>
           </div>
 
-          {/* backup */}
+          {/* add a device — THE way to put your vault on another computer/phone */}
+          <AddDeviceBlock busy={busy} pairCode={pairCode} onAdd={() => void addDevice()} />
+
+          {/* sync now */}
           <div>
+            <button
+              onClick={doSync}
+              disabled={busy}
+              className="inline-flex items-center gap-2 rounded-[10px] border border-[var(--border-strong)] px-3 py-2 text-sm hover:border-[var(--accent)]/50 disabled:opacity-50"
+            >
+              <RefreshCw size={15} /> Sync now
+            </button>
+          </div>
+
+          {/* unlock a fresh device with the master password */}
+          <div>
+            <div className="mb-1 text-sm font-medium">Unlock this device with your master password</div>
+            <p className="mb-2 text-xs text-[var(--text-secondary)]">
+              On a <span className="font-medium">new</span> signed-in device with an empty vault: enter your account master
+              password to download your key, decrypt, and pull your vault. No recovery code needed.
+            </p>
+            <div className="flex items-center gap-2">
+              <input
+                type="password"
+                value={pwUnlock}
+                onChange={(e) => setPwUnlock(e.target.value)}
+                placeholder="Master password"
+                className={`${inputCls} flex-1`}
+              />
+              <button onClick={doUnlockWithPassword} disabled={busy || !pwUnlock} className={btnCls}>
+                Unlock
+              </button>
+            </div>
+          </div>
+
+          {/* Power-user paths: recovery kit + key escrow + code-based restore. */}
+          <AdvancedZone title="Advanced — recovery kit &amp; restore options">
+          {/* backup */}
+          <div className="mb-4">
             <div className="mb-1 flex items-center gap-2 text-sm font-medium">Recovery backup</div>
             <p className="mb-2 text-xs text-[var(--text-secondary)]">
               Wraps your vault key with a one-time recovery kit and uploads the encrypted vault. Keep the recovery code
@@ -1145,24 +1261,13 @@ function AccountSync({ sync, onSyncChange }: { sync: SyncStatusInfo | null; onSy
                 <div className="mono mb-2 break-all text-sm">{backup.recoveryCode}</div>
                 <a
                   href={`data:application/pdf;base64,${backup.pdfBase64}`}
-                  download="sentinel-recovery-kit.pdf"
+                  download="northkey-recovery-kit.pdf"
                   className="inline-flex items-center gap-2 text-xs text-[var(--accent)] hover:underline"
                 >
                   <Download size={13} /> Download recovery kit (PDF)
                 </a>
               </div>
             )}
-          </div>
-
-          {/* sync now */}
-          <div>
-            <button
-              onClick={doSync}
-              disabled={busy}
-              className="inline-flex items-center gap-2 rounded-[10px] border border-[var(--border-strong)] px-3 py-2 text-sm hover:border-[var(--accent)]/50 disabled:opacity-50"
-            >
-              <RefreshCw size={15} /> Sync now
-            </button>
           </div>
 
           {/* enable master-password unlock on other devices */}
@@ -1198,27 +1303,7 @@ function AccountSync({ sync, onSyncChange }: { sync: SyncStatusInfo | null; onSy
               </button>
             </div>
           </div>
-
-          {/* unlock a fresh device with the master password */}
-          <div>
-            <div className="mb-1 text-sm font-medium">Unlock this device with your master password</div>
-            <p className="mb-2 text-xs text-[var(--text-secondary)]">
-              On a <span className="font-medium">new</span> signed-in device with an empty vault: enter your account master
-              password to download your key, decrypt, and pull your vault. No recovery code needed.
-            </p>
-            <div className="flex items-center gap-2">
-              <input
-                type="password"
-                value={pwUnlock}
-                onChange={(e) => setPwUnlock(e.target.value)}
-                placeholder="Master password"
-                className={`${inputCls} flex-1`}
-              />
-              <button onClick={doUnlockWithPassword} disabled={busy || !pwUnlock} className={btnCls}>
-                Unlock
-              </button>
-            </div>
-          </div>
+          </AdvancedZone>
 
           {/* devices */}
           <div>

@@ -1,4 +1,4 @@
-# XcodeGen spec for the NorthKey iPhone companion.
+# XcodeGen spec for the NorthKey iPhone app.
 #
 # There is no committed `.xcodeproj` because it can't be produced or built without a Mac. Generate
 # it on your Mac with:
@@ -8,7 +8,12 @@
 #     open NorthKey.xcodeproj
 #
 # Then set your Apple **Team** (Signing & Capabilities) and a unique bundle id if `com.northkey.app`
-# is taken. Build to a physical iPhone — the Secure Enclave is unavailable in the simulator.
+# is taken. Build to a physical iPhone for the full experience (camera QR scan needs real
+# hardware); the crypto unit tests (⌘U) run fine in the simulator.
+#
+# The Vendor/ tree is C compiled straight into the app target: the Argon2 reference
+# implementation (ARGON2_NO_THREADS) and zstd (ZSTD_DISABLE_ASM) — both byte-verified against
+# the desktop's Rust crypto by the golden vectors in NorthKeyTests/Fixtures.
 
 name: NorthKey
 options:
@@ -32,12 +37,45 @@ targets:
     platform: iOS
     sources:
       - NorthKey
+      - Vendor
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.northkey.app
         PRODUCT_NAME: NorthKey
         INFOPLIST_FILE: Config/Info.plist
         CODE_SIGN_ENTITLEMENTS: Config/NorthKey.entitlements
-        # iPhone only (the Secure Enclave isn't in the simulator, and there's no iPad layout).
+        # iPhone only (no iPad layout).
         TARGETED_DEVICE_FAMILY: "1"
         GENERATE_INFOPLIST_FILE: NO
+        SWIFT_OBJC_BRIDGING_HEADER: NorthKey/Bridging.h
+        HEADER_SEARCH_PATHS:
+          - "$(SRCROOT)/Vendor/argon2/include"
+          - "$(SRCROOT)/Vendor/zstd"
+        GCC_PREPROCESSOR_DEFINITIONS:
+          - "$(inherited)"
+          - "ARGON2_NO_THREADS=1"
+          - "ZSTD_DISABLE_ASM=1"
+
+  NorthKeyTests:
+    type: bundle.unit-test
+    platform: iOS
+    sources:
+      - NorthKeyTests
+    dependencies:
+      - target: NorthKey
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.northkey.tests
+        GENERATE_INFOPLIST_FILE: YES
+        TEST_HOST: "$(BUILT_PRODUCTS_DIR)/NorthKey.app/NorthKey"
+        BUNDLE_LOADER: "$(TEST_HOST)"
+
+schemes:
+  NorthKey:
+    build:
+      targets:
+        NorthKey: all
+        NorthKeyTests: [test]
+    test:
+      targets:
+        - NorthKeyTests

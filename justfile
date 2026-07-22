@@ -136,6 +136,15 @@ ios-docs-check:
         grep -q "$s" crates/core/src/crypto/kdf.rs
     done
     echo "iOS channel info strings match the Rust core."
+    for s in 'sentinel/v1/vault/outer' 'sentinel/v1/vault/item'; do
+        grep -q "$s" apps/ios-key/NorthKey/Crypto/VaultCrypto.swift
+        grep -q "$s" crates/core/src/crypto/kdf.rs
+    done
+    echo "iOS vault info strings match the Rust core."
+    grep -q '3, 65536, 4' apps/ios-key/NorthKey/Crypto/VaultCrypto.swift
+    grep -q '(65536, 3, 4)' crates/core/src/crypto/kdf.rs
+    test -s apps/ios-key/NorthKeyTests/Fixtures/golden-vault.json
+    echo "iOS Argon2 params + golden fixture in place."
 
 # --- release -------------------------------------------------------------
 # Cut a release: bump the version across the desktop app, commit, tag `vVERSION`,

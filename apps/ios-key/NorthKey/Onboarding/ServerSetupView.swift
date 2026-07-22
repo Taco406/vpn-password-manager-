@@ -1,14 +1,15 @@
-// First-run onboarding: point the phone at your NorthKey sync server. The setup token is the
-// personal `SENTINEL_BOOTSTRAP_TOKEN` from your one-click sync-server deploy; entering it once mints
-// a session (held in the Keychain) and enrolls this phone as an approved iOS device.
+// Advanced/manual onboarding: type the sync server address + personal setup token
+// (SENTINEL_BOOTSTRAP_TOKEN). The primary path is scanning the desktop's QR (ScanSetupView);
+// this stays for real-CA custom servers and recovery scenarios.
 
 import SwiftUI
 
 struct ServerSetupView: View {
-    @ObservedObject var model: AppModel
+    let onConfigured: () -> Void
     @State private var url = ""
     @State private var token = ""
     @State private var busy = false
+    @State private var error: String?
 
     private var canConnect: Bool {
         !busy && !url.trimmingCharacters(in: .whitespaces).isEmpty && !token.isEmpty
@@ -18,7 +19,7 @@ struct ServerSetupView: View {
         Card {
             VStack(alignment: .leading, spacing: 12) {
                 Text("Connect to your sync server").font(.subheadline.bold())
-                Text("Enter your NorthKey sync server address and personal setup token. Find the token in the desktop app under Sync.")
+                Text("Enter your NorthKey sync server address and personal setup token. Most people should use the QR scan instead — this manual path is for custom servers.")
                     .font(.caption).foregroundColor(.gray)
 
                 TextField("https://sync.example.com", text: $url)
@@ -32,11 +33,23 @@ struct ServerSetupView: View {
                     .textInputAutocapitalization(.never)
                     .autocorrectionDisabled()
 
+                if let error {
+                    Text(error).font(.caption).foregroundColor(Color(hex: 0xF87171))
+                }
+
                 Button(busy ? "Connecting…" : "Connect") {
                     busy = true
+                    error = nil
                     Task {
-                        await model.saveServer(url: url, token: token)
-                        busy = false
+                        do {
+                            try await ApiClient.shared.configure(baseUrl: url, bootstrapToken: token)
+                            await MainActor.run { onConfigured() }
+                        } catch {
+                            await MainActor.run {
+                                self.error = error.localizedDescription
+                                self.busy = false
+                            }
+                        }
                     }
                 }
                 .buttonStyle(.borderedProminent)

@@ -31,6 +31,8 @@ pub fn router(state: AppState) -> Router {
             "/v1/wrapped-keys/{wrapper_type}",
             get(wrapped_get).put(wrapped_put).delete(wrapped_delete),
         )
+        .route("/v1/enroll-codes", post(enroll_code_mint))
+        .route("/v1/auth/enroll", post(auth_enroll))
         .route("/v1/devices", get(devices_list))
         .route("/v1/devices/pin", post(device_pin))
         .route("/v1/devices/{id}/approve", post(device_approve))
@@ -51,6 +53,7 @@ pub fn router(state: AppState) -> Router {
             "/v1/transfers/{id}",
             get(transfer_download).delete(transfer_delete),
         )
+        .route("/v1/admin/update", post(admin_update))
         .route("/v1/security-events", get(security_events_list))
         .route("/v1/security-summary", get(security_summary))
         .route("/v1/security-events/ban", post(security_ban))
@@ -105,16 +108,33 @@ async fn auth_google(
         }
     };
 
-    // Upsert account by google_sub.
-    let account: Uuid = sqlx::query_scalar(
-        "INSERT INTO accounts (google_sub, email) VALUES ($1, $2)
-         ON CONFLICT (google_sub) DO UPDATE SET email = EXCLUDED.email
+    // One personal server = one account: if the ONLY account is the synthetic bootstrap one,
+    // re-key it to this Google identity (same account_id, so its devices/vault/wrapped keys are
+    // preserved) instead of creating a parallel account. Otherwise, upsert by google_sub as usual.
+    let rekeyed: Option<Uuid> = sqlx::query_scalar(
+        "UPDATE accounts SET google_sub = $1, email = $2
+         WHERE google_sub = 'bootstrap:local'
+           AND NOT EXISTS (SELECT 1 FROM accounts WHERE google_sub <> 'bootstrap:local')
          RETURNING id",
     )
     .bind(&claims.sub)
     .bind(&claims.email)
-    .fetch_one(&st.pool)
+    .fetch_optional(&st.pool)
     .await?;
+    let account: Uuid = match rekeyed {
+        Some(id) => id,
+        None => {
+            sqlx::query_scalar(
+                "INSERT INTO accounts (google_sub, email) VALUES ($1, $2)
+                 ON CONFLICT (google_sub) DO UPDATE SET email = EXCLUDED.email
+                 RETURNING id",
+            )
+            .bind(&claims.sub)
+            .bind(&claims.email)
+            .fetch_one(&st.pool)
+            .await?
+        }
+    };
 
     // Register (or reuse) this device. New devices start pending.
     let device: Uuid = sqlx::query_scalar(
@@ -175,16 +195,47 @@ async fn auth_bootstrap(
     if req.device.name.len() > 64 || !valid_platform(&req.device.platform) {
         return Err(ApiError::BadRequest("invalid device".into()));
     }
-    // The single personal account, keyed on a synthetic sub (never collides with a Google sub).
-    let account: Uuid = sqlx::query_scalar(
-        "INSERT INTO accounts (google_sub, email) VALUES ($1, $2)
-         ON CONFLICT (google_sub) DO UPDATE SET email = EXCLUDED.email
-         RETURNING id",
-    )
-    .bind("bootstrap:local")
-    .bind("personal@sentinel.local")
-    .fetch_one(&st.pool)
-    .await?;
+    // One personal server = one account. Resolution order:
+    //   1. The flagged bootstrap-owner account (survives a Google re-key of its google_sub).
+    //   2. Exactly one account on the server → adopt it (the owner signed in with Google first)
+    //      and flag it, so bootstrap devices / join codes / phones share the SAME vault.
+    //   3. No accounts → create the synthetic personal account, flagged.
+    //   4. Several accounts and no flag (ambiguous, multi-user server) → keep today's separate
+    //      synthetic account rather than guessing an owner.
+    let account: Uuid = {
+        let flagged: Option<Uuid> =
+            sqlx::query_scalar("SELECT id FROM accounts WHERE is_bootstrap_owner")
+                .fetch_optional(&st.pool)
+                .await?;
+        match flagged {
+            Some(id) => id,
+            None => {
+                let adopted: Option<Uuid> = sqlx::query_scalar(
+                    "UPDATE accounts SET is_bootstrap_owner = true
+                     WHERE id = (SELECT id FROM accounts ORDER BY created_at LIMIT 1)
+                       AND (SELECT COUNT(*) FROM accounts) = 1
+                     RETURNING id",
+                )
+                .fetch_optional(&st.pool)
+                .await?;
+                match adopted {
+                    Some(id) => id,
+                    None => {
+                        sqlx::query_scalar(
+                            "INSERT INTO accounts (google_sub, email, is_bootstrap_owner)
+                             VALUES ($1, $2, (SELECT COUNT(*) FROM accounts) = 0)
+                             ON CONFLICT (google_sub) DO UPDATE SET email = EXCLUDED.email
+                             RETURNING id",
+                        )
+                        .bind("bootstrap:local")
+                        .bind("personal@sentinel.local")
+                        .fetch_one(&st.pool)
+                        .await?
+                    }
+                }
+            }
+        }
+    };
     // Bootstrap trust == device trust: register this device as already approved so the sync
     // endpoints (which require an approved device) work immediately, without a TOTP step.
     let device: Uuid = sqlx::query_scalar(
@@ -626,6 +677,110 @@ async fn wrapped_delete(
         .execute(&st.pool)
         .await?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+// --- self-update ------------------------------------------------------------
+
+/// Ask the HOST to update this server's container. The API never touches Docker itself — it only
+/// drops a flag file into the shared flags volume; a host-side systemd path unit watches it and
+/// runs the pull+recreate script (privilege separation). Older deploys have no flags volume, so
+/// the endpoint reports that a one-time redeploy is needed.
+async fn admin_update(State(st): State<AppState>, a: Auth) -> ApiResult<StatusCode> {
+    require_approved_device(&st, a.device).await?;
+    let dir = st.config.update_flag_dir.as_deref().ok_or_else(|| {
+        ApiError::BadRequest(
+            "this server predates in-place updates — redeploy it once to get the updater".into(),
+        )
+    })?;
+    let path = std::path::Path::new(dir).join("update-requested");
+    std::fs::write(&path, b"update\n").map_err(|e| {
+        tracing::error!(error = %e, "writing update flag");
+        ApiError::Internal
+    })?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+// --- device enrollment codes (the "scan the QR on your desktop" flow) ------
+
+/// A signed-in, approved device mints a one-time enrollment code for a NEW device (typically the
+/// phone scanning the desktop's QR). The code is returned once; only its hash is stored. Redeeming
+/// grants a session on the SAME account — never any key material (the vault still needs the master
+/// password on the new device).
+async fn enroll_code_mint(
+    State(st): State<AppState>,
+    a: Auth,
+    headers: HeaderMap,
+    peer: PeerAddr,
+) -> ApiResult<Json<serde_json::Value>> {
+    require_approved_device(&st, a.device).await?;
+    rate_limit(
+        &st,
+        &headers,
+        peer.0,
+        &format!("enroll-mint:{}", a.account),
+        10,
+        3600,
+    )?;
+    let minted = auth::mint_refresh(); // same shape: URL-safe random + SHA-256 hash
+    let expires: time::OffsetDateTime = sqlx::query_scalar(
+        "INSERT INTO enroll_codes (account_id, code_hash) VALUES ($1, $2) RETURNING expires_at",
+    )
+    .bind(a.account)
+    .bind(&minted.hash)
+    .fetch_one(&st.pool)
+    .await?;
+    Ok(Json(json!({
+        "code": minted.token,
+        "expires_at": expires.unix_timestamp(),
+    })))
+}
+
+#[derive(Deserialize)]
+struct EnrollReq {
+    code: String,
+    device: DeviceReq,
+}
+
+/// Redeem a one-time enrollment code: single-use, minutes-lived, and it enrolls the new device as
+/// APPROVED on the minting user's account (the human holding both devices IS the approval). This
+/// is what the phone calls after scanning the desktop QR.
+async fn auth_enroll(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+    peer: PeerAddr,
+    Json(req): Json<EnrollReq>,
+) -> ApiResult<Json<TokensResp>> {
+    let ip = guard(&st, &headers, peer.0, "auth_enroll", 10, 60).await?;
+    if req.device.name.len() > 64 || !valid_platform(&req.device.platform) {
+        return Err(ApiError::BadRequest("invalid device".into()));
+    }
+    let hash = auth::hash_refresh(req.code.trim());
+    // Atomically consume the code (unused + unexpired only) so it can never be redeemed twice.
+    let account: Option<Uuid> = sqlx::query_scalar(
+        "UPDATE enroll_codes SET used_at = now()
+         WHERE code_hash = $1 AND used_at IS NULL AND expires_at > now()
+         RETURNING account_id",
+    )
+    .bind(&hash)
+    .fetch_optional(&st.pool)
+    .await?;
+    let Some(account) = account else {
+        security::record(&st.pool, None, "enroll_fail", &ip, None).await;
+        security::maybe_autoban(&st, &ip).await;
+        return Err(ApiError::Unauthorized);
+    };
+    let device: Uuid = sqlx::query_scalar(
+        "INSERT INTO devices (account_id, name, platform, status)
+         VALUES ($1, $2, $3, 'approved') RETURNING id",
+    )
+    .bind(account)
+    .bind(&req.device.name)
+    .bind(&req.device.platform)
+    .fetch_one(&st.pool)
+    .await?;
+    let tokens = mint_session(&st, account, device, None).await?;
+    security::record(&st.pool, Some(account), "login_ok", &ip, Some("enroll")).await;
+    Ok(Json(tokens))
 }
 
 // --- devices --------------------------------------------------------------

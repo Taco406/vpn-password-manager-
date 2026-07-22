@@ -5,7 +5,6 @@ import { test, expect } from "@playwright/test";
 
 // Screens to capture. `dark`/`light` marks which themes to render for each.
 const SHOTS: { name: string; url: string; both?: boolean; wait?: number }[] = [
-  { name: "onboarding-kit", url: "/?freeze=1#/onboarding", both: false },
   { name: "unlock", url: "/?freeze=1#/unlock", both: false },
   { name: "vault", url: "/?unlocked=1&freeze=1#/vault", both: true },
   { name: "vault-item", url: "/?unlocked=1&freeze=1#/vault/06060606-0606-0606-0606-060606060606", both: false },
