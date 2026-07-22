@@ -35,6 +35,11 @@ jobs:
         run: cargo test -p sentinel-core -p sentinel-cli -p sentinel-nm-host
       - name: production Argon2 profile smoke test
         run: cargo test -p sentinel-core --release argon2_production_profile -- --ignored --test-threads=1
+      # The committed iOS golden fixture must unwrap with the CURRENT Rust crypto at production
+      # cost — this is the desktop half of the desktop↔iPhone interop guarantee. If this fails,
+      # a crypto change just broke every deployed iPhone build.
+      - name: iOS golden fixture unwraps (production Argon2)
+        run: cargo test -p sentinel-core --release --test ios_golden_vectors -- --ignored committed_fixture_wrapped_key_unwraps
 
   api:
     name: API — Postgres integration
@@ -114,6 +119,21 @@ jobs:
         run: cargo clippy -p sentinel-desktop --all-targets -- -D warnings
       - name: test (desktop, macOS)
         run: cargo test -p sentinel-desktop
+
+  # Cross-component tripwires: Rust↔Swift protocol constants, QR payload shape, phone API paths
+  # vs the server router, and version/changelog consistency. Pure greps — fails in seconds when
+  # one side of a contract changes without the other. See CLAUDE.md "Cross-component contracts".
+  guards:
+    name: Interop & version guards
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: interop contracts (Rust ↔ Swift ↔ server ↔ extension)
+        run: bash scripts/interop-check.sh
+      - name: version + changelog consistency
+        run: bash scripts/version-check.sh
+      - name: shipped migrations are append-only
+        run: bash scripts/migrations-check.sh
 
   audit:
     name: Security audit

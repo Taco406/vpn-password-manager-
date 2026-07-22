@@ -11,9 +11,96 @@
 use base64::Engine as _;
 use sentinel_core::crypto::{Argon2Profile, Key32};
 use sentinel_core::keyring::password::PasswordWrapper;
-use sentinel_core::keyring::{KeyWrapper, VaultKey};
+use sentinel_core::keyring::{KeyWrapper, VaultKey, WrappedBlob, WrapperType};
 use sentinel_core::vault::model::{Item, Login};
-use sentinel_core::vault::{encode_sync_blob, seal_item, VaultDocument};
+use sentinel_core::vault::{
+    decode_sync_blob, encode_sync_blob, open_item, seal_item, ItemEnvelope, VaultDocument,
+};
+
+const FIXTURE: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../apps/ios-key/NorthKeyTests/Fixtures/golden-vault.json"
+);
+
+fn read_fixture() -> serde_json::Value {
+    serde_json::from_str(&std::fs::read_to_string(FIXTURE).expect(
+        "committed fixture missing — regenerate with \
+         `cargo test -p sentinel-core --test ios_golden_vectors -- --ignored generate`",
+    ))
+    .unwrap()
+}
+
+fn b64d(v: &serde_json::Value, key: &str) -> Vec<u8> {
+    base64::engine::general_purpose::STANDARD
+        .decode(v[key].as_str().unwrap())
+        .unwrap()
+}
+
+/// The committed fixture must stay decodable by the CURRENT Rust core. This is the desktop half
+/// of the desktop↔iPhone interop guarantee (the Swift half is NorthKeyTests/VaultCryptoTests):
+/// if a change to the SVLT/envelope formats or the vault JSON model breaks this test, that same
+/// change just broke every deployed iPhone — fix the change or regenerate the fixture AND
+/// re-verify the Swift tests, never loosen this.
+#[test]
+fn committed_fixture_blob_and_items_decode() {
+    let f = read_fixture();
+    let vk_bytes: [u8; 32] = b64d(&f, "vault_key_b64").try_into().unwrap();
+    let vk = VaultKey::from_key(Key32::from_bytes(vk_bytes));
+    let blob = b64d(&f, "vault_blob_b64");
+    let version = f["vault_version"].as_u64().unwrap();
+
+    let doc = decode_sync_blob(&vk, &blob, version).expect("SVLT decode changed incompatibly");
+    let expected = f["items"].as_array().unwrap();
+    assert_eq!(doc.items.len(), expected.len());
+
+    let mut opened: std::collections::HashMap<String, Item> = doc
+        .items
+        .iter()
+        .map(|b64| {
+            let env = ItemEnvelope(
+                base64::engine::general_purpose::STANDARD
+                    .decode(b64)
+                    .unwrap(),
+            );
+            let item = open_item(&vk, &env).expect("item envelope decode changed incompatibly");
+            (item.id.to_string(), item)
+        })
+        .collect();
+    for want in expected {
+        let item = opened
+            .remove(want["id"].as_str().unwrap())
+            .expect("fixture item missing");
+        let login = item.login.expect("fixture item lost its login");
+        assert_eq!(item.title, want["title"].as_str().unwrap());
+        assert_eq!(login.username.as_deref(), want["username"].as_str());
+        assert_eq!(login.password.as_deref(), want["password"].as_str());
+    }
+
+    // The version is authenticated (AAD) — rollback protection both platforms rely on.
+    assert!(decode_sync_blob(&vk, &blob, version + 1).is_err());
+}
+
+/// Same guarantee for the master-password wrapped key (Argon2id at PRODUCTION cost — run in
+/// release mode; CI runs it in the production-profile step).
+#[test]
+#[ignore = "production-cost Argon2; CI runs it explicitly in release mode"]
+fn committed_fixture_wrapped_key_unwraps() {
+    let f = read_fixture();
+    let blob = WrappedBlob {
+        wrapper: WrapperType::Password,
+        bytes: b64d(&f, "wrapped_key_b64"),
+    };
+    let wrapper =
+        PasswordWrapper::with_profile(f["password"].as_str().unwrap(), Argon2Profile::Production);
+    let vk = tokio::runtime::Runtime::new()
+        .unwrap()
+        .block_on(wrapper.unwrap(&blob))
+        .expect("password KEK/SNTL unwrap changed incompatibly — this breaks every iPhone");
+    assert_eq!(
+        base64::engine::general_purpose::STANDARD.encode(vk.key().as_bytes()),
+        f["vault_key_b64"].as_str().unwrap()
+    );
+}
 
 #[test]
 #[ignore = "writes the committed iOS fixture; run explicitly to regenerate"]

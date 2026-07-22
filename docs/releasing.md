@@ -37,11 +37,31 @@ That bumps the version in `tauri.conf.json`, `apps/desktop/package.json`, and th
 desktop `Cargo.toml`, commits, tags `v0.2.0`, and pushes the tag. The
 [`Release`](../.github/workflows/release.yml) workflow then:
 
+- runs the test gate (server + core tests, interop/version/migration guards) — nothing
+  publishes if it's red, because deployed sync servers auto-pull the `:latest` image,
 - builds installers on Windows, macOS (universal), and Linux runners,
 - signs the update artifacts with your private key,
-- publishes a GitHub Release with the installers and `latest.json`.
+- assembles everything on a **draft** release, verifies `latest.json` covers all three
+  platforms (each with a signature), and only then flips the release public — a failed
+  platform build can never publish a partial "latest" that strands one OS.
 
 You can also trigger it manually from the Actions tab (workflow_dispatch).
+
+## Protecting the updater signing key
+
+Installed apps only accept updates signed by the private key matching the `pubkey` pinned
+in `tauri.conf.json`. Two failure modes to respect:
+
+- **Loss**: if `TAURI_SIGNING_PRIVATE_KEY` is lost, no future release can be signed in a
+  way installed apps accept — auto-update dies permanently and every user must manually
+  reinstall. Keep an offline backup of the key file and its password (password manager,
+  printed copy — anywhere that isn't only the GitHub secret).
+- **Rotation is a TWO-step ceremony.** Never swap the key and the pinned pubkey in one
+  release — installed apps verify the new release with the OLD pubkey and reject it,
+  stranding everyone. Instead:
+  1. Ship a transitional release **signed with the old key** whose only relevant change is
+     the new `pubkey` in `tauri.conf.json`. Wait for the fleet to update.
+  2. Swap the repo secrets to the new key; subsequent releases are signed with it.
 
 ## What the user experiences
 

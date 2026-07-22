@@ -26,12 +26,51 @@ permissions:
   contents: write
 
 jobs:
+  # Releases must never ship untested code: deployed servers auto-pull the :latest image daily,
+  # so a red build reaching ghcr would propagate to the whole fleet within a day. Everything
+  # below `needs:` this gate.
+  gate:
+    name: Test gate (server + core + guards)
+    runs-on: ubuntu-24.04
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: sentinel
+          POSTGRES_PASSWORD: sentinel
+          POSTGRES_DB: sentinel
+        ports: ["5433:5432"]
+        options: >-
+          --health-cmd "pg_isready -U sentinel"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      DATABASE_URL: postgres://sentinel:sentinel@127.0.0.1:5433/sentinel
+      SQLX_OFFLINE: "true"
+      SENTINEL_ARGON2_PROFILE: test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.94.1
+      - uses: Swatinem/rust-cache@v2
+      - name: interop + version guards
+        run: |
+          bash scripts/interop-check.sh
+          bash scripts/version-check.sh
+          bash scripts/migrations-check.sh
+      - name: apply migrations
+        run: |
+          for f in services/api/migrations/[0-9]*.sql; do
+            psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f "$f"
+          done
+      - name: test server + core
+        run: cargo test -p sentinel-api -p sentinel-core
+
   # Publish the sync-server image so a one-click "Deploy my sync server" can `docker run` it on a
   # fresh Linode (no on-box Rust build). Runs alongside the desktop release build.
   # NOTE: after the first publish, set the ghcr package visibility to Public so the Linode can pull
   # it unauthenticated (see docs/self-hosting.md).
   publish-api-image:
     name: Publish sync-server image (ghcr)
+    needs: gate
     runs-on: ubuntu-24.04
     permissions:
       contents: read
@@ -57,6 +96,7 @@ jobs:
           cache-to: type=gha,mode=max
 
   release:
+    needs: gate
     strategy:
       fail-fast: false
       matrix:
@@ -177,6 +217,53 @@ jobs:
           tagName: ${{ steps.rel.outputs.tag }}
           releaseName: "NorthKey ${{ steps.rel.outputs.tag }}"
           releaseBody: ${{ steps.notes.outputs.body }}
-          releaseDraft: false
+          # Draft until ALL three platforms have uploaded and latest.json is verified complete
+          # (the finalize job below flips it live). Publishing incrementally used to mean a
+          # failed Windows build could leave a public "latest" with no Windows entry — installed
+          # apps on that platform would silently stop updating.
+          releaseDraft: true
           prerelease: false
           args: ${{ matrix.args }}
+
+  # Verify the draft is complete, then publish it atomically. If anything here fails, the draft
+  # stays invisible and installed apps keep updating from the previous good release.
+  finalize:
+    name: Verify + publish release
+    needs: release
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Compute release tag
+        id: rel
+        run: |
+          if [ "${{ github.ref_type }}" = "tag" ]; then
+            tag="${{ github.ref_name }}"
+          elif [ -n "${{ github.event.inputs.tag }}" ]; then
+            tag="${{ github.event.inputs.tag }}"
+          else
+            v=$(node -p "require('./apps/desktop/src-tauri/tauri.conf.json').version")
+            tag="v$v"
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+      - name: latest.json covers every platform
+        run: |
+          gh release download "${{ steps.rel.outputs.tag }}" -p latest.json -O latest.json
+          python3 - <<'PY'
+          import json, sys
+          m = json.load(open("latest.json"))
+          plats = set(m.get("platforms", {}))
+          need = {"windows-x86_64", "linux-x86_64"}
+          missing = need - plats
+          if missing or not any(p.startswith("darwin-") for p in plats):
+              sys.exit(f"latest.json incomplete: has {sorted(plats)}, missing {sorted(missing) or 'darwin-*'}")
+          for p, entry in m["platforms"].items():
+              if not entry.get("signature") or not entry.get("url"):
+                  sys.exit(f"platform {p} missing signature/url")
+          print("latest.json OK:", sorted(plats), "version", m.get("version"))
+          PY
+      - name: publish
+        run: gh release edit "${{ steps.rel.outputs.tag }}" --draft=false --latest

@@ -129,22 +129,16 @@ plaintext-audit:
 # Verify the iOS pairing channel shares the exact HKDF info strings with the Rust core
 # (the interop invariant; the app isn't compiled in CI).
 ios-docs-check:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    for s in 'sentinel/v1/pair/chan/desktop->phone' 'sentinel/v1/pair/chan/phone->desktop'; do
-        grep -q "$s" apps/ios-key/NorthKey/Crypto/Channel.swift
-        grep -q "$s" crates/core/src/crypto/kdf.rs
-    done
-    echo "iOS channel info strings match the Rust core."
-    for s in 'sentinel/v1/vault/outer' 'sentinel/v1/vault/item'; do
-        grep -q "$s" apps/ios-key/NorthKey/Crypto/VaultCrypto.swift
-        grep -q "$s" crates/core/src/crypto/kdf.rs
-    done
-    echo "iOS vault info strings match the Rust core."
-    grep -q '3, 65536, 4' apps/ios-key/NorthKey/Crypto/VaultCrypto.swift
-    grep -q '(65536, 3, 4)' crates/core/src/crypto/kdf.rs
-    test -s apps/ios-key/NorthKeyTests/Fixtures/golden-vault.json
-    echo "iOS Argon2 params + golden fixture in place."
+    bash scripts/interop-check.sh
+
+# Version fields (tauri.conf.json, package.json) must match and CHANGELOG must have the section.
+version-check:
+    bash scripts/version-check.sh
+
+# Shipped migrations are append-only (edits crash-loop deployed servers). After ADDING a
+# migration: `just migrations-check --update` to record it, commit the manifest.
+migrations-check *ARGS:
+    bash scripts/migrations-check.sh {{ ARGS }}
 
 # --- release -------------------------------------------------------------
 # Cut a release: bump the version across the desktop app, commit, tag `vVERSION`,
