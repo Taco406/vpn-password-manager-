@@ -105,16 +105,33 @@ async fn auth_google(
         }
     };
 
-    // Upsert account by google_sub.
-    let account: Uuid = sqlx::query_scalar(
-        "INSERT INTO accounts (google_sub, email) VALUES ($1, $2)
-         ON CONFLICT (google_sub) DO UPDATE SET email = EXCLUDED.email
+    // One personal server = one account: if the ONLY account is the synthetic bootstrap one,
+    // re-key it to this Google identity (same account_id, so its devices/vault/wrapped keys are
+    // preserved) instead of creating a parallel account. Otherwise, upsert by google_sub as usual.
+    let rekeyed: Option<Uuid> = sqlx::query_scalar(
+        "UPDATE accounts SET google_sub = $1, email = $2
+         WHERE google_sub = 'bootstrap:local'
+           AND NOT EXISTS (SELECT 1 FROM accounts WHERE google_sub <> 'bootstrap:local')
          RETURNING id",
     )
     .bind(&claims.sub)
     .bind(&claims.email)
-    .fetch_one(&st.pool)
+    .fetch_optional(&st.pool)
     .await?;
+    let account: Uuid = match rekeyed {
+        Some(id) => id,
+        None => {
+            sqlx::query_scalar(
+                "INSERT INTO accounts (google_sub, email) VALUES ($1, $2)
+                 ON CONFLICT (google_sub) DO UPDATE SET email = EXCLUDED.email
+                 RETURNING id",
+            )
+            .bind(&claims.sub)
+            .bind(&claims.email)
+            .fetch_one(&st.pool)
+            .await?
+        }
+    };
 
     // Register (or reuse) this device. New devices start pending.
     let device: Uuid = sqlx::query_scalar(
@@ -175,16 +192,47 @@ async fn auth_bootstrap(
     if req.device.name.len() > 64 || !valid_platform(&req.device.platform) {
         return Err(ApiError::BadRequest("invalid device".into()));
     }
-    // The single personal account, keyed on a synthetic sub (never collides with a Google sub).
-    let account: Uuid = sqlx::query_scalar(
-        "INSERT INTO accounts (google_sub, email) VALUES ($1, $2)
-         ON CONFLICT (google_sub) DO UPDATE SET email = EXCLUDED.email
-         RETURNING id",
-    )
-    .bind("bootstrap:local")
-    .bind("personal@sentinel.local")
-    .fetch_one(&st.pool)
-    .await?;
+    // One personal server = one account. Resolution order:
+    //   1. The flagged bootstrap-owner account (survives a Google re-key of its google_sub).
+    //   2. Exactly one account on the server → adopt it (the owner signed in with Google first)
+    //      and flag it, so bootstrap devices / join codes / phones share the SAME vault.
+    //   3. No accounts → create the synthetic personal account, flagged.
+    //   4. Several accounts and no flag (ambiguous, multi-user server) → keep today's separate
+    //      synthetic account rather than guessing an owner.
+    let account: Uuid = {
+        let flagged: Option<Uuid> =
+            sqlx::query_scalar("SELECT id FROM accounts WHERE is_bootstrap_owner")
+                .fetch_optional(&st.pool)
+                .await?;
+        match flagged {
+            Some(id) => id,
+            None => {
+                let adopted: Option<Uuid> = sqlx::query_scalar(
+                    "UPDATE accounts SET is_bootstrap_owner = true
+                     WHERE id = (SELECT id FROM accounts ORDER BY created_at LIMIT 1)
+                       AND (SELECT COUNT(*) FROM accounts) = 1
+                     RETURNING id",
+                )
+                .fetch_optional(&st.pool)
+                .await?;
+                match adopted {
+                    Some(id) => id,
+                    None => {
+                        sqlx::query_scalar(
+                            "INSERT INTO accounts (google_sub, email, is_bootstrap_owner)
+                             VALUES ($1, $2, (SELECT COUNT(*) FROM accounts) = 0)
+                             ON CONFLICT (google_sub) DO UPDATE SET email = EXCLUDED.email
+                             RETURNING id",
+                        )
+                        .bind("bootstrap:local")
+                        .bind("personal@sentinel.local")
+                        .fetch_one(&st.pool)
+                        .await?
+                    }
+                }
+            }
+        }
+    };
     // Bootstrap trust == device trust: register this device as already approved so the sync
     // endpoints (which require an approved device) work immediately, without a TOTP step.
     let device: Uuid = sqlx::query_scalar(

@@ -880,6 +880,8 @@ pub async fn auth_totp_verify(state: State<'_, AppState>, code: String) -> Resul
     kc_set(KC_ACCESS, &t.access_token)?;
     kc_set(KC_REFRESH, &t.refresh_token)?;
     kc_del(KC_PENDING);
+    // Signed in — make sure the server actually holds this device's vault.
+    let _ = try_push_vault(&state).await;
     Ok(())
 }
 
@@ -932,6 +934,16 @@ pub async fn sync_backup(state: State<'_, AppState>) -> Result<BackupOut, String
         pdf_base64: STANDARD.encode(&pdf),
         version,
     })
+}
+
+/// Best-effort: push the local vault to the server if this device is signed in and unlocked.
+/// Called after every successful sign-in so the server is never silently empty — otherwise a
+/// joining device pulls "0 items" even though everything else worked.
+async fn try_push_vault(state: &State<'_, AppState>) -> Option<i64> {
+    let vk = session_vault_key(state).ok()?;
+    let api = api_for(state).ok()?;
+    let current = api.get_vault().await.ok()?.map(|(v, _)| v).unwrap_or(0);
+    push_document(&api, &vk, state, current).await.ok()
 }
 
 #[tauri::command]
@@ -1520,7 +1532,13 @@ pub async fn sync_deploy(
     } else {
         emit_deploy(&app, "connecting", "signing in…");
         bootstrap_signin(&dir).await?;
-        emit_deploy(&app, "ready", "sync server ready");
+        // Upload the vault right away so a second device joining this server never pulls
+        // an empty one (the old behavior silently left the server without a vault).
+        if try_push_vault(&state).await.is_some() {
+            emit_deploy(&app, "ready", "sync server ready — vault uploaded");
+        } else {
+            emit_deploy(&app, "ready", "sync server ready");
+        }
     }
     Ok(())
 }
@@ -1696,13 +1714,16 @@ pub async fn sync_reconnect(state: State<'_, AppState>) -> Result<SyncReconnectO
         );
     }
     bootstrap_signin(&dir).await?;
+    // Signed in — make sure the server actually holds this device's vault.
+    let _ = try_push_vault(&state).await;
     Ok(SyncReconnectOut { signed_in: true })
 }
 
 /// Mint a one-shot device-join code for another machine to join THIS device's sync server.
 /// Requires a configured one-click server (pinned cert + IP + bootstrap token) on this device.
+/// Pushes the vault FIRST, so the joining device always has something real to pull.
 #[tauri::command]
-pub fn sync_pair_begin(state: State<AppState>) -> Result<PairCodeOut, String> {
+pub async fn sync_pair_begin(state: State<'_, AppState>) -> Result<PairCodeOut, String> {
     let dir = data_dir(&state);
     let cfg = load_config(&dir);
     let ip = cfg.server_ip.clone().filter(|s| !s.is_empty()).ok_or(
@@ -1721,6 +1742,15 @@ pub fn sync_pair_begin(state: State<AppState>) -> Result<PairCodeOut, String> {
     // the live session (never load_or_create_key, which would mint a WRONG key under a master
     // password) — so a locked vault gives a clean "unlock first" error, not a bad pairing code.
     let vk = session_vault_key(&state)?;
+    // Upload this device's vault before handing out the code — a code minted against an empty
+    // server is exactly the "joined and pulled 0 items" trap.
+    {
+        let api = api_for(&state)?;
+        let current = api.get_vault().await?.map(|(v, _)| v).unwrap_or(0);
+        push_document(&api, &vk, &state, current).await.map_err(|e| {
+            format!("Couldn't upload your vault first ({e}). Use Reconnect / sign in on this device, then try again.")
+        })?;
+    }
     let vkey = STANDARD.encode(vk.key().as_bytes());
     let ts = now_unix();
     let bundle = JoinBundle {
