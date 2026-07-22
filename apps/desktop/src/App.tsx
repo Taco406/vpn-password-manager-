@@ -5,7 +5,6 @@ import { checkForUpdate } from "./updater";
 import { Layout } from "./components/Layout";
 import { CommandPalette } from "./components/palette/CommandPalette";
 import { Unlock } from "./screens/Unlock";
-import { Onboarding } from "./screens/Onboarding";
 import { SetupWizard } from "./screens/SetupWizard";
 import { Vault } from "./screens/Vault";
 import { ItemEditor } from "./screens/ItemEditor";
@@ -33,7 +32,6 @@ export function App() {
       <CommandPalette />
       <Routes>
         <Route path="/unlock" element={<Unlock />} />
-        <Route path="/onboarding" element={<Onboarding />} />
         <Route path="/setup" element={<SetupWizard />} />
         <Route element={<Gate />}>
           <Route element={<Layout />}>

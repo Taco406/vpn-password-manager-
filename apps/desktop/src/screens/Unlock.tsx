@@ -1,17 +1,16 @@
 import { useEffect, useState } from "react";
 import { motion } from "framer-motion";
-import { Shield, Fingerprint, Smartphone, KeyRound, Loader2, Lock } from "lucide-react";
-import type { KeyringStatus } from "@sentinel/shared";
+import { Shield, Fingerprint, Lock } from "lucide-react";
 import { bridge, lockStatus, lockUnlockPassword, helloStatus, type AppLockStatus } from "../bridge";
 import { useApp } from "../stores/app";
 import { Button } from "../components/ui";
 
+// The unlock screen offers ONLY real factors: the master password (+ optional authenticator
+// code), and the OS biometric when the platform actually has a verifier. The old "Approve on
+// iPhone" and "Recovery kit" rows were removed — they ignored their input and re-unlocked from
+// the OS keychain, which is worse than not existing. They return when the real flows land.
 export function Unlock() {
-  const [status, setStatus] = useState<KeyringStatus | null>(null);
   const [lock, setLock] = useState<AppLockStatus | null>(null);
-  const [mode, setMode] = useState<"pick" | "phone" | "recovery">("pick");
-  const [phoneState, setPhoneState] = useState<"idle" | "waiting">("idle");
-  const [recoveryKey, setRecoveryKey] = useState("");
   const [password, setPassword] = useState("");
   const [code, setCode] = useState("");
   const [busy, setBusy] = useState(false);
@@ -20,7 +19,6 @@ export function Unlock() {
   const setLocked = useApp((s) => s.setLocked);
 
   useEffect(() => {
-    void bridge.keyringStatus().then(setStatus);
     void lockStatus().then(setLock);
     // Only offer the biometric row when the OS actually has a verifier (Windows Hello today;
     // Touch ID once wired) — otherwise it's a button that unlocks with no real check.
@@ -30,17 +28,6 @@ export function Unlock() {
   const unlockBiometric = async () => {
     await bridge.mockBiometricApprove?.();
     await bridge.unlockPlatform();
-    setLocked(false);
-  };
-  const unlockPhone = async () => {
-    setMode("phone");
-    setPhoneState("waiting");
-    const { requestId } = await bridge.unlockPhoneBegin();
-    await bridge.unlockPhoneAwait(requestId);
-    setLocked(false);
-  };
-  const unlockRecovery = async () => {
-    await bridge.unlockRecovery(recoveryKey);
     setLocked(false);
   };
   const unlockPassword = async () => {
@@ -121,62 +108,33 @@ export function Unlock() {
           </form>
         )}
 
-        {/* Legacy hardware paths (only when no master password is set) */}
-        {!passwordMode && mode === "pick" && (
+        {/* No master password: the OS biometric (when real), else a plain continue. */}
+        {!passwordMode && (
           <div className="flex flex-col gap-2">
-            {biometricAvailable && (
-              <UnlockRow icon={<Fingerprint size={20} />} title="Biometric unlock" subtitle="This device" onClick={unlockBiometric} enrolled />
+            {biometricAvailable ? (
+              <button
+                onClick={() => void unlockBiometric()}
+                className="flex items-center gap-3 rounded-[12px] border border-[var(--border-subtle)] bg-[var(--bg-raised)] px-4 py-3 text-left transition-colors hover:border-[var(--accent)]/40"
+              >
+                <span className="text-accent">
+                  <Fingerprint size={20} />
+                </span>
+                <span className="flex flex-col">
+                  <span className="text-sm font-medium">Biometric unlock</span>
+                  <span className="text-xs text-[var(--text-muted)]">This device</span>
+                </span>
+              </button>
+            ) : (
+              <Button onClick={() => void unlockBiometric()} className="w-full">
+                Unlock
+              </Button>
             )}
-            <UnlockRow icon={<Smartphone size={20} />} title="Approve on iPhone" subtitle="iPhone 16 Pro" onClick={unlockPhone} enrolled={status?.wrappers.find((w) => w.type === "phone")?.enrolled} />
-            <UnlockRow icon={<KeyRound size={20} />} title="Recovery kit" subtitle="Break-glass" onClick={() => setMode("recovery")} enrolled />
-          </div>
-        )}
-
-        {!passwordMode && mode === "phone" && (
-          <div className="flex flex-col items-center gap-4 py-4">
-            <div className="flex h-16 w-16 items-center justify-center rounded-2xl bg-[var(--accent)]/12">
-              {phoneState === "waiting" ? <Loader2 className="animate-spin text-accent" size={28} /> : <Smartphone className="text-accent" size={28} />}
-            </div>
-            <div className="text-center">
-              <div className="font-medium">Approve on iPhone</div>
-              <div className="mt-1 text-sm text-[var(--text-secondary)]">Face ID prompt sent to iPhone 16 Pro…</div>
-            </div>
-            <Button variant="ghost" onClick={() => setMode("pick")}>Cancel</Button>
-          </div>
-        )}
-
-        {!passwordMode && mode === "recovery" && (
-          <div className="flex flex-col gap-3">
-            <label className="text-sm text-[var(--text-secondary)]">Enter your recovery key</label>
-            <input
-              value={recoveryKey}
-              onChange={(e) => setRecoveryKey(e.target.value)}
-              placeholder="SNTL-XXXXX-XXXXX-…"
-              className="mono w-full rounded-[10px] border border-[var(--border-strong)] bg-[var(--bg-inset)] px-3 py-2.5 text-sm outline-none focus:border-[var(--accent)]"
-            />
-            <div className="flex gap-2">
-              <Button variant="ghost" onClick={() => setMode("pick")}>Back</Button>
-              <Button onClick={unlockRecovery} className="flex-1">Unlock</Button>
-            </div>
+            <p className="text-center text-[11px] text-[var(--text-muted)]">
+              Add a master password under Settings → Security to protect this vault with a real secret.
+            </p>
           </div>
         )}
       </motion.div>
     </div>
-  );
-}
-
-function UnlockRow({ icon, title, subtitle, onClick, enrolled }: { icon: React.ReactNode; title: string; subtitle: string; onClick: () => void; enrolled?: boolean }) {
-  return (
-    <button
-      disabled={!enrolled}
-      onClick={onClick}
-      className="flex items-center gap-3 rounded-[12px] border border-[var(--border-subtle)] bg-[var(--bg-raised)] px-4 py-3 text-left transition-colors hover:border-[var(--accent)]/40 disabled:opacity-40"
-    >
-      <span className="text-accent">{icon}</span>
-      <span className="flex flex-col">
-        <span className="text-sm font-medium">{title}</span>
-        <span className="text-xs text-[var(--text-muted)]">{enrolled ? subtitle : "Not set up"}</span>
-      </span>
-    </button>
   );
 }
