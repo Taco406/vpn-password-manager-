@@ -173,6 +173,14 @@ pub fn unlock_platform(state: State<AppState>) -> R<()> {
     reunlock(&state)
 }
 
+/// The host OS ("windows" | "macos" | "linux" | …), so the UI can honestly hide platform-specific
+/// controls (e.g. the Windows-only VPN kill switch / untrusted-Wi-Fi auto-connect) on macOS
+/// instead of showing dead toggles that silently do nothing.
+#[tauri::command]
+pub fn app_platform() -> String {
+    std::env::consts::OS.to_string()
+}
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct HelloStatus {

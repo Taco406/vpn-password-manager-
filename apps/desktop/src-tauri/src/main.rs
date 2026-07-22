@@ -71,6 +71,7 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             commands::keyring_status,
             commands::lock,
+            commands::app_platform,
             commands::unlock_platform,
             commands::hello_status,
             commands::hello_set,
