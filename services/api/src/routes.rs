@@ -39,6 +39,18 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/unlock-requests/{id}", get(unlock_get))
         .route("/v1/unlock-requests/{id}/respond", post(unlock_respond))
         .route("/v1/push/register", post(push_register))
+        // File transfer ("send to my devices"). The create route accepts up to ~25 MiB of
+        // ciphertext (base64 ≈ 4/3 of that), well over axum's 2 MiB default body limit.
+        .route(
+            "/v1/transfers",
+            get(transfer_list)
+                .post(transfer_create)
+                .layer(axum::extract::DefaultBodyLimit::max(40 * 1024 * 1024)),
+        )
+        .route(
+            "/v1/transfers/{id}",
+            get(transfer_download).delete(transfer_delete),
+        )
         .route("/v1/security-events", get(security_events_list))
         .route("/v1/security-summary", get(security_summary))
         .route("/v1/security-events/ban", post(security_ban))
@@ -911,6 +923,203 @@ async fn push_register(
         .bind(a.account)
         .execute(&st.pool)
         .await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+// --- file transfer relay (E2E-opaque "send to my devices") ----------------
+
+/// Per-file ciphertext ceiling (25 MiB), mirroring the DB CHECK.
+const TRANSFER_MAX_CIPHERTEXT: usize = 25 * 1024 * 1024;
+/// Per-account storage quota across all live transfers, so one device can't fill the box.
+const TRANSFER_MAX_PENDING_BYTES: i64 = 250 * 1024 * 1024;
+
+#[derive(Deserialize)]
+struct TransferCreateReq {
+    /// A specific target device, or null to drop it for any of the account's devices to claim.
+    recipient_device_id: Option<Uuid>,
+    /// Plaintext size for the inbox display (the ciphertext length already approximates it).
+    size_bytes: i64,
+    ciphertext_b64: String,
+}
+
+async fn transfer_create(
+    State(st): State<AppState>,
+    a: Auth,
+    headers: HeaderMap,
+    peer: PeerAddr,
+    Json(req): Json<TransferCreateReq>,
+) -> ApiResult<Json<serde_json::Value>> {
+    require_approved_device(&st, a.device).await?;
+    rate_limit(
+        &st,
+        &headers,
+        peer.0,
+        &format!("transfer:{}", a.account),
+        20,
+        3600,
+    )?;
+    let ct = base64::engine::general_purpose::STANDARD
+        .decode(req.ciphertext_b64.as_bytes())
+        .map_err(|_| ApiError::BadRequest("ciphertext not base64".into()))?;
+    if ct.is_empty() || ct.len() > TRANSFER_MAX_CIPHERTEXT {
+        return Err(ApiError::BadRequest("file too large (25 MiB max)".into()));
+    }
+    if req.size_bytes < 0 {
+        return Err(ApiError::BadRequest("bad size".into()));
+    }
+    // A named recipient must be one of this account's own devices.
+    if let Some(r) = req.recipient_device_id {
+        let ok: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM devices WHERE id = $1 AND account_id = $2)",
+        )
+        .bind(r)
+        .bind(a.account)
+        .fetch_one(&st.pool)
+        .await?;
+        if !ok {
+            return Err(ApiError::BadRequest("unknown recipient device".into()));
+        }
+    }
+    // Quota: the account's live transfers (not yet expired) must stay under the cap.
+    let used: i64 = sqlx::query_scalar(
+        "SELECT COALESCE(SUM(octet_length(ciphertext)), 0)::bigint FROM file_transfers
+         WHERE account_id = $1 AND state <> 'expired' AND expires_at > now()",
+    )
+    .bind(a.account)
+    .fetch_one(&st.pool)
+    .await?;
+    if used + ct.len() as i64 > TRANSFER_MAX_PENDING_BYTES {
+        return Err(ApiError::BadRequest(
+            "storage quota exceeded — delete old transfers".into(),
+        ));
+    }
+    let id: Uuid = sqlx::query_scalar(
+        "INSERT INTO file_transfers (account_id, sender_device_id, recipient_device_id, size_bytes, ciphertext)
+         VALUES ($1, $2, $3, $4, $5) RETURNING id",
+    )
+    .bind(a.account)
+    .bind(a.device)
+    .bind(req.recipient_device_id)
+    .bind(req.size_bytes)
+    .bind(&ct)
+    .fetch_one(&st.pool)
+    .await?;
+    Ok(Json(json!({ "id": id })))
+}
+
+/// A transfer row as read for the list: id, sender, recipient, size, state, created, expires.
+type TransferRow = (
+    Uuid,
+    Uuid,
+    Option<Uuid>,
+    i64,
+    String,
+    time::OffsetDateTime,
+    time::OffsetDateTime,
+);
+
+async fn transfer_list(State(st): State<AppState>, a: Auth) -> ApiResult<Json<serde_json::Value>> {
+    // Lazy TTL: expire this account's overdue transfers before listing.
+    sqlx::query(
+        "UPDATE file_transfers SET state = 'expired'
+         WHERE account_id = $1 AND state <> 'expired' AND expires_at < now()",
+    )
+    .bind(a.account)
+    .execute(&st.pool)
+    .await?;
+    let rows: Vec<TransferRow> = sqlx::query_as(
+        "SELECT id, sender_device_id, recipient_device_id, size_bytes, state, created_at, expires_at
+         FROM file_transfers
+         WHERE account_id = $1 AND state <> 'expired'
+           AND (sender_device_id = $2 OR recipient_device_id IS NULL OR recipient_device_id = $2)
+         ORDER BY created_at DESC",
+    )
+    .bind(a.account)
+    .bind(a.device)
+    .fetch_all(&st.pool)
+    .await?;
+    let transfers: Vec<_> = rows
+        .into_iter()
+        .map(|(id, sender, recipient, size, state, created, expires)| {
+            json!({
+                "id": id,
+                "sender_device_id": sender,
+                "recipient_device_id": recipient,
+                "size_bytes": size,
+                "state": state,
+                "created_at": created.unix_timestamp(),
+                "expires_at": expires.unix_timestamp(),
+                "outgoing": sender == a.device,
+            })
+        })
+        .collect();
+    Ok(Json(json!({ "transfers": transfers })))
+}
+
+/// A transfer row as read for download: sender, recipient, size, ciphertext, expires.
+type TransferBlobRow = (Uuid, Option<Uuid>, i64, Vec<u8>, time::OffsetDateTime);
+
+async fn transfer_download(
+    State(st): State<AppState>,
+    a: Auth,
+    Path(id): Path<Uuid>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let row: Option<TransferBlobRow> = sqlx::query_as(
+        "SELECT sender_device_id, recipient_device_id, size_bytes, ciphertext, expires_at
+         FROM file_transfers WHERE id = $1 AND account_id = $2 AND state <> 'expired'",
+    )
+    .bind(id)
+    .bind(a.account)
+    .fetch_optional(&st.pool)
+    .await?;
+    let (sender, recipient, size, ct, expires) = row.ok_or(ApiError::NotFound)?;
+    if expires < time::OffsetDateTime::now_utc() {
+        sqlx::query("UPDATE file_transfers SET state = 'expired' WHERE id = $1")
+            .bind(id)
+            .execute(&st.pool)
+            .await?;
+        return Err(ApiError::NotFound);
+    }
+    // Only the sender or an eligible recipient (named or broadcast) may download.
+    let allowed = sender == a.device || recipient.is_none() || recipient == Some(a.device);
+    if !allowed {
+        return Err(ApiError::Forbidden);
+    }
+    // A download by a non-sender marks it delivered (informational; the blob stays until TTL or an
+    // explicit delete, so the user's other devices can grab it too).
+    if sender != a.device {
+        sqlx::query(
+            "UPDATE file_transfers SET state = 'delivered' WHERE id = $1 AND state = 'pending'",
+        )
+        .bind(id)
+        .execute(&st.pool)
+        .await?;
+    }
+    Ok(Json(json!({
+        "sender_device_id": sender,
+        "size_bytes": size,
+        "ciphertext_b64": base64::engine::general_purpose::STANDARD.encode(&ct),
+    })))
+}
+
+async fn transfer_delete(
+    State(st): State<AppState>,
+    a: Auth,
+    Path(id): Path<Uuid>,
+) -> ApiResult<StatusCode> {
+    let n = sqlx::query(
+        "DELETE FROM file_transfers WHERE id = $1 AND account_id = $2
+         AND (sender_device_id = $3 OR recipient_device_id IS NULL OR recipient_device_id = $3)",
+    )
+    .bind(id)
+    .bind(a.account)
+    .bind(a.device)
+    .execute(&st.pool)
+    .await?
+    .rows_affected();
+    if n == 0 {
+        return Err(ApiError::NotFound);
+    }
     Ok(StatusCode::NO_CONTENT)
 }
 
