@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { motion } from "framer-motion";
 import { Shield, Fingerprint, Smartphone, KeyRound, Loader2, Lock } from "lucide-react";
 import type { KeyringStatus } from "@sentinel/shared";
-import { bridge, lockStatus, lockUnlockPassword, type AppLockStatus } from "../bridge";
+import { bridge, lockStatus, lockUnlockPassword, helloStatus, type AppLockStatus } from "../bridge";
 import { useApp } from "../stores/app";
 import { Button } from "../components/ui";
 
@@ -16,11 +16,15 @@ export function Unlock() {
   const [code, setCode] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  const [biometricAvailable, setBiometricAvailable] = useState(false);
   const setLocked = useApp((s) => s.setLocked);
 
   useEffect(() => {
     void bridge.keyringStatus().then(setStatus);
     void lockStatus().then(setLock);
+    // Only offer the biometric row when the OS actually has a verifier (Windows Hello today;
+    // Touch ID once wired) — otherwise it's a button that unlocks with no real check.
+    void helloStatus().then((h) => setBiometricAvailable(h.available));
   }, []);
 
   const unlockBiometric = async () => {
@@ -120,7 +124,9 @@ export function Unlock() {
         {/* Legacy hardware paths (only when no master password is set) */}
         {!passwordMode && mode === "pick" && (
           <div className="flex flex-col gap-2">
-            <UnlockRow icon={<Fingerprint size={20} />} title="Touch ID" subtitle="This device" onClick={unlockBiometric} enrolled />
+            {biometricAvailable && (
+              <UnlockRow icon={<Fingerprint size={20} />} title="Biometric unlock" subtitle="This device" onClick={unlockBiometric} enrolled />
+            )}
             <UnlockRow icon={<Smartphone size={20} />} title="Approve on iPhone" subtitle="iPhone 16 Pro" onClick={unlockPhone} enrolled={status?.wrappers.find((w) => w.type === "phone")?.enrolled} />
             <UnlockRow icon={<KeyRound size={20} />} title="Recovery kit" subtitle="Break-glass" onClick={() => setMode("recovery")} enrolled />
           </div>

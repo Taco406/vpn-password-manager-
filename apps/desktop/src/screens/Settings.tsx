@@ -25,6 +25,7 @@ import {
   logDirPath,
   serversConfig,
   serversSetHetznerToken,
+  appPlatform,
   type WgStatusInfo,
   type AppLockStatus,
   type LockTotpEnroll,
@@ -45,11 +46,13 @@ const TABS: { id: TabId; label: string; icon?: LucideIcon }[] = [
 export function Settings() {
   const [s, setS] = useState<SettingsT | null>(null);
   const [tab, setTab] = useState<TabId>("general");
+  const [platform, setPlatform] = useState("");
   const setTheme = useApp((a) => a.setTheme);
   const navigate = useNavigate();
 
   useEffect(() => {
     void bridge.settingsGet().then(setS);
+    void appPlatform().then(setPlatform);
   }, []);
 
   const patch = (p: Partial<SettingsT>) => {
@@ -130,7 +133,16 @@ export function Settings() {
             <div className="mb-3 text-sm font-medium">Security</div>
             <Slider label="Auto-lock after" value={s.autoLockMinutes} min={1} max={60} unit="min" onChange={(v) => patch({ autoLockMinutes: v })} />
             <Slider label="Clipboard auto-clear" value={s.clipboardClearSeconds} min={5} max={120} unit="s" onChange={(v) => patch({ clipboardClearSeconds: v })} />
-            <Toggle label="Kill switch on by default" checked={s.killSwitchDefault} onChange={(v) => patch({ killSwitchDefault: v })} />
+            {platform === "macos" ? (
+              <div className="flex items-center justify-between py-2 opacity-60">
+                <span className="text-sm">
+                  Kill switch{" "}
+                  <span className="text-xs text-[var(--text-muted)]">— Windows only for now</span>
+                </span>
+              </div>
+            ) : (
+              <Toggle label="Kill switch on by default" checked={s.killSwitchDefault} onChange={(v) => patch({ killSwitchDefault: v })} />
+            )}
             <HelloRow />
           </Card>
 

@@ -8,6 +8,26 @@ The format follows [Keep a Changelog](https://keepachangelog.com/). Versions are
 [semantic](https://semver.org/). **Add a new `## [x.y.z]` section at the top in the same PR
 that bumps the app version** — that's how "the changelog updates on every merge."
 
+## [0.1.44] — 2026-07-22
+
+### Added
+- **NorthKey.app for macOS — signed & notarized.** The macOS build is now wired for Apple
+  Developer ID code signing + notarization, so once the signing certificate is in place the `.dmg`
+  opens with a normal double-click (no more right-click → Open past Gatekeeper). See
+  `docs/macos-signing.md` for the one-time Apple setup. Windows and Linux builds are unchanged.
+
+### Changed
+- **Honest about what works on macOS.** On macOS the app now hides controls it can't back up: the
+  VPN **kill switch** and **auto-connect on untrusted Wi-Fi** are labeled Windows-only (they were
+  silently doing nothing on macOS), and the lock screen no longer shows a biometric button unless
+  the OS actually has a verifier — so nothing pretends to protect you when it can't. Basic VPN
+  connect still works on macOS via WireGuard (`brew install wireguard-tools`), and split-tunnel is
+  fully supported.
+
+### Notes
+- macOS is now built and tested on every pull request (previously only at release time), so
+  platform-specific regressions are caught earlier. Real Touch ID unlock is the next macOS step.
+
 ## [0.1.43] — 2026-07-21
 
 ### Added

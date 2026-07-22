@@ -566,6 +566,23 @@ export async function wgStatus(): Promise<WgStatusInfo> {
   return { ...fallback, ...s };
 }
 
+let _platform: string | null = null;
+/**
+ * The host OS: "windows" | "macos" | "linux" | "" (empty in the browser/mock). Cached after the
+ * first call. Used to hide platform-specific controls (e.g. the Windows-only VPN kill switch and
+ * untrusted-Wi-Fi auto-connect) honestly on macOS instead of showing toggles that do nothing.
+ */
+export async function appPlatform(): Promise<string> {
+  if (_platform !== null) return _platform;
+  if (!inTauri()) {
+    _platform = "";
+    return _platform;
+  }
+  const core = await import("@tauri-apps/api/core");
+  _platform = (await core.invoke("app_platform")) as string;
+  return _platform;
+}
+
 /**
  * Emergency recovery: remove any leftover SENTINEL WireGuard tunnel and clear kill-switch rules,
  * to restore internet if a failed connect left routing captured. Safe no-op if nothing is stuck.

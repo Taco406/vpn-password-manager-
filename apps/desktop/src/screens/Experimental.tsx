@@ -12,6 +12,7 @@ import {
   killswitchClear,
   vpnRealEnabled,
   vpnConnectMultihop,
+  appPlatform,
   type NetStatusInfo,
 } from "../bridge";
 import { Card, SectionTitle, Badge } from "../components/ui";
@@ -40,6 +41,7 @@ function NetGuard() {
   const [newSsid, setNewSsid] = useState("");
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState("");
+  const [platform, setPlatform] = useState("");
 
   const refresh = async () => {
     const [st, settings] = await Promise.all([netStatus(), bridge.settingsGet()]);
@@ -49,7 +51,10 @@ function NetGuard() {
 
   useEffect(() => {
     void refresh().catch(() => {});
+    void appPlatform().then(setPlatform);
   }, []);
+
+  const isMac = platform === "macos";
 
   const persist = async (autoConnect: boolean, list: string[]) => {
     setBusy(true);
@@ -112,7 +117,14 @@ function NetGuard() {
         disconnect so it won't fight you.
       </p>
 
-      <Toggle label="Auto-connect on untrusted Wi-Fi" checked={auto} onChange={toggleAuto} />
+      {isMac ? (
+        <div className="rounded-[10px] border border-[var(--warn)]/30 bg-[var(--warn)]/10 p-2.5 text-[11px] text-[var(--text-secondary)]">
+          Auto-connect on untrusted Wi-Fi isn’t available on macOS yet — SSID detection and the
+          firewall kill switch are Windows-only for now. Basic VPN connect still works on macOS.
+        </div>
+      ) : (
+        <Toggle label="Auto-connect on untrusted Wi-Fi" checked={auto} onChange={toggleAuto} />
+      )}
 
       {/* current network */}
       <div className="mt-3 flex items-center justify-between rounded-[10px] border border-[var(--border-subtle)] bg-[var(--bg-inset)] px-3 py-2 text-sm">
