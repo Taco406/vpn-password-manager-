@@ -14,7 +14,7 @@ struct ContentView: View {
             if !configured {
                 VStack(spacing: 24) {
                     header(connected: false)
-                    ScanSetupView(onDone: { configured = true })
+                    ScanSetupView(vault: vault, onDone: { configured = true })
                     Spacer()
                 }
                 .padding(20)

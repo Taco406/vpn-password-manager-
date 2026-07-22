@@ -75,6 +75,7 @@ async fn setup_full(bootstrap_token: Option<&str>, autoban_threshold: u32) -> (R
         autoban_window_secs: 300,
         autoban_minutes: 60,
         update_flag_dir: None,
+        tls_cert_pem: None,
     };
     let google: Arc<dyn GoogleVerifier> = Arc::new(MockGoogleVerifier);
     let app = sentinel_api::build_app(pool.clone(), JwtKeys::ephemeral(), config, google);
@@ -599,6 +600,7 @@ async fn admin_update_touches_flag_file() {
         autoban_window_secs: 300,
         autoban_minutes: 60,
         update_flag_dir: Some(dir.to_string_lossy().into_owned()),
+        tls_cert_pem: None,
     };
     let google: Arc<dyn GoogleVerifier> = Arc::new(MockGoogleVerifier);
     let app = sentinel_api::build_app(pool, JwtKeys::ephemeral(), config, google);
@@ -1063,6 +1065,7 @@ async fn auto_ban_threshold_and_owner_guard() {
         autoban_window_secs: 300,
         autoban_minutes: 60,
         update_flag_dir: None,
+        tls_cert_pem: None,
     };
     let google: Arc<dyn GoogleVerifier> = Arc::new(MockGoogleVerifier);
     let st = sentinel_api::state::AppState {

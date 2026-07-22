@@ -100,6 +100,12 @@ fn committed_fixture_wrapped_key_unwraps() {
         base64::engine::general_purpose::STANDARD.encode(vk.key().as_bytes()),
         f["vault_key_b64"].as_str().unwrap()
     );
+    // The sign-in proof must stay stable too — a drift here locks every phone out of login.
+    let salt: [u8; 16] = blob.params().unwrap().try_into().unwrap();
+    assert_eq!(
+        base64::engine::general_purpose::STANDARD.encode(wrapper.login_proof(&salt).as_bytes()),
+        f["login_proof_b64"].as_str().unwrap()
+    );
 }
 
 #[test]
@@ -114,6 +120,9 @@ fn generate() {
         .unwrap()
         .block_on(wrapper.wrap(&vk))
         .unwrap();
+    // The sign-in proof for the same salt (one derivation covers login AND unwrap on clients).
+    let salt: [u8; 16] = wrapped.params().unwrap().try_into().unwrap();
+    let login_proof = wrapper.login_proof(&salt);
 
     let mut a = Item::new_login("GitHub", 1_750_000_000);
     a.id = uuid::Uuid::from_bytes([0xA1; 16]);
@@ -140,6 +149,7 @@ fn generate() {
         "password": password,
         "vault_key_b64": b64(vk.key().as_bytes()),
         "wrapped_key_b64": b64(&wrapped.bytes),
+        "login_proof_b64": b64(login_proof.as_bytes()),
         "argon2": { "m_kib": 65536, "t": 3, "p": 4 },
         "vault_version": version,
         "vault_blob_b64": b64(&blob),

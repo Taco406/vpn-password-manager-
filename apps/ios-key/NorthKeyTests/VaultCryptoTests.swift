@@ -19,6 +19,7 @@ private struct Golden: Decodable {
     let vault_key_b64: String
     let vault_version: UInt64
     let wrapped_key_b64: String
+    let login_proof_b64: String
 }
 
 final class VaultCryptoTests: XCTestCase {
@@ -39,12 +40,20 @@ final class VaultCryptoTests: XCTestCase {
             "82413b4227b27bfed30e42508a877d73a0f9e4d58a74a853c12ec41326d3ecdc")
     }
 
-    /// Argon2id (production params) + SNTL unwrap: master password → exact vault key.
-    func testUnwrapGoldenWrappedKey() throws {
+    /// Argon2id (production params) + SNTL unwrap: master password → exact vault key. The SAME
+    /// KEK must also produce the exact sign-in proof — this is what "one login" rides on.
+    func testUnwrapGoldenWrappedKeyAndLoginProof() throws {
         let g = try golden()
         let blob = try XCTUnwrap(Data(base64Encoded: g.wrapped_key_b64))
-        let vk = try VaultCrypto.unwrapPasswordBlob(blob, password: g.password)
+        let salt = try VaultCrypto.passwordBlobSalt(blob)
+        let kek = try VaultCrypto.argon2idKek(password: g.password, salt: salt)
+        let vk = try VaultCrypto.unwrapPasswordBlob(blob, kek: kek)
         XCTAssertEqual(vk.base64EncodedString(), g.vault_key_b64)
+        XCTAssertEqual(VaultCrypto.loginProof(kek: kek).base64EncodedString(), g.login_proof_b64)
+        // The password-only variant must agree with the KEK path.
+        XCTAssertEqual(
+            try VaultCrypto.unwrapPasswordBlob(blob, password: g.password).base64EncodedString(),
+            g.vault_key_b64)
     }
 
     func testWrongPasswordThrows() throws {

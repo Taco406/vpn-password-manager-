@@ -24,7 +24,7 @@ for s in 'sentinel/v1/pair/chan/desktop->phone' 'sentinel/v1/pair/chan/phone->de
     grep -qF "$s" "$SWIFT_CHANNEL" || fail "$s missing from $SWIFT_CHANNEL"
     grep -qF "$s" "$RUST_KDF" || fail "$s missing from $RUST_KDF"
 done
-for s in 'sentinel/v1/vault/outer' 'sentinel/v1/vault/item'; do
+for s in 'sentinel/v1/vault/outer' 'sentinel/v1/vault/item' 'sentinel/v1/auth/login'; do
     grep -qF "$s" "$SWIFT_CRYPTO" || fail "$s missing from $SWIFT_CRYPTO"
     grep -qF "$s" "$RUST_KDF" || fail "$s missing from $RUST_KDF"
 done
@@ -52,8 +52,9 @@ echo "ok: QR payload fields match desktop mint and phone scan"
 # 5. Every API path the phone calls must exist in the server's router. (Parameterized routes
 #    are matched by prefix.)
 for p in /v1/auth/enroll /v1/auth/bootstrap /v1/auth/refresh /v1/wrapped-keys /v1/vault \
-         /v1/push/register /v1/devices/pin /v1/unlock-requests; do
-    grep -qF "\"$p" "$SWIFT_API" || fail "path $p no longer used by ApiClient.swift (update this list)"
+         /v1/push/register /v1/devices/pin /v1/unlock-requests /v1/meta \
+         /v1/auth/password/params /v1/auth/password; do
+    grep -qF "$p" "$SWIFT_API" || fail "path $p no longer used by ApiClient.swift (update this list)"
     grep -qF "\"$p" "$API_ROUTES" || fail "path $p used by the phone but missing from $API_ROUTES"
 done
 echo "ok: every phone API path exists in the server router"

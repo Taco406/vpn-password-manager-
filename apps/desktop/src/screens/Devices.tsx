@@ -41,6 +41,9 @@ import {
   syncSecuritySummary,
   syncBanIp,
   syncUnbanIp,
+  syncProbeServer,
+  syncPasswordSignin,
+  type ServerProbe,
   type SyncServerStatus,
   type SyncStatusInfo,
   type SyncDevice,
@@ -68,12 +71,14 @@ export function Devices() {
     void refreshSync();
   }, []);
 
-  // ONE front door: while setting up (no server, or not signed in) the server card leads;
-  // once connected, the account card leads and server management folds under Advanced.
+  // ONE front door: signed out, the sign-in card (server address + master password) leads and
+  // the deploy/Google/join card sits below it for first-ever setup; signed in, the account card
+  // leads and server management folds under Advanced.
   const settled = !!sync?.signedIn;
   return (
     <div className="mx-auto max-w-3xl px-8 py-8">
       <SectionTitle hint="one account · all your devices">Account &amp; Sync</SectionTitle>
+      {!settled && <SignIn onSyncChange={refreshSync} />}
       {!settled && <SyncServer sync={sync} onSyncChange={refreshSync} />}
       <AccountSync sync={sync} onSyncChange={refreshSync} />
       {settled ? (
@@ -85,6 +90,143 @@ export function Devices() {
         <SecurityMonitor sync={sync} />
       )}
     </div>
+  );
+}
+
+/**
+ * THE login (identical on every device): server address + master password, plus the 6-digit
+ * code when 2-step sign-in is on. First contact shows the server's fingerprint to confirm
+ * (trust-on-first-use); after that the certificate is pinned and everything runs over it.
+ */
+function SignIn({ onSyncChange }: { onSyncChange: () => void }) {
+  const [address, setAddress] = useState("");
+  const [password, setPassword] = useState("");
+  const [code, setCode] = useState("");
+  const [needCode, setNeedCode] = useState(false);
+  const [probe, setProbe] = useState<ServerProbe | null>(null);
+  const [confirmed, setConfirmed] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState<string | null>(null);
+
+  const doProbe = async () => {
+    setBusy(true);
+    setMsg(null);
+    try {
+      const p = await syncProbeServer(address);
+      setProbe(p);
+      if (!p.fingerprint) setConfirmed(true); // real-CA server: TLS itself is the trust
+      if (!p.passwordSigninReady) {
+        setMsg(
+          "Found your server, but master-password sign-in isn't turned on yet. On a computer that already has your vault: Account & Sync → Advanced → Turn on master-password sign-in. (Old server? Click Update server there first.)",
+        );
+      }
+    } catch (e) {
+      setMsg(errMsg(e));
+    }
+    setBusy(false);
+  };
+
+  const doSignin = async () => {
+    if (!probe) return;
+    setBusy(true);
+    setMsg(needCode ? "Checking code…" : "Signing in — this takes a few seconds…");
+    try {
+      const r = await syncPasswordSignin({
+        address,
+        certPem: probe.certPem,
+        password,
+        code: needCode ? code : undefined,
+      });
+      if (r.totpRequired) {
+        setNeedCode(true);
+        setMsg("2-step sign-in is on for your account — enter the 6-digit code from your authenticator app.");
+      } else {
+        setPassword("");
+        setCode("");
+        setMsg(`Signed in — pulled ${r.restored} item${r.restored === 1 ? "" : "s"}. Your vault is ready.`);
+        onSyncChange();
+      }
+    } catch (e) {
+      setMsg(errMsg(e));
+    }
+    setBusy(false);
+  };
+
+  return (
+    <Card className="mb-4">
+      <div className="mb-2 flex items-center gap-2 text-sm font-medium">
+        <LogIn size={15} /> Sign in to your NorthKey server
+      </div>
+      <p className="mb-3 text-xs text-[var(--text-secondary)]">
+        The same login on every device: your server’s address and your{" "}
+        <span className="font-medium">master password</span>. Find the address on the computer that set the server up
+        (Account &amp; Sync shows it), or scan the QR there with your phone. No server yet? Deploy one below.
+      </p>
+      <div className="space-y-2">
+        <div className="flex items-center gap-2">
+          <input
+            value={address}
+            onChange={(e) => {
+              setAddress(e.target.value);
+              setProbe(null);
+              setConfirmed(false);
+              setNeedCode(false);
+            }}
+            placeholder="Server address — e.g. 172.234.28.91"
+            className={`${inputCls} flex-1`}
+          />
+          {!probe && (
+            <button onClick={() => void doProbe()} disabled={busy || !address.trim()} className={btnCls}>
+              {busy ? "Connecting…" : "Connect"}
+            </button>
+          )}
+        </div>
+
+        {probe && probe.fingerprint && !confirmed && (
+          <div className="rounded-[10px] border border-[var(--warn)]/40 bg-[var(--warn)]/10 p-3">
+            <div className="mb-1 text-xs font-semibold">First time connecting to this server</div>
+            <p className="mb-2 text-xs text-[var(--text-secondary)]">
+              Its identity code is <span className="mono font-medium text-[var(--text-primary)]">{probe.fingerprint}</span>.
+              If another of your computers is signed in, it shows the same code under Account &amp; Sync — matching codes
+              mean nobody is sitting between you and your server.
+            </p>
+            <button onClick={() => setConfirmed(true)} className={btnCls}>
+              Trust this server
+            </button>
+          </div>
+        )}
+
+        {probe && confirmed && probe.passwordSigninReady && (
+          <>
+            <input
+              type="password"
+              value={password}
+              onChange={(e) => setPassword(e.target.value)}
+              placeholder="Master password"
+              className={`${inputCls} w-full`}
+            />
+            {needCode && (
+              <input
+                value={code}
+                onChange={(e) => setCode(e.target.value)}
+                placeholder="6-digit code"
+                inputMode="numeric"
+                className={`${inputCls} w-full`}
+              />
+            )}
+            <button
+              onClick={() => void doSignin()}
+              disabled={busy || !password || (needCode && code.trim().length < 6)}
+              className="inline-flex items-center gap-2 rounded-[10px] border border-[var(--accent)]/60 bg-[var(--accent)]/10 px-3 py-2 text-sm font-medium hover:border-[var(--accent)] disabled:opacity-50"
+            >
+              {busy ? "Signing in…" : "Sign in"}
+            </button>
+          </>
+        )}
+
+        {msg && <p className="text-xs text-[var(--text-secondary)]">{msg}</p>}
+      </div>
+    </Card>
   );
 }
 
@@ -1002,6 +1144,7 @@ function AccountSync({ sync, onSyncChange }: { sync: SyncStatusInfo | null; onSy
   const [backup, setBackup] = useState<{ recoveryCode: string; pdfBase64: string; version: number } | null>(null);
   const [restoreCode, setRestoreCode] = useState("");
   const [pwUnlock, setPwUnlock] = useState("");
+  const [pwEnable, setPwEnable] = useState("");
   const [pairCode, setPairCode] = useState<PairCodeInfo | null>(null);
   const [devices, setDevices] = useState<SyncDevice[]>([]);
 
@@ -1134,11 +1277,14 @@ function AccountSync({ sync, onSyncChange }: { sync: SyncStatusInfo | null; onSy
 
   const doEnablePwUnlock = async () => {
     setBusy(true);
-    setMsg("Enabling master-password unlock…");
+    setMsg("Turning on master-password sign-in…");
     try {
-      const v = await syncEnablePasswordUnlock();
+      const v = await syncEnablePasswordUnlock(pwEnable || undefined);
+      setPwEnable("");
       setMsg(
-        `Master-password unlock enabled and vault pushed (version ${v}). A new device can now Sign in + enter your master password — no codes.`,
+        pwEnable
+          ? `Master-password sign-in is ON (vault pushed, version ${v}). A new device now needs only your server address + master password.`
+          : `Key escrowed and vault pushed (version ${v}). Enter your master password here too to enable full sign-in (address + password) on new devices.`,
       );
     } catch (e) {
       setMsg(errMsg(e));
@@ -1205,6 +1351,22 @@ function AccountSync({ sync, onSyncChange }: { sync: SyncStatusInfo | null; onSy
               Sign out
             </button>
           </div>
+          {(sync?.serverIp || sync?.certFingerprint) && (
+            <p className="text-xs text-[var(--text-muted)]">
+              To sign in on another device:
+              {sync?.serverIp && (
+                <>
+                  {" "}server address <span className="mono text-[var(--text-secondary)]">{sync.serverIp}</span>
+                </>
+              )}
+              {sync?.certFingerprint && (
+                <>
+                  {" "}· identity code <span className="mono text-[var(--text-secondary)]">{sync.certFingerprint}</span>
+                </>
+              )}{" "}
+              + your master password.
+            </p>
+          )}
 
           {/* add a device — THE way to put your vault on another computer/phone */}
           <AddDeviceBlock busy={busy} pairCode={pairCode} onAdd={() => void addDevice()} />
@@ -1270,17 +1432,27 @@ function AccountSync({ sync, onSyncChange }: { sync: SyncStatusInfo | null; onSy
             )}
           </div>
 
-          {/* enable master-password unlock on other devices */}
+          {/* enable master-password sign-in on other devices */}
           <div>
-            <div className="mb-1 text-sm font-medium">Unlock other devices with your master password</div>
+            <div className="mb-1 text-sm font-medium">Turn on master-password sign-in</div>
             <p className="mb-2 text-xs text-[var(--text-secondary)]">
-              Escrows your master-password-wrapped key (still zero-knowledge — the server can’t read it) and pushes your
-              vault, so a new device only needs <span className="font-medium">Sign in + your master password</span> — no
-              device codes. Requires a master password set on this device.
+              Escrows your master-password-wrapped key (still zero-knowledge — the server can’t read it), registers a
+              one-way sign-in proof, and pushes your vault. A new device then needs only your{" "}
+              <span className="font-medium">server address + master password</span> — nothing else. Enter the master
+              password to confirm (it never leaves this computer).
             </p>
-            <button onClick={doEnablePwUnlock} disabled={busy} className={btnCls}>
-              {busy ? "Working…" : "Enable master-password unlock"}
-            </button>
+            <div className="flex items-center gap-2">
+              <input
+                type="password"
+                value={pwEnable}
+                onChange={(e) => setPwEnable(e.target.value)}
+                placeholder="Master password"
+                className={`${inputCls} flex-1`}
+              />
+              <button onClick={doEnablePwUnlock} disabled={busy} className={btnCls}>
+                {busy ? "Working…" : "Turn on"}
+              </button>
+            </div>
           </div>
 
           {/* restore */}

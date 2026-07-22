@@ -63,6 +63,7 @@ async fn fresh() -> (Router, PgPool) {
         autoban_window_secs: 300,
         autoban_minutes: 60,
         update_flag_dir: None,
+        tls_cert_pem: None,
     };
     let google: Arc<dyn GoogleVerifier> = Arc::new(MockGoogleVerifier);
     let app = sentinel_api::build_app(pool.clone(), JwtKeys::ephemeral(), config, google);
@@ -118,6 +119,11 @@ async fn bootstrap_signin(app: &Router) -> String {
 
 /// Google onboarding (sign-in + TOTP enroll/verify) → approved-device access token.
 async fn google_onboard(app: &Router, sub: &str) -> String {
+    google_onboard_with_secret(app, sub).await.0
+}
+
+/// Same, but also hands back the raw TOTP secret so a test can mint later codes.
+async fn google_onboard_with_secret(app: &Router, sub: &str) -> (String, Vec<u8>) {
     let (s, v) = call(
         app,
         post(
@@ -145,7 +151,7 @@ async fn google_onboard(app: &Router, sub: &str) -> String {
     )
     .await;
     assert_eq!(s, StatusCode::OK, "verify: {v}");
-    v["access_token"].as_str().unwrap().to_string()
+    (v["access_token"].as_str().unwrap().to_string(), secret)
 }
 
 fn base32_decode(s: &str) -> Vec<u8> {
@@ -261,4 +267,169 @@ async fn multi_account_server_keeps_bootstrap_separate() {
         StatusCode::NO_CONTENT,
         "fresh synthetic account is empty"
     );
+}
+
+// --- master-password sign-in (THE login, v0.1.48) --------------------------
+// The server never sees a password: clients send a 32-byte HKDF proof and the server stores its
+// SHA-256. These tests exercise the wire contract; the KDF itself is covered by the core tests
+// and the iOS golden vectors.
+
+async fn enroll_password(app: &Router, token: &str, salt: &[u8; 16], verifier: &[u8; 32]) {
+    let b64 = |b: &[u8]| base64::engine::general_purpose::STANDARD.encode(b);
+    let (s, v) = call(
+        app,
+        post(
+            "/v1/auth/password/enroll",
+            Some(token),
+            json!({ "salt_b64": b64(salt), "verifier_b64": b64(verifier) }),
+        ),
+    )
+    .await;
+    assert_eq!(s, StatusCode::NO_CONTENT, "enroll password: {v}");
+}
+
+#[tokio::test]
+async fn password_signin_full_cycle() {
+    let _g = LOCK
+        .get_or_init(|| tokio::sync::Mutex::new(()))
+        .lock()
+        .await;
+    let (app, pool) = fresh().await;
+    let b64 = |b: &[u8]| base64::engine::general_purpose::STANDARD.encode(b);
+
+    // Nothing enrolled yet → params 404 (client shows "enable it on your computer").
+    let (s, _v) = call(
+        &app,
+        Request::builder()
+            .uri("/v1/auth/password/params")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(s, StatusCode::NOT_FOUND);
+
+    // The owner's first device (bootstrap here) turns password sign-in on.
+    let boot = bootstrap_signin(&app).await;
+    let salt = [0x5A; 16];
+    let verifier = [0xC3; 32];
+    enroll_password(&app, &boot, &salt, &verifier).await;
+
+    // Params are public and echo the salt + production Argon2 cost.
+    let (s, v) = call(
+        &app,
+        Request::builder()
+            .uri("/v1/auth/password/params")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "params: {v}");
+    assert_eq!(v["salt_b64"], b64(&salt));
+    assert_eq!(v["m_kib"], 65536);
+    assert_eq!(v["t"], 3);
+    assert_eq!(v["p"], 4);
+
+    // A brand-new device signs in with just the proof → approved session on the SAME account.
+    let (s, v) = call(
+        &app,
+        post(
+            "/v1/auth/password",
+            None,
+            json!({ "proof_b64": b64(&verifier),
+                    "device": { "name": "Mac", "platform": "macos" } }),
+        ),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "password sign-in: {v}");
+    let access = v["access_token"].as_str().unwrap().to_string();
+    assert_eq!(account_count(&pool).await, 1, "no account fork");
+    let (s, _v) = call(&app, get("/v1/devices", &access)).await;
+    assert_eq!(s, StatusCode::OK, "session must be fully usable");
+
+    // Wrong proof → 401 (and never a session).
+    let (s, _v) = call(
+        &app,
+        post(
+            "/v1/auth/password",
+            None,
+            json!({ "proof_b64": b64(&[0u8; 32]),
+                    "device": { "name": "Evil", "platform": "linux" } }),
+        ),
+    )
+    .await;
+    assert_eq!(s, StatusCode::UNAUTHORIZED);
+
+    // Malformed enroll inputs are rejected.
+    let (s, _v) = call(
+        &app,
+        post(
+            "/v1/auth/password/enroll",
+            Some(&boot),
+            json!({ "salt_b64": b64(&[1u8; 8]), "verifier_b64": b64(&verifier) }),
+        ),
+    )
+    .await;
+    assert_eq!(s, StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn password_signin_honors_the_totp_second_factor() {
+    let _g = LOCK
+        .get_or_init(|| tokio::sync::Mutex::new(()))
+        .lock()
+        .await;
+    let (app, _pool) = fresh().await;
+    let b64 = |b: &[u8]| base64::engine::general_purpose::STANDARD.encode(b);
+
+    // Owner onboards via Google WITH the authenticator app, then enables password sign-in.
+    let (owner, totp_secret) = google_onboard_with_secret(&app, "totp-owner").await;
+    let salt = [0x11; 16];
+    let verifier = [0x22; 32];
+    enroll_password(&app, &owner, &salt, &verifier).await;
+
+    // Correct password but no code → the sentinel error "totp_required".
+    let (s, v) = call(
+        &app,
+        post(
+            "/v1/auth/password",
+            None,
+            json!({ "proof_b64": b64(&verifier),
+                    "device": { "name": "Mac", "platform": "macos" } }),
+        ),
+    )
+    .await;
+    assert_eq!(s, StatusCode::BAD_REQUEST, "{v}");
+    // Clients key off this exact string (in `detail`) to show the 6-digit field.
+    assert_eq!(v["detail"], "totp_required");
+
+    // With the current 6-digit code → session.
+    let code = sentinel_api::auth::totp_code(
+        &totp_secret,
+        time::OffsetDateTime::now_utc().unix_timestamp(),
+    );
+    let (s, v) = call(
+        &app,
+        post(
+            "/v1/auth/password",
+            None,
+            json!({ "proof_b64": b64(&verifier), "code": code,
+                    "device": { "name": "Mac", "platform": "macos" } }),
+        ),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "password+totp sign-in: {v}");
+    assert!(v["access_token"].as_str().is_some());
+
+    // Wrong code → 401.
+    let (s, _v) = call(
+        &app,
+        post(
+            "/v1/auth/password",
+            None,
+            json!({ "proof_b64": b64(&verifier), "code": "000000",
+                    "device": { "name": "Mac", "platform": "macos" } }),
+        ),
+    )
+    .await;
+    assert_eq!(s, StatusCode::UNAUTHORIZED);
 }

@@ -41,6 +41,21 @@ impl PasswordWrapper {
         // Argon2id output used directly as the KEK — matches applock.rs (no HKDF), so blobs interop.
         argon2id_kek(self.password.as_slice(), salt, self.profile)
     }
+
+    /// The master-password **sign-in proof** for this salt: `HKDF(KEK, "sentinel/v1/auth/login")`.
+    /// The server stores only `SHA-256(proof)`; the proof can't be inverted to the KEK, so the
+    /// server can authenticate the password without ever being able to unwrap the vault key —
+    /// sign-in stays zero-knowledge. Use the SAME salt as the escrowed type-4 blob so one Argon2
+    /// derivation on the client covers both login and unwrap.
+    pub fn login_proof(&self, salt: &[u8; 16]) -> Key32 {
+        Self::login_proof_from_kek(&self.derive_kek(salt))
+    }
+
+    /// Proof from an already-derived KEK (lets a client that just unwrapped the blob enroll or
+    /// sign in without a second Argon2 run).
+    pub fn login_proof_from_kek(kek: &Key32) -> Key32 {
+        crate::crypto::hkdf32(kek.as_bytes(), None, crate::crypto::Info::AuthLogin)
+    }
 }
 
 #[async_trait]

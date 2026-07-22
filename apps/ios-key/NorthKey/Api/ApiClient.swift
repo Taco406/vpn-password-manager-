@@ -8,6 +8,7 @@
 // the Keychain, registered as an already-approved iOS device. Thereafter it rotates the short-lived
 // access token via the refresh endpoint and only re-bootstraps if the refresh chain is revoked.
 
+import CryptoKit
 import Foundation
 import Security
 
@@ -69,6 +70,60 @@ final class CertPinDelegate: NSObject, URLSessionDelegate {
             .joined()
         return Data(base64Encoded: body)
     }
+}
+
+/// Captures (without trusting) the leaf certificate a server presents, for trust-on-first-use:
+/// the user compares its fingerprint against another signed-in device before anything sensitive
+/// is sent — and everything after the probe runs over a session PINNED to exactly this cert.
+final class CertCaptureDelegate: NSObject, URLSessionDelegate {
+    private(set) var leafDER: Data?
+
+    func urlSession(
+        _ session: URLSession,
+        didReceive challenge: URLAuthenticationChallenge,
+        completionHandler: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void
+    ) {
+        guard challenge.protectionSpace.authenticationMethod == NSURLAuthenticationMethodServerTrust,
+              let trust = challenge.protectionSpace.serverTrust,
+              let chain = SecTrustCopyCertificateChain(trust) as? [SecCertificate],
+              let leaf = chain.first
+        else {
+            completionHandler(.cancelAuthenticationChallenge, nil)
+            return
+        }
+        leafDER = SecCertificateCopyData(leaf) as Data
+        completionHandler(.useCredential, URLCredential(trust: trust))
+    }
+
+    /// DER → PEM (the storage format the pinned config uses).
+    static func pem(fromDER der: Data) -> String {
+        let b64 = der.base64EncodedString()
+        var lines: [String] = ["-----BEGIN CERTIFICATE-----"]
+        var i = b64.startIndex
+        while i < b64.endIndex {
+            let end = b64.index(i, offsetBy: 64, limitedBy: b64.endIndex) ?? b64.endIndex
+            lines.append(String(b64[i..<end]))
+            i = end
+        }
+        lines.append("-----END CERTIFICATE-----")
+        return lines.joined(separator: "\n")
+    }
+
+    /// Same human-comparable identity code the desktop shows: SHA-256 of the DER, first 8 bytes
+    /// as `AB12-CD34-EF56-7890`.
+    static func fingerprint(der: Data) -> String {
+        let hash = Data(CryptoKit.SHA256.hash(data: der))
+        let hex = hash.prefix(8).map { String(format: "%02X", $0) }
+        return "\(hex[0])\(hex[1])-\(hex[2])\(hex[3])-\(hex[4])\(hex[5])-\(hex[6])\(hex[7])"
+    }
+}
+
+/// What a first-contact probe learns about a server.
+struct ServerProbe {
+    let baseUrl: String
+    let certPEM: String
+    let fingerprint: String
+    let passwordSigninReady: Bool
 }
 
 /// A minted session. `expiresAt` is when the access token stops being accepted.
@@ -166,6 +221,81 @@ actor ApiClient {
         let data = try await send("POST", "/v1/auth/enroll", bearer: nil, jsonBody: body)
         let tokens = try decoder.decode(TokenResponse.self, from: data)
         _ = store(tokens)
+    }
+
+    // MARK: - THE login (v0.1.48): server address + master password (+ 6-digit code)
+
+    /// First contact with a server typed by address: capture the certificate it presents and
+    /// whether master-password sign-in is on. Nothing sensitive is sent; the UI shows the
+    /// fingerprint for the user to compare before continuing.
+    func probe(address: String) async throws -> ServerProbe {
+        let trimmed = address.trimmingCharacters(in: .whitespacesAndNewlines)
+        let host = trimmed
+            .replacingOccurrences(of: "https://", with: "")
+            .replacingOccurrences(of: "http://", with: "")
+            .split(separator: "/").first.map(String.init) ?? trimmed
+        guard !host.isEmpty else { throw ApiError.transport("enter your server's address") }
+        let baseUrl = "https://\(host)"
+
+        let capture = CertCaptureDelegate()
+        let session = URLSession(configuration: .ephemeral, delegate: capture, delegateQueue: nil)
+        guard let metaUrl = URL(string: "\(baseUrl)/v1/meta") else {
+            throw ApiError.transport("bad address")
+        }
+        let (_, resp) = try await session.data(from: metaUrl)
+        guard let http = resp as? HTTPURLResponse, (200..<300).contains(http.statusCode),
+              let der = capture.leafDER
+        else {
+            throw ApiError.transport(
+                "that server didn't identify itself — it may be too old (update it from your computer) or the address is wrong")
+        }
+        var ready = false
+        if let paramsUrl = URL(string: "\(baseUrl)/v1/auth/password/params"),
+           let (_, presp) = try? await session.data(from: paramsUrl),
+           let phttp = presp as? HTTPURLResponse
+        {
+            ready = (200..<300).contains(phttp.statusCode)
+        }
+        return ServerProbe(
+            baseUrl: baseUrl,
+            certPEM: CertCaptureDelegate.pem(fromDER: der),
+            fingerprint: CertCaptureDelegate.fingerprint(der: der),
+            passwordSigninReady: ready)
+    }
+
+    /// Sign in with the master password: derive the KEK + login proof locally, mint a session,
+    /// and pin the probed cert for every later call. Returns the derived KEK so the vault can be
+    /// unwrapped without a second Argon2 run, or nil when a 6-digit code is required.
+    func passwordLogin(probe p: ServerProbe, password: String, code: String?) async throws -> Data? {
+        // Pin FIRST, so params + login already run over the pinned connection.
+        let cfg = ServerConfig(baseUrl: p.baseUrl, bootstrapToken: nil, certPEM: p.certPEM)
+        if let data = try? encoder.encode(cfg) { Keychain.write(configAccount, data) }
+        Keychain.delete(sessionAccount)
+        cachedSession = nil
+
+        let data = try await send("GET", "/v1/auth/password/params", bearer: nil, body: nil)
+        guard let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let saltB64 = obj["salt_b64"] as? String,
+              let salt = Data(base64Encoded: saltB64), salt.count == 16
+        else { throw ApiError.badResponse }
+
+        let kek = try VaultCrypto.argon2idKek(password: password, salt: salt)
+        let proof = VaultCrypto.loginProof(kek: kek)
+        var body: [String: Any] = [
+            "proof_b64": proof.base64EncodedString(),
+            "device": ["name": "NorthKey iPhone", "platform": "ios"],
+        ]
+        if let code, !code.trimmingCharacters(in: .whitespaces).isEmpty {
+            body["code"] = code.trimmingCharacters(in: .whitespaces)
+        }
+        do {
+            let data = try await send("POST", "/v1/auth/password", bearer: nil, jsonBody: body)
+            let tokens = try decoder.decode(TokenResponse.self, from: data)
+            _ = store(tokens)
+            return kek
+        } catch let ApiError.http(400, msg) where msg.contains("totp_required") {
+            return nil // second factor needed — the UI shows the 6-digit field and retries
+        }
     }
 
     // MARK: - Vault endpoints (E2E ciphertext only — decrypted in VaultCrypto on-device)

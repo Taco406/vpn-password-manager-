@@ -13,6 +13,7 @@ use rand::RngCore;
 use sentinel_core::crypto::{self, Key32, Nonce24};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use sha2::{Digest, Sha256};
 use std::net::SocketAddr;
 use std::time::Duration;
 use uuid::Uuid;
@@ -33,6 +34,10 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/v1/enroll-codes", post(enroll_code_mint))
         .route("/v1/auth/enroll", post(auth_enroll))
+        .route("/v1/meta", get(meta))
+        .route("/v1/auth/password/params", get(password_params))
+        .route("/v1/auth/password/enroll", post(password_enroll))
+        .route("/v1/auth/password", post(auth_password))
         .route("/v1/devices", get(devices_list))
         .route("/v1/devices/pin", post(device_pin))
         .route("/v1/devices/{id}/approve", post(device_approve))
@@ -338,6 +343,56 @@ struct TokensResp {
     expires_in: i64,
 }
 
+/// Check a 6-digit code for an account, with lockout accounting (5 fails → 15-minute lock).
+/// Clears the lockout on success. Shared by the Google-flow TOTP step and password sign-in.
+async fn check_totp_code(st: &AppState, account: Uuid, ip: &str, code: &str) -> ApiResult<()> {
+    // Enforce lockout.
+    let locked: Option<time::OffsetDateTime> =
+        sqlx::query_scalar("SELECT locked_until FROM totp_lockouts WHERE account_id = $1")
+            .bind(account)
+            .fetch_optional(&st.pool)
+            .await?
+            .flatten();
+    if let Some(until) = locked {
+        if until > time::OffsetDateTime::now_utc() {
+            security::record(&st.pool, Some(account), "totp_lockout", ip, None).await;
+            return Err(ApiError::LockedOut);
+        }
+    }
+
+    let enc: Option<Vec<u8>> =
+        sqlx::query_scalar("SELECT totp_secret_enc FROM accounts WHERE id = $1")
+            .bind(account)
+            .fetch_one(&st.pool)
+            .await?;
+    let enc = enc.ok_or(ApiError::BadRequest("totp not enrolled".into()))?;
+    let secret = open_secret(st, &enc)?;
+
+    if !auth::totp_verify(&secret, code, now()) {
+        // Bump failure count; lock after 5.
+        sqlx::query(
+            "INSERT INTO totp_lockouts (account_id, failed_count, locked_until)
+             VALUES ($1, 1, NULL)
+             ON CONFLICT (account_id) DO UPDATE SET
+                failed_count = totp_lockouts.failed_count + 1,
+                locked_until = CASE WHEN totp_lockouts.failed_count + 1 >= 5
+                    THEN now() + interval '15 minutes' ELSE NULL END",
+        )
+        .bind(account)
+        .execute(&st.pool)
+        .await?;
+        security::record(&st.pool, Some(account), "totp_fail", ip, None).await;
+        security::maybe_autoban(st, ip).await;
+        return Err(ApiError::Unauthorized);
+    }
+
+    sqlx::query("DELETE FROM totp_lockouts WHERE account_id = $1")
+        .bind(account)
+        .execute(&st.pool)
+        .await?;
+    Ok(())
+}
+
 async fn totp_verify(
     State(st): State<AppState>,
     headers: HeaderMap,
@@ -355,47 +410,9 @@ async fn totp_verify(
     )
     .await?;
 
-    // Enforce lockout.
-    let locked: Option<time::OffsetDateTime> =
-        sqlx::query_scalar("SELECT locked_until FROM totp_lockouts WHERE account_id = $1")
-            .bind(p.account)
-            .fetch_optional(&st.pool)
-            .await?
-            .flatten();
-    if let Some(until) = locked {
-        if until > time::OffsetDateTime::now_utc() {
-            security::record(&st.pool, Some(p.account), "totp_lockout", &ip, None).await;
-            return Err(ApiError::LockedOut);
-        }
-    }
+    check_totp_code(&st, p.account, &ip, &req.code).await?;
 
-    let enc: Option<Vec<u8>> =
-        sqlx::query_scalar("SELECT totp_secret_enc FROM accounts WHERE id = $1")
-            .bind(p.account)
-            .fetch_one(&st.pool)
-            .await?;
-    let enc = enc.ok_or(ApiError::BadRequest("totp not enrolled".into()))?;
-    let secret = open_secret(&st, &enc)?;
-
-    if !auth::totp_verify(&secret, &req.code, now()) {
-        // Bump failure count; lock after 5.
-        sqlx::query(
-            "INSERT INTO totp_lockouts (account_id, failed_count, locked_until)
-             VALUES ($1, 1, NULL)
-             ON CONFLICT (account_id) DO UPDATE SET
-                failed_count = totp_lockouts.failed_count + 1,
-                locked_until = CASE WHEN totp_lockouts.failed_count + 1 >= 5
-                    THEN now() + interval '15 minutes' ELSE NULL END",
-        )
-        .bind(p.account)
-        .execute(&st.pool)
-        .await?;
-        security::record(&st.pool, Some(p.account), "totp_fail", &ip, None).await;
-        security::maybe_autoban(&st, &ip).await;
-        return Err(ApiError::Unauthorized);
-    }
-
-    // Success: confirm TOTP, approve the device, clear lockout, mint tokens.
+    // Success: confirm TOTP, approve the device, mint tokens.
     sqlx::query(
         "UPDATE accounts SET totp_confirmed_at = COALESCE(totp_confirmed_at, now()) WHERE id = $1",
     )
@@ -406,14 +423,166 @@ async fn totp_verify(
         .bind(p.device)
         .execute(&st.pool)
         .await?;
-    sqlx::query("DELETE FROM totp_lockouts WHERE account_id = $1")
-        .bind(p.account)
-        .execute(&st.pool)
-        .await?;
 
     let tokens = mint_session(&st, p.account, p.device, None).await?;
     security::record(&st.pool, Some(p.account), "login_ok", &ip, Some("totp")).await;
     Ok(Json(tokens))
+}
+
+// --- auth: master password (THE login) ------------------------------------
+// The one login everywhere: server address + master password (+ TOTP when enabled). The client
+// derives KEK = Argon2id(password, salt) and sends proof = HKDF(KEK, "sentinel/v1/auth/login");
+// the server stores only SHA-256(proof). The proof can't be inverted to the KEK, so the server
+// authenticates the password while remaining unable to unwrap the escrowed vault key.
+
+#[derive(Serialize)]
+struct PasswordParamsResp {
+    salt_b64: String,
+    m_kib: u32,
+    t: u32,
+    p: u32,
+}
+
+/// The single password-sign-in-enabled account on this personal server.
+async fn pw_auth_account(st: &AppState) -> ApiResult<(Uuid, Vec<u8>, Vec<u8>)> {
+    let rows: Vec<(Uuid, Vec<u8>, Vec<u8>)> = sqlx::query_as(
+        "SELECT id, pw_auth_salt, pw_auth_hash FROM accounts
+         WHERE pw_auth_salt IS NOT NULL AND pw_auth_hash IS NOT NULL",
+    )
+    .fetch_all(&st.pool)
+    .await?;
+    match rows.len() {
+        0 => Err(ApiError::NotFound),
+        1 => Ok(rows.into_iter().next().unwrap()),
+        _ => Err(ApiError::BadRequest(
+            "multiple accounts have password sign-in on this server — sign in with Google".into(),
+        )),
+    }
+}
+
+/// Unauthenticated KDF parameters (the salt is public by design, like any password salt). 404
+/// until a device has enabled master-password sign-in.
+async fn password_params(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+    peer: PeerAddr,
+) -> ApiResult<Json<PasswordParamsResp>> {
+    let _ip = guard(&st, &headers, peer.0, "pw_params", 30, 60).await?;
+    let (_, salt, _) = pw_auth_account(&st).await?;
+    Ok(Json(PasswordParamsResp {
+        salt_b64: base64::engine::general_purpose::STANDARD.encode(salt),
+        m_kib: 65536,
+        t: 3,
+        p: 4,
+    }))
+}
+
+#[derive(Deserialize)]
+struct PasswordEnrollReq {
+    salt_b64: String,
+    verifier_b64: String,
+}
+
+/// A signed-in device turns on password sign-in for its account (idempotent; re-enrolling with a
+/// new salt+verifier is how a master-password change rotates it). The salt MUST equal the salt
+/// inside the escrowed type-4 wrapped key so one Argon2 run serves both login and unwrap.
+async fn password_enroll(
+    State(st): State<AppState>,
+    a: Auth,
+    Json(req): Json<PasswordEnrollReq>,
+) -> ApiResult<StatusCode> {
+    require_approved_device(&st, a.device).await?;
+    let salt = base64::engine::general_purpose::STANDARD
+        .decode(&req.salt_b64)
+        .map_err(|_| ApiError::BadRequest("bad salt".into()))?;
+    let verifier = base64::engine::general_purpose::STANDARD
+        .decode(&req.verifier_b64)
+        .map_err(|_| ApiError::BadRequest("bad verifier".into()))?;
+    if salt.len() != 16 || verifier.len() != 32 {
+        return Err(ApiError::BadRequest(
+            "salt must be 16 bytes, verifier 32".into(),
+        ));
+    }
+    let hash = Sha256::digest(&verifier).to_vec();
+    sqlx::query("UPDATE accounts SET pw_auth_salt = $1, pw_auth_hash = $2 WHERE id = $3")
+        .bind(&salt)
+        .bind(&hash)
+        .bind(a.account)
+        .execute(&st.pool)
+        .await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+#[derive(Deserialize)]
+struct PasswordAuthReq {
+    proof_b64: String,
+    #[serde(default)]
+    code: Option<String>,
+    device: DeviceReq,
+}
+
+async fn auth_password(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+    peer: PeerAddr,
+    Json(req): Json<PasswordAuthReq>,
+) -> ApiResult<Json<TokensResp>> {
+    let ip = guard(&st, &headers, peer.0, "auth_password", 10, 60).await?;
+    if req.device.name.len() > 64 || !valid_platform(&req.device.platform) {
+        return Err(ApiError::BadRequest("invalid device".into()));
+    }
+    let (account, _salt, stored_hash) = pw_auth_account(&st).await?;
+    let proof = base64::engine::general_purpose::STANDARD
+        .decode(&req.proof_b64)
+        .map_err(|_| ApiError::BadRequest("bad proof".into()))?;
+    let hash = Sha256::digest(&proof);
+    if !auth::constant_time_eq(hash.as_slice(), &stored_hash) {
+        security::record(&st.pool, Some(account), "login_fail_password", &ip, None).await;
+        security::maybe_autoban(&st, &ip).await;
+        return Err(ApiError::Unauthorized);
+    }
+
+    // Second factor when the account has one. A missing code answers with the sentinel error
+    // string "totp_required" so clients know to show the 6-digit field (additive contract).
+    let totp_on: Option<time::OffsetDateTime> =
+        sqlx::query_scalar("SELECT totp_confirmed_at FROM accounts WHERE id = $1")
+            .bind(account)
+            .fetch_one(&st.pool)
+            .await?;
+    if totp_on.is_some() {
+        let code = req
+            .code
+            .as_deref()
+            .map(str::trim)
+            .filter(|c| !c.is_empty())
+            .ok_or_else(|| ApiError::BadRequest("totp_required".into()))?;
+        check_totp_code(&st, account, &ip, code).await?;
+    }
+
+    // Knowing the master password IS the trust anchor (it decrypts the vault regardless), so the
+    // device starts approved — same trust model as the bootstrap token, but per-user.
+    let device: Uuid = sqlx::query_scalar(
+        "INSERT INTO devices (account_id, name, platform, status)
+         VALUES ($1, $2, $3, 'approved') RETURNING id",
+    )
+    .bind(account)
+    .bind(&req.device.name)
+    .bind(&req.device.platform)
+    .fetch_one(&st.pool)
+    .await?;
+    let tokens = mint_session(&st, account, device, None).await?;
+    security::record(&st.pool, Some(account), "login_ok", &ip, Some("password")).await;
+    Ok(Json(tokens))
+}
+
+/// Unauthenticated server identity: version + the TLS cert to pin. Public by definition — the
+/// cert is presented in every TLS handshake anyway; serving it lets a new device fetch-and-pin
+/// (trust-on-first-use, with a fingerprint the user can compare against another device).
+async fn meta(State(st): State<AppState>) -> Json<serde_json::Value> {
+    Json(json!({
+        "version": env!("CARGO_PKG_VERSION"),
+        "cert_pem": st.config.tls_cert_pem,
+    }))
 }
 
 async fn mint_session(

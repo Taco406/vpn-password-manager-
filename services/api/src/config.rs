@@ -36,6 +36,11 @@ pub struct Config {
     /// host's updater unit watches (`SENTINEL_UPDATE_FLAG_DIR`). `None` disables the endpoint —
     /// the API container itself never touches Docker; privilege separation stays intact.
     pub update_flag_dir: Option<String>,
+    /// The server's own TLS certificate PEM (`SENTINEL_TLS_CERT_PEM`, path or inline — same
+    /// value the HTTPS listener uses). Served by the unauthenticated `GET /v1/meta` so a new
+    /// device can fetch-and-pin it (trust-on-first-use with a fingerprint the user confirms).
+    /// Public by definition — it's presented in every TLS handshake anyway.
+    pub tls_cert_pem: Option<String>,
 }
 
 /// The ES256 keypair used to sign/verify access JWTs (D18).
@@ -143,6 +148,11 @@ impl Config {
         let update_flag_dir = std::env::var("SENTINEL_UPDATE_FLAG_DIR")
             .ok()
             .filter(|s| !s.is_empty());
+        // Path-or-inline, same semantics as the HTTPS listener's read of this var in main.rs.
+        let tls_cert_pem = std::env::var("SENTINEL_TLS_CERT_PEM")
+            .ok()
+            .filter(|v| !v.is_empty())
+            .map(|v| std::fs::read_to_string(&v).unwrap_or(v));
 
         Ok(Config {
             bind,
@@ -157,6 +167,7 @@ impl Config {
             autoban_window_secs,
             autoban_minutes,
             update_flag_dir,
+            tls_cert_pem,
         })
     }
 
@@ -206,6 +217,7 @@ mod tests {
             autoban_window_secs: 300,
             autoban_minutes: 60,
             update_flag_dir: None,
+            tls_cert_pem: None,
         }
     }
 

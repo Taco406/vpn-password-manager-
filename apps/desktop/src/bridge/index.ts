@@ -725,6 +725,10 @@ export interface SyncStatusInfo {
   googleSecretSet: boolean;
   signedIn: boolean;
   email: string | null;
+  /** The deployed server's public address (what another device types to sign in). */
+  serverIp?: string | null;
+  /** Identity code of the pinned server cert — matches what a first-time sign-in shows. */
+  certFingerprint?: string | null;
 }
 
 export interface SyncDevice {
@@ -851,16 +855,50 @@ export async function syncRestore(code: string): Promise<{ restored: number }> {
 }
 
 // Escrow this device's master-password-wrapped key on the server + push the vault, so another
-// device can unlock with the same master password. Returns the pushed vault version.
-export async function syncEnablePasswordUnlock(): Promise<number> {
+// device can unlock with the same master password. Pass the master password to ALSO enroll
+// master-password sign-in (the login verifier). Returns the pushed vault version.
+export async function syncEnablePasswordUnlock(password?: string): Promise<number> {
   if (!inTauri()) throw new Error("Sync is only available in the desktop app.");
-  return inv<number>("sync_enable_password_unlock");
+  return inv<number>("sync_enable_password_unlock", { password: password ?? null });
 }
 
 // On a fresh, signed-in device: unlock from the server with the account master password.
 export async function syncUnlockWithPassword(password: string): Promise<{ restored: number }> {
   if (!inTauri()) throw new Error("Sync is only available in the desktop app.");
   return inv<{ restored: number }>("sync_unlock_with_password", { password });
+}
+
+/** First contact with a server by address: its version, cert to pin, and trust fingerprint. */
+export interface ServerProbe {
+  certPem: string | null;
+  fingerprint: string | null;
+  serverVersion: string | null;
+  passwordSigninReady: boolean;
+}
+
+export async function syncProbeServer(address: string): Promise<ServerProbe> {
+  if (!inTauri()) throw new Error("Sync is only available in the desktop app.");
+  return inv<ServerProbe>("sync_probe_server", { address });
+}
+
+/**
+ * THE login: server address + master password (+ 6-digit code when 2-step is on). Pins the
+ * probed cert, signs in, downloads + unwraps the escrowed key, and pulls the vault.
+ * `totpRequired: true` means re-submit with the code.
+ */
+export async function syncPasswordSignin(args: {
+  address: string;
+  certPem: string | null;
+  password: string;
+  code?: string;
+}): Promise<{ totpRequired: boolean; restored: number }> {
+  if (!inTauri()) throw new Error("Sync is only available in the desktop app.");
+  return inv<{ totpRequired: boolean; restored: number }>("sync_password_signin", {
+    address: args.address,
+    certPem: args.certPem,
+    password: args.password,
+    code: args.code ?? null,
+  });
 }
 
 export async function syncDevices(): Promise<SyncDevice[]> {
