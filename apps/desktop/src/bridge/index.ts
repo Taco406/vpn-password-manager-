@@ -820,6 +820,19 @@ export async function syncRestore(code: string): Promise<{ restored: number }> {
   return inv<{ restored: number }>("sync_restore", { recoveryCode: code });
 }
 
+// Escrow this device's master-password-wrapped key on the server + push the vault, so another
+// device can unlock with the same master password. Returns the pushed vault version.
+export async function syncEnablePasswordUnlock(): Promise<number> {
+  if (!inTauri()) throw new Error("Sync is only available in the desktop app.");
+  return inv<number>("sync_enable_password_unlock");
+}
+
+// On a fresh, signed-in device: unlock from the server with the account master password.
+export async function syncUnlockWithPassword(password: string): Promise<{ restored: number }> {
+  if (!inTauri()) throw new Error("Sync is only available in the desktop app.");
+  return inv<{ restored: number }>("sync_unlock_with_password", { password });
+}
+
 export async function syncDevices(): Promise<SyncDevice[]> {
   if (!inTauri()) return [];
   return inv<SyncDevice[]>("sync_devices");

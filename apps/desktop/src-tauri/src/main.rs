@@ -135,6 +135,8 @@ fn main() {
             sync::sync_backup,
             sync::sync_now,
             sync::sync_restore,
+            sync::sync_enable_password_unlock,
+            sync::sync_unlock_with_password,
             sync::sync_devices,
             sync::sync_device_revoke,
             sync::sync_security_events,
