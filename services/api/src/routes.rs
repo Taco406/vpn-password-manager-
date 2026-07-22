@@ -53,6 +53,7 @@ pub fn router(state: AppState) -> Router {
             "/v1/transfers/{id}",
             get(transfer_download).delete(transfer_delete),
         )
+        .route("/v1/admin/update", post(admin_update))
         .route("/v1/security-events", get(security_events_list))
         .route("/v1/security-summary", get(security_summary))
         .route("/v1/security-events/ban", post(security_ban))
@@ -675,6 +676,27 @@ async fn wrapped_delete(
         .bind(wt)
         .execute(&st.pool)
         .await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+// --- self-update ------------------------------------------------------------
+
+/// Ask the HOST to update this server's container. The API never touches Docker itself — it only
+/// drops a flag file into the shared flags volume; a host-side systemd path unit watches it and
+/// runs the pull+recreate script (privilege separation). Older deploys have no flags volume, so
+/// the endpoint reports that a one-time redeploy is needed.
+async fn admin_update(State(st): State<AppState>, a: Auth) -> ApiResult<StatusCode> {
+    require_approved_device(&st, a.device).await?;
+    let dir = st.config.update_flag_dir.as_deref().ok_or_else(|| {
+        ApiError::BadRequest(
+            "this server predates in-place updates — redeploy it once to get the updater".into(),
+        )
+    })?;
+    let path = std::path::Path::new(dir).join("update-requested");
+    std::fs::write(&path, b"update\n").map_err(|e| {
+        tracing::error!(error = %e, "writing update flag");
+        ApiError::Internal
+    })?;
     Ok(StatusCode::NO_CONTENT)
 }
 

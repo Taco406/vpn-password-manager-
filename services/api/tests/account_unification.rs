@@ -62,6 +62,7 @@ async fn fresh() -> (Router, PgPool) {
         autoban_threshold: 0,
         autoban_window_secs: 300,
         autoban_minutes: 60,
+        update_flag_dir: None,
     };
     let google: Arc<dyn GoogleVerifier> = Arc::new(MockGoogleVerifier);
     let app = sentinel_api::build_app(pool.clone(), JwtKeys::ephemeral(), config, google);

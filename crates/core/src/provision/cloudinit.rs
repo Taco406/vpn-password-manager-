@@ -298,26 +298,13 @@ packages:
   - curl
 
 write_files:
-  - path: /opt/sentinel/run.sh
+  # Starting the API container lives in its own script so first boot AND every later update run
+  # the exact same arguments — an update is just "pull, rm, start-api.sh" and can never drift.
+  - path: /opt/sentinel/start-api.sh
     permissions: '0755'
     content: |
       #!/usr/bin/env bash
       set -euo pipefail
-      mkdir -p /opt/sentinel/tls /opt/sentinel/pgdata
-      # The TLS cert+key are app-generated (base64 here) so the app can pin the exact cert; the
-      # JWT signing key is generated on-box (stable across restarts while the box lives).
-      echo "{{ tls_cert_b64 }}" | base64 -d > /opt/sentinel/tls/cert.pem
-      echo "{{ tls_key_b64 }}" | base64 -d > /opt/sentinel/tls/key.pem
-      openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:P-256 -out /opt/sentinel/tls/jwt.pem
-      chown -R 10001:10001 /opt/sentinel/tls
-      chmod 640 /opt/sentinel/tls/*.pem
-      curl -fsSL https://get.docker.com | sh
-      docker network create sentinel || true
-      docker rm -f sentinel-db sentinel-api >/dev/null 2>&1 || true
-      docker run -d --name sentinel-db --restart=always --network sentinel \
-        -e POSTGRES_PASSWORD={{ db_password }} -e POSTGRES_USER=sentinel -e POSTGRES_DB=sentinel \
-        -v /opt/sentinel/pgdata:/var/lib/postgresql/data postgres:16
-      for i in $(seq 1 60); do docker exec sentinel-db pg_isready -U sentinel -q && break || sleep 2; done
       docker run -d --name sentinel-api --restart=always --network sentinel \
         -p 443:8787 \
         -e SENTINEL_ENV=production \
@@ -329,15 +316,85 @@ write_files:
         -e SENTINEL_TLS_KEY_PEM=/tls/key.pem \
         -e SENTINEL_JWT_ES256_PEM=/tls/jwt.pem \
         -e SENTINEL_AUTO_MIGRATE=1 \
+        -e SENTINEL_UPDATE_FLAG_DIR=/flags \
         -e DATABASE_URL=postgres://sentinel:{{ db_password }}@sentinel-db:5432/sentinel \
         -v /opt/sentinel/tls:/tls:ro \
+        -v /opt/sentinel/flags:/flags \
         {{ image_ref }}
+
+  # Pull the latest image and recreate the API container. Run by the daily timer and by the
+  # path unit the moment the app (via POST /v1/admin/update) drops the flag file. The API
+  # container never gets the Docker socket — the host does the privileged work.
+  - path: /opt/sentinel/update.sh
+    permissions: '0755'
+    content: |
+      #!/usr/bin/env bash
+      set -euo pipefail
+      rm -f /opt/sentinel/flags/update-requested
+      docker pull {{ image_ref }}
+      docker rm -f sentinel-api >/dev/null 2>&1 || true
+      /opt/sentinel/start-api.sh
+
+  - path: /etc/systemd/system/sentinel-update.service
+    content: |
+      [Unit]
+      Description=NorthKey sync-server update (pull + recreate)
+      [Service]
+      Type=oneshot
+      ExecStart=/opt/sentinel/update.sh
+
+  - path: /etc/systemd/system/sentinel-update.path
+    content: |
+      [Unit]
+      Description=Run the update when the app requests it
+      [Path]
+      PathExists=/opt/sentinel/flags/update-requested
+      [Install]
+      WantedBy=multi-user.target
+
+  - path: /etc/systemd/system/sentinel-update.timer
+    content: |
+      [Unit]
+      Description=Daily NorthKey sync-server update
+      [Timer]
+      OnCalendar=daily
+      RandomizedDelaySec=1h
+      Persistent=true
+      [Install]
+      WantedBy=timers.target
+
+  - path: /opt/sentinel/run.sh
+    permissions: '0755'
+    content: |
+      #!/usr/bin/env bash
+      set -euo pipefail
+      mkdir -p /opt/sentinel/tls /opt/sentinel/pgdata /opt/sentinel/flags
+      # The TLS cert+key are app-generated (base64 here) so the app can pin the exact cert; the
+      # JWT signing key is generated on-box (stable across restarts while the box lives).
+      echo "{{ tls_cert_b64 }}" | base64 -d > /opt/sentinel/tls/cert.pem
+      echo "{{ tls_key_b64 }}" | base64 -d > /opt/sentinel/tls/key.pem
+      openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:P-256 -out /opt/sentinel/tls/jwt.pem
+      chown -R 10001:10001 /opt/sentinel/tls
+      chmod 640 /opt/sentinel/tls/*.pem
+      # The API runs as uid 10001 and must be able to write the update flag.
+      chown 10001:10001 /opt/sentinel/flags
+      curl -fsSL https://get.docker.com | sh
+      docker network create sentinel || true
+      docker rm -f sentinel-db sentinel-api >/dev/null 2>&1 || true
+      docker run -d --name sentinel-db --restart=always --network sentinel \
+        -e POSTGRES_PASSWORD={{ db_password }} -e POSTGRES_USER=sentinel -e POSTGRES_DB=sentinel \
+        -v /opt/sentinel/pgdata:/var/lib/postgresql/data postgres:16
+      for i in $(seq 1 60); do docker exec sentinel-db pg_isready -U sentinel -q && break || sleep 2; done
+      /opt/sentinel/start-api.sh
 
 runcmd:
   - systemctl disable ssh || true
   - systemctl stop ssh || true
   - systemctl mask ssh.service || true
   - bash /opt/sentinel/run.sh
+  - systemctl daemon-reload
+  - systemctl enable --now sentinel-update.path
+  - systemctl enable --now sentinel-update.timer
 "#;
 
 /// Inputs to the sync-server cloud-init. All secrets are app-generated so the app knows the pin
@@ -539,6 +596,24 @@ mod tests {
         assert!(yaml.contains("postgres:16"));
         assert!(yaml.contains("/opt/sentinel/pgdata"));
         assert!(yaml.contains("systemctl mask ssh.service"));
+    }
+
+    #[test]
+    fn sync_cloud_init_wires_the_self_updater() {
+        let yaml = render_sync(&sync_params()).unwrap();
+        // One start script shared by first boot and updates, so args can never drift.
+        assert!(yaml.contains("/opt/sentinel/start-api.sh"));
+        // The updater pulls + recreates on the host; the API only writes a flag into the shared
+        // volume (never the docker socket).
+        assert!(yaml.contains("/opt/sentinel/update.sh"));
+        assert!(yaml.contains("SENTINEL_UPDATE_FLAG_DIR=/flags"));
+        assert!(yaml.contains("-v /opt/sentinel/flags:/flags"));
+        assert!(!yaml.contains("docker.sock"), "no socket in the container");
+        // Path unit (instant, app-requested) + daily timer, both enabled.
+        assert!(yaml.contains("PathExists=/opt/sentinel/flags/update-requested"));
+        assert!(yaml.contains("systemctl enable --now sentinel-update.path"));
+        assert!(yaml.contains("OnCalendar=daily"));
+        assert!(yaml.contains("systemctl enable --now sentinel-update.timer"));
     }
 
     #[test]

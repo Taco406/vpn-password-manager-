@@ -939,6 +939,12 @@ export async function syncPairBegin(): Promise<{
   );
 }
 
+/** Ask the sync server to self-update to the latest image (host-side pull + recreate, ~30s). */
+export async function syncServerUpdate(): Promise<void> {
+  if (!inTauri()) throw new Error("Server update is only available in the desktop app.");
+  await inv<void>("sync_server_update");
+}
+
 /** Join the sync server described by a device-join code from another computer (empty vault only). */
 export async function syncPairComplete(code: string): Promise<{ restored: number; serverIp: string }> {
   if (!inTauri()) throw new Error("Device pairing is only available in the desktop app.");

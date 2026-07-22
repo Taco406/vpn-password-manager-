@@ -17,6 +17,7 @@ import {
   syncServerStatus,
   syncDeploy,
   syncServerDestroy,
+  syncServerUpdate,
   onSyncDeploy,
   syncStatus,
   syncSetConfig,
@@ -580,6 +581,19 @@ function SyncServer({ sync, onSyncChange }: { sync: SyncStatusInfo | null; onSyn
     setBusy(false);
   };
 
+  const updateServer = async () => {
+    if (!window.confirm("Update the sync server to the latest version? It restarts its app (~30 seconds); your data is untouched.")) return;
+    setBusy(true);
+    setMsg("Asking the server to update itself…");
+    try {
+      await syncServerUpdate();
+      setMsg("Update requested. The server pulls the new version and restarts — give it about a minute.");
+    } catch (e) {
+      setMsg(errMsg(e));
+    }
+    setBusy(false);
+  };
+
   const forget = async () => {
     if (!window.confirm("Forget this sync server on this device? Your local vault stays; the server keeps running. You can deploy or join again afterward.")) return;
     setBusy(true);
@@ -813,6 +827,9 @@ function SyncServer({ sync, onSyncChange }: { sync: SyncStatusInfo | null; onSyn
           ) : (
             <div>This device is connected to your sync server as an added device. The server itself is managed on the computer that deployed it.</div>
           )}
+          <button onClick={() => void updateServer()} disabled={busy} className="!mt-2 block text-[var(--accent)] hover:underline disabled:opacity-50">
+            Update server to the latest version
+          </button>
           {deployed ? (
             <button onClick={() => void destroy()} disabled={busy} className="!mt-2 block text-[var(--danger)] hover:underline disabled:opacity-50">
               Destroy sync server (stop billing)

@@ -1670,6 +1670,29 @@ pub struct PairCompleteOut {
     server_ip: String,
 }
 
+/// Ask the sync server to update itself to the latest published image. The server's host does the
+/// pull+recreate (a systemd path unit watching a flag file); expect ~30s of downtime. Servers
+/// deployed before the updater existed return a clear "redeploy once" error.
+#[tauri::command]
+pub async fn sync_server_update(state: State<'_, AppState>) -> Result<(), String> {
+    let api = api_for(&state)?;
+    let resp = api
+        .authed(reqwest::Method::POST, "/admin/update", &[], Some(json!({})))
+        .await?;
+    if resp.status().is_success() {
+        Ok(())
+    } else if resp.status().as_u16() == 400 {
+        Err(
+            "This server was deployed before in-place updates existed. Destroy + redeploy it once \
+             (your vault re-uploads automatically after sign-in) — every server after that updates \
+             itself."
+                .into(),
+        )
+    } else {
+        Err(format!("update request failed: HTTP {}", resp.status()))
+    }
+}
+
 /// Finish (or repair) sign-in to an already-configured one-click server. Idempotent: if this
 /// device is already signed in it returns success without contacting the server.
 #[tauri::command]

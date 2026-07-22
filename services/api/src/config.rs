@@ -32,6 +32,10 @@ pub struct Config {
     pub autoban_window_secs: i64,
     /// How long an auto-ban lasts, in minutes. `SENTINEL_AUTOBAN_MINUTES` (default 60).
     pub autoban_minutes: i64,
+    /// Directory where `POST /v1/admin/update` drops the `update-requested` flag file that the
+    /// host's updater unit watches (`SENTINEL_UPDATE_FLAG_DIR`). `None` disables the endpoint —
+    /// the API container itself never touches Docker; privilege separation stays intact.
+    pub update_flag_dir: Option<String>,
 }
 
 /// The ES256 keypair used to sign/verify access JWTs (D18).
@@ -136,6 +140,9 @@ impl Config {
             .unwrap_or(0);
         let autoban_window_secs = env_i64("SENTINEL_AUTOBAN_WINDOW_SECS", 300);
         let autoban_minutes = env_i64("SENTINEL_AUTOBAN_MINUTES", 60);
+        let update_flag_dir = std::env::var("SENTINEL_UPDATE_FLAG_DIR")
+            .ok()
+            .filter(|s| !s.is_empty());
 
         Ok(Config {
             bind,
@@ -149,6 +156,7 @@ impl Config {
             autoban_threshold,
             autoban_window_secs,
             autoban_minutes,
+            update_flag_dir,
         })
     }
 
@@ -197,6 +205,7 @@ mod tests {
             autoban_threshold: 0,
             autoban_window_secs: 300,
             autoban_minutes: 60,
+            update_flag_dir: None,
         }
     }
 
