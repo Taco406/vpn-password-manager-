@@ -19,6 +19,10 @@ pub enum Info {
     PairChannelPhoneToDesktop,
     Export,
     FileTransfer,
+    /// Master-password sign-in proof: HKDF(KEK) sent to the server, which stores only its hash.
+    /// One-way, so the server (or anyone who sees the proof) can never recover the KEK that
+    /// unwraps the vault key — sign-in stays zero-knowledge.
+    AuthLogin,
 }
 
 impl Info {
@@ -33,6 +37,7 @@ impl Info {
             Info::PairChannelPhoneToDesktop => "sentinel/v1/pair/chan/phone->desktop",
             Info::Export => "sentinel/v1/export",
             Info::FileTransfer => "sentinel/v1/file/blob",
+            Info::AuthLogin => "sentinel/v1/auth/login",
         }
     }
 }

@@ -49,6 +49,24 @@ final class VaultStore: ObservableObject {
         busy = false
     }
 
+    /// Finish a master-password sign-in: the login already derived the KEK, so unwrap the
+    /// escrowed key with it directly (no second Argon2 run) and pull.
+    func unlockWithKek(_ kek: Data) async {
+        busy = true
+        error = nil
+        do {
+            let blob = try await ApiClient.shared.getWrappedPasswordKey()
+            let key = try VaultCrypto.unwrapPasswordBlob(blob, kek: kek)
+            vaultKey = key
+            try await pull()
+        } catch let ApiError.http(code, _) where code == 404 {
+            error = "Signed in, but no escrowed key yet — on your computer: Account & Sync → Advanced → Turn on master-password sign-in."
+        } catch {
+            self.error = error.localizedDescription
+        }
+        busy = false
+    }
+
     /// Relaunch unlock via the Face-ID-protected key (if the user enabled it).
     func unlockWithFaceID() async {
         busy = true

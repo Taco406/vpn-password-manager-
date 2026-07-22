@@ -13,6 +13,7 @@ struct DesktopSetupQR: Decodable {
 }
 
 struct ScanSetupView: View {
+    let vault: VaultStore
     let onDone: () -> Void
     @State private var scanning = true
     @State private var busy = false
@@ -22,7 +23,7 @@ struct ScanSetupView: View {
     var body: some View {
         VStack(spacing: 16) {
             if showManual {
-                ServerSetupView(onConfigured: onDone)
+                ServerSetupView(vault: vault, onConfigured: onDone)
                 Button("Back to QR scan") { showManual = false }
                     .font(.caption)
             } else {
@@ -54,7 +55,7 @@ struct ScanSetupView: View {
                     }
                     .frame(maxWidth: .infinity)
                 }
-                Button("Advanced: type a server address + setup token instead") { showManual = true }
+                Button("No camera handy? Type the server address instead") { showManual = true }
                     .font(.caption)
                     .foregroundColor(.gray)
             }

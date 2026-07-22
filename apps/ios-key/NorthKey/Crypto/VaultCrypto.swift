@@ -109,6 +109,7 @@ enum VaultCrypto {
 
     static let infoVaultOuter = "sentinel/v1/vault/outer"
     static let infoVaultItem = "sentinel/v1/vault/item"
+    static let infoAuthLogin = "sentinel/v1/auth/login"
 
     static func hkdf32(ikm: Data, salt: Data?, info: String) -> Data {
         let key = HKDF<SHA256>.deriveKey(
@@ -142,19 +143,31 @@ enum VaultCrypto {
 
     // MARK: - Wrapped vault key (SNTL, wrapper_type 4 = master password)
 
-    /// Unwrap the escrowed master-password blob to the 32-byte vault key.
-    static func unwrapPasswordBlob(_ blob: Data, password: String) throws -> Data {
+    /// The 16-byte Argon2 salt embedded in a type-4 SNTL blob (same salt the sign-in proof uses,
+    /// so one derivation covers login AND unwrap).
+    static func passwordBlobSalt(_ blob: Data) throws -> Data {
         guard blob.count == 8 + 16 + 24 + 48,
               blob.prefix(4) == Data("SNTL".utf8),
-              blob[4] == 1, blob[5] == 4
+              blob[4] == 1, blob[5] == 4,
+              Int(blob[6]) | Int(blob[7]) << 8 == 16
         else { throw VaultCryptoError.badFormat("wrapped key") }
-        let paramsLen = Int(blob[6]) | Int(blob[7]) << 8
-        guard paramsLen == 16 else { throw VaultCryptoError.badFormat("wrapped key params") }
+        return blob.subdata(in: 8..<24)
+    }
+
+    /// Unwrap the escrowed master-password blob to the 32-byte vault key.
+    static func unwrapPasswordBlob(_ blob: Data, password: String) throws -> Data {
+        let salt = try passwordBlobSalt(blob)
+        let kek = try argon2idKek(password: password, salt: salt)
+        return try unwrapPasswordBlob(blob, kek: kek)
+    }
+
+    /// Unwrap with an already-derived KEK (sign-in just derived it — no second Argon2 run).
+    /// Falls back to `wrongPassword` on any AEAD failure, same as the password variant.
+    static func unwrapPasswordBlob(_ blob: Data, kek: Data) throws -> Data {
+        _ = try passwordBlobSalt(blob) // format check
         let header = blob.prefix(24) // magic..params = AAD
-        let salt = blob.subdata(in: 8..<24)
         let nonce = blob.subdata(in: 24..<48)
         let ct = blob.subdata(in: 48..<blob.count)
-        let kek = try argon2idKek(password: password, salt: salt)
         do {
             let vk = try xchachaOpen(key: kek, nonce24: nonce, ciphertext: ct, aad: Data(header))
             guard vk.count == 32 else { throw VaultCryptoError.badFormat("unwrapped key size") }
@@ -162,6 +175,12 @@ enum VaultCrypto {
         } catch {
             throw VaultCryptoError.wrongPassword
         }
+    }
+
+    /// Master-password sign-in proof: HKDF(KEK, "sentinel/v1/auth/login"). One-way — the server
+    /// stores only its hash and can never recover the KEK that unwraps the vault key.
+    static func loginProof(kek: Data) -> Data {
+        hkdf32(ikm: kek, salt: nil, info: infoAuthLogin)
     }
 
     // MARK: - Sync blob (SVLT)

@@ -66,7 +66,7 @@ apps/ios-key/
     ContentView.swift          the three phases: connect / unlock / vault
     Bridging.h                 exposes the vendored C to Swift
     Onboarding/ScanSetupView.swift    QR-first onboarding (+ Advanced manual path)
-    Onboarding/ServerSetupView.swift  manual server URL + setup token
+    Onboarding/ServerSetupView.swift  typed-address sign-in (master password + trust check)
     Api/ApiClient.swift        pinned-TLS client, enroll/vault/wrapped-key endpoints
     Crypto/VaultCrypto.swift   Argon2id + XChaCha20-Poly1305 + HKDF + zstd bridge
     Vault/VaultModels.swift    Codable mirrors of the Rust vault model

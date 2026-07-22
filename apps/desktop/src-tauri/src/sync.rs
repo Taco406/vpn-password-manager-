@@ -690,6 +690,11 @@ pub struct SyncStatusOut {
     google_secret_set: bool,
     signed_in: bool,
     email: Option<String>,
+    /// The deployed server's public address (what another device types to sign in).
+    server_ip: Option<String>,
+    /// Human-comparable identity code of the pinned server cert — a device signing in for the
+    /// first time shows the same code, and matching means no man-in-the-middle.
+    cert_fingerprint: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -755,6 +760,8 @@ pub fn sync_status(state: State<AppState>) -> SyncStatusOut {
         google_secret_set: kc_get(KC_GSECRET).is_some(),
         signed_in: kc_get(KC_ACCESS).is_some(),
         email: cfg.email,
+        server_ip: cfg.server_ip,
+        cert_fingerprint: cfg.pinned_cert_pem.as_deref().and_then(cert_fingerprint),
     }
 }
 
@@ -1022,7 +1029,10 @@ pub async fn sync_restore(
 /// push the current vault, so another device can unlock with the SAME master password — no device
 /// code, no recovery code. Requires a master password set locally and the vault unlocked.
 #[tauri::command]
-pub async fn sync_enable_password_unlock(state: State<'_, AppState>) -> Result<i64, String> {
+pub async fn sync_enable_password_unlock(
+    state: State<'_, AppState>,
+    password: Option<String>,
+) -> Result<i64, String> {
     let dir = data_dir(&state);
     let blob = std::fs::read(crate::state::wrap_path(&dir))
         .map_err(|_| "Set a master password first, then enable password unlock.".to_string())?;
@@ -1034,6 +1044,20 @@ pub async fn sync_enable_password_unlock(state: State<'_, AppState>) -> Result<i
     let api = api_for(&state)?;
     api.put_wrapped_key(WrapperType::Password.code(), &blob)
         .await?;
+    // With the password in hand we can also enroll master-password SIGN-IN (the login verifier),
+    // so a new device needs only address + password. Verify it's really the right password first
+    // (it must unwrap the local blob) — enrolling a typo would lock sign-in behind gibberish.
+    if let Some(pw) = password.as_deref().filter(|p| !p.is_empty()) {
+        let check = WrappedBlob {
+            wrapper: WrapperType::Password,
+            bytes: blob.clone(),
+        };
+        PasswordWrapper::new(pw)
+            .unwrap(&check)
+            .await
+            .map_err(|_| "that's not this vault's master password".to_string())?;
+        enroll_login_verifier(&api, pw, &blob).await?;
+    }
     // Make sure the server actually holds the vault, so another device pulls real data (not "0").
     let current = api.get_vault().await?.map(|(v, _)| v).unwrap_or(0);
     push_document(&api, &vk, &state, current).await
@@ -1084,7 +1108,291 @@ pub async fn sync_unlock_with_password(
         };
         restored = report.added as i64;
     }
+    // We hold the password and a session: make sure master-password SIGN-IN (not just unlock)
+    // is enrolled, so the next device needs nothing but address + password. Best-effort — an
+    // old server without the endpoint changes nothing.
+    let _ = enroll_login_verifier(&api, &password, &blob.bytes).await;
     Ok(RestoreOut { restored })
+}
+
+// ---------------------------------------------------------------------------
+// THE login (v0.1.48): server address + master password (+ 6-digit code)
+// ---------------------------------------------------------------------------
+
+/// `1.2.3.4`, `https://1.2.3.4`, `sync.example.com` → (`https://host`, `host`).
+fn normalize_addr(address: &str) -> Result<(String, String), String> {
+    let a = address.trim().trim_end_matches('/');
+    if a.is_empty() {
+        return Err("enter your server's address (the IP from the computer that set it up)".into());
+    }
+    let host = a
+        .strip_prefix("https://")
+        .or_else(|| a.strip_prefix("http://"))
+        .unwrap_or(a)
+        .split('/')
+        .next()
+        .unwrap_or(a)
+        .to_string();
+    Ok((format!("https://{host}"), host))
+}
+
+/// Short human-comparable fingerprint of a PEM cert: SHA-256 of the DER, first 8 bytes as
+/// `AB12-CD34-EF56-7890`. Matches what another signed-in device displays.
+fn cert_fingerprint(pem: &str) -> Option<String> {
+    let body: String = pem
+        .lines()
+        .filter(|l| !l.starts_with("-----") && !l.trim().is_empty())
+        .collect();
+    let der = STANDARD.decode(body).ok()?;
+    let hash = <sha2::Sha256 as sha2::Digest>::digest(&der);
+    let hex: Vec<String> = hash[..8].iter().map(|b| format!("{b:02X}")).collect();
+    Some(format!(
+        "{}{}-{}{}-{}{}-{}{}",
+        hex[0], hex[1], hex[2], hex[3], hex[4], hex[5], hex[6], hex[7]
+    ))
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProbeOut {
+    pub cert_pem: Option<String>,
+    pub fingerprint: Option<String>,
+    pub server_version: Option<String>,
+    /// False until a signed-in device has turned on master-password sign-in (or the server
+    /// predates the endpoint — the UI copy covers both).
+    pub password_signin_ready: bool,
+}
+
+/// First contact with a server by bare address: fetch its identity (version + the cert to pin)
+/// over a deliberately-unverified TLS connection. Trust-on-first-use — nothing sensitive is sent
+/// on this connection, and the UI shows the fingerprint to compare against another device before
+/// the sign-in proceeds over the PINNED connection.
+#[tauri::command]
+pub async fn sync_probe_server(address: String) -> Result<ProbeOut, String> {
+    let (base, _host) = normalize_addr(&address)?;
+    let http = reqwest::Client::builder()
+        .danger_accept_invalid_certs(true)
+        .timeout(Duration::from_secs(10))
+        .connect_timeout(Duration::from_secs(6))
+        .build()
+        .map_err(estr)?;
+    let meta: serde_json::Value = http
+        .get(format!("{base}/v1/meta"))
+        .send()
+        .await
+        .map_err(|e| format!("couldn't reach {base}: {e}"))?
+        .error_for_status()
+        .map_err(|_| {
+            "that server didn't identify itself — it may be too old (update or redeploy it), or the address is wrong"
+                .to_string()
+        })?
+        .json()
+        .await
+        .map_err(estr)?;
+    let cert_pem = meta["cert_pem"].as_str().map(str::to_string);
+    let fingerprint = cert_pem.as_deref().and_then(cert_fingerprint);
+    let ready = http
+        .get(format!("{base}/v1/auth/password/params"))
+        .send()
+        .await
+        .map(|r| r.status().is_success())
+        .unwrap_or(false);
+    Ok(ProbeOut {
+        cert_pem,
+        fingerprint,
+        server_version: meta["version"].as_str().map(str::to_string),
+        password_signin_ready: ready,
+    })
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PasswordSigninOut {
+    /// True = the account has 2-step sign-in; re-submit with the 6-digit code.
+    pub totp_required: bool,
+    pub restored: i64,
+}
+
+/// The one login: point this device at a server (pinning the probed cert), prove the master
+/// password, and pull the vault. Everything a new computer needs.
+#[tauri::command]
+pub async fn sync_password_signin(
+    state: State<'_, AppState>,
+    address: String,
+    cert_pem: Option<String>,
+    password: String,
+    code: Option<String>,
+) -> Result<PasswordSigninOut, String> {
+    let (plain_base, host) = normalize_addr(&address)?;
+    let dir = data_dir(&state);
+
+    // Point the config at the server the same way deploy/join do, so every later call (sync,
+    // devices, updates) uses the pinned client unchanged.
+    let mut cfg = load_config(&dir);
+    match cert_pem.as_deref().filter(|p| !p.trim().is_empty()) {
+        Some(pem) => {
+            cfg.server_url = Some(format!("https://{SYNC_HOST}"));
+            cfg.server_ip = Some(host.clone());
+            cfg.pinned_cert_pem = Some(pem.to_string());
+        }
+        None => {
+            // Real-CA server (custom domain): plain TLS, no pin.
+            cfg.server_url = Some(plain_base.clone());
+            cfg.server_ip = None;
+            cfg.pinned_cert_pem = None;
+        }
+    }
+    save_config(&dir, &cfg)?;
+    let http = sync_http_client(&cfg);
+    let base = format!(
+        "{}/v1",
+        cfg.server_url.clone().unwrap().trim_end_matches('/')
+    );
+
+    // KDF parameters (the salt) — public, but only present once sign-in is enabled.
+    let resp = http
+        .get(format!("{base}/auth/password/params"))
+        .send()
+        .await
+        .map_err(|e| format!("couldn't reach the server: {e}"))?;
+    if resp.status().as_u16() == 404 {
+        return Err(
+            "Master-password sign-in isn't turned on for this server yet. On a computer that already has your vault: unlock it once (or use Account & Sync → Turn on master-password sign-in), then try again. If the server is old, click Update server first."
+                .into(),
+        );
+    }
+    if !resp.status().is_success() {
+        return Err(format!("server error: HTTP {}", resp.status()));
+    }
+    #[derive(Deserialize)]
+    struct Params {
+        salt_b64: String,
+    }
+    let p: Params = resp.json().await.map_err(estr)?;
+    let salt_vec = STANDARD.decode(p.salt_b64.trim()).map_err(estr)?;
+    let salt: [u8; 16] = salt_vec
+        .try_into()
+        .map_err(|_| "server sent a malformed salt".to_string())?;
+
+    // Argon2 is deliberately slow — off the async runtime.
+    let pw = password.clone();
+    let proof = tokio::task::spawn_blocking(move || PasswordWrapper::new(&pw).login_proof(&salt))
+        .await
+        .map_err(estr)?;
+
+    let mut body = json!({
+        "proof_b64": STANDARD.encode(proof.as_bytes()),
+        "device": { "name": device_name(), "platform": platform_str() },
+    });
+    if let Some(c) = code.as_deref().map(str::trim).filter(|c| !c.is_empty()) {
+        body["code"] = json!(c);
+    }
+    let resp = http
+        .post(format!("{base}/auth/password"))
+        .json(&body)
+        .send()
+        .await
+        .map_err(estr)?;
+    if resp.status().as_u16() == 400 {
+        let v: serde_json::Value = resp.json().await.unwrap_or_default();
+        if v["detail"] == "totp_required" {
+            return Ok(PasswordSigninOut {
+                totp_required: true,
+                restored: 0,
+            });
+        }
+        return Err(format!(
+            "sign-in rejected: {}",
+            v["detail"].as_str().unwrap_or("bad request")
+        ));
+    }
+    if resp.status().as_u16() == 401 {
+        return Err(if code.is_some() {
+            "wrong master password or 6-digit code".into()
+        } else {
+            "wrong master password".into()
+        });
+    }
+    if !resp.status().is_success() {
+        return Err(format!("sign-in failed: HTTP {}", resp.status()));
+    }
+    let t: ServerTokens = resp.json().await.map_err(estr)?;
+    kc_set(KC_ACCESS, &t.access_token)?;
+    kc_set(KC_REFRESH, &t.refresh_token)?;
+
+    // Signed in — now do exactly what "Unlock this device with your master password" does:
+    // download the escrowed key, unwrap, adopt (only onto an empty vault), and pull.
+    let api = api_for(&state)?;
+    let blob = WrappedBlob {
+        wrapper: WrapperType::Password,
+        bytes: api.get_wrapped_key(WrapperType::Password.code()).await?,
+    };
+    let vk = PasswordWrapper::new(&password)
+        .unwrap(&blob)
+        .await
+        .map_err(|_| {
+            "signed in, but the escrowed key didn't unwrap — was the master password changed on another device?"
+                .to_string()
+        })?;
+
+    let already_has_vault = {
+        let mut g = state.inner.lock().unwrap();
+        let empty = g.vault.list_envelopes().map_err(estr)?.is_empty();
+        if empty {
+            g.session = VaultSession::unlocked(vk.clone());
+        }
+        !empty
+    };
+    let mut restored = 0i64;
+    if !already_has_vault {
+        kc_set(KC_VAULT_KEY, &STANDARD.encode(vk.key().as_bytes()))?;
+        if let Some((v, ct)) = api.get_vault().await? {
+            let doc = decode_sync_blob(&vk, &ct, v as u64).map_err(estr)?;
+            let report = {
+                let g = state.inner.lock().unwrap();
+                g.vault.merge(&doc).map_err(estr)?
+            };
+            restored = report.added as i64;
+        }
+    }
+    Ok(PasswordSigninOut {
+        totp_required: false,
+        restored,
+    })
+}
+
+/// Enroll (or refresh) the master-password sign-in verifier from a type-4 SNTL blob + the
+/// password. The salt is read from the blob so ONE Argon2 derivation on any client serves both
+/// login and unwrap. Best-effort against old servers (404 = endpoint not there yet).
+async fn enroll_login_verifier(api: &Api, password: &str, blob_bytes: &[u8]) -> Result<(), String> {
+    if blob_bytes.len() < 24 {
+        return Err("malformed wrapped-key blob".into());
+    }
+    let mut salt = [0u8; 16];
+    salt.copy_from_slice(&blob_bytes[8..24]);
+    let pw = password.to_string();
+    let proof = tokio::task::spawn_blocking(move || PasswordWrapper::new(&pw).login_proof(&salt))
+        .await
+        .map_err(estr)?;
+    let body = json!({
+        "salt_b64": STANDARD.encode(salt),
+        "verifier_b64": STANDARD.encode(proof.as_bytes()),
+    });
+    let resp = api
+        .authed(
+            reqwest::Method::POST,
+            "/auth/password/enroll",
+            &[],
+            Some(body),
+        )
+        .await?;
+    if resp.status().as_u16() == 404 {
+        return Err("this server predates master-password sign-in — update it".into());
+    }
+    if !resp.status().is_success() {
+        return Err(format!("enroll verifier: HTTP {}", resp.status()));
+    }
+    Ok(())
 }
 
 #[tauri::command]

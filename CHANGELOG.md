@@ -8,6 +8,32 @@ The format follows [Keep a Changelog](https://keepachangelog.com/). Versions are
 [semantic](https://semver.org/). **Add a new `## [x.y.z]` section at the top in the same PR
 that bumps the app version** — that's how "the changelog updates on every merge."
 
+## [0.1.48] — 2026-07-22
+
+### Changed
+- **The login is now exactly what it should have been all along: server address + master
+  password (+ your 6-digit code if 2-step is on).** On any device — Windows, Mac, or iPhone —
+  signing in means typing your server's address and your master password. That's the whole
+  flow. Google sign-in, setup tokens, and device join codes still work but move out of the way;
+  the QR is now just a shortcut that fills in the address for the phone's camera.
+- **First-contact trust check.** The first time a device connects to your server by address, it
+  shows the server's identity code; your signed-in computer displays the same code under
+  Account & Sync — matching codes rule out a man-in-the-middle, then the certificate is pinned
+  forever. (Scanning the QR skips even this, since the QR carries the certificate.)
+- **Turn on master-password sign-in** (Account & Sync → Advanced) replaces "Enable
+  master-password unlock": one action escrows your wrapped key AND registers a one-way sign-in
+  proof. Still zero-knowledge — the server stores a hash of an HKDF derivation and can verify
+  your password without ever being able to unwrap your vault. Unlocking a fresh device with the
+  master password auto-enrolls it too.
+- The signed-in Account & Sync card now shows your server's address + identity code — the two
+  things you read to another device to sign it in.
+
+### Notes
+- Sign-in and vault unwrap share one Argon2id derivation (same salt), so the phone signs in and
+  opens the vault with a single ~1s computation. The login proof is locked cross-platform by
+  the golden-vector tests. New endpoints are additive; older apps and servers keep working
+  (a clear message tells you if the server needs its one-click update first).
+
 ## [0.1.47] — 2026-07-22
 
 ### Added
