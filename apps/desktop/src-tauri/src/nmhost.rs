@@ -21,10 +21,15 @@ use sentinel_core::nm::{
     VaultFieldsGetRequest, VaultSearchRequest, VaultSearchResultItem,
 };
 use sentinel_core::totp::TotpSecret;
-use sentinel_core::vault::model::{Item, ItemType, UrlMatch, UrlMode};
-use sentinel_core::vault::{origin_matches, LocalVault, VaultSession};
+use sentinel_core::vault::model::{Item, ItemType, Passkey, UrlMatch, UrlMode};
+use sentinel_core::vault::{
+    assertion, mint_passkey, origin_matches, registration_attestation, LocalVault, VaultSession,
+};
 use serde::de::DeserializeOwned;
 use serde::Deserialize;
+
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use base64::Engine as _;
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 
@@ -145,6 +150,8 @@ fn handle(host: Option<&Host>, env: &NmEnvelope) -> NmEnvelope {
         NmType::VaultTotpGet => totp(host, env),
         NmType::VaultGenerate => generate(&env.id),
         NmType::VaultSaveCandidate => save_candidate(host, env),
+        NmType::VaultPasskeyRegister => passkey_register(host, env),
+        NmType::VaultPasskeyAssert => passkey_assert(host, env),
         _ => error(
             &env.id,
             env.kind,
@@ -164,6 +171,8 @@ const CAPS: &[&str] = &[
     "vault.totp.get",
     "vault.generate",
     "vault.save_candidate",
+    "vault.passkey.register",
+    "vault.passkey.assert",
 ];
 
 fn hello(host: Option<&Host>, id: &str) -> NmEnvelope {
@@ -419,6 +428,224 @@ fn save_candidate(host: Option<&Host>, env: &NmEnvelope) -> NmEnvelope {
         &env.id,
         NmType::VaultSaveCandidate,
         serde_json::json!({ "saved": true, "action": action, "id": item.id.to_string() }),
+    )
+}
+
+// ---------------------------------------------------------------------------
+// passkeys (WebAuthn virtual authenticator) — Stage B (register) + Stage C (assert)
+// ---------------------------------------------------------------------------
+
+/// WebAuthn RP-id gate: the RP id must equal the calling origin's host or be a registrable
+/// suffix of it (label-boundary), over https (http allowed only for localhost). This is what
+/// stops a page on one site from minting or using a passkey scoped to another.
+fn rp_id_matches_origin(rp_id: &str, origin: &str) -> bool {
+    if rp_id.is_empty() {
+        return false;
+    }
+    let Some((scheme, rest)) = origin.split_once("://") else {
+        return false;
+    };
+    let host = rest
+        .split('/')
+        .next()
+        .unwrap_or(rest)
+        .split(':')
+        .next()
+        .unwrap_or(rest)
+        .to_ascii_lowercase();
+    let is_local = host == "localhost" || host == "127.0.0.1" || host.ends_with(".localhost");
+    let scheme_ok =
+        scheme.eq_ignore_ascii_case("https") || (scheme.eq_ignore_ascii_case("http") && is_local);
+    if !scheme_ok {
+        return false;
+    }
+    let rp = rp_id.to_ascii_lowercase();
+    host == rp || host.ends_with(&format!(".{rp}"))
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PasskeyRegisterReq {
+    origin: String,
+    rp_id: String,
+    #[serde(default)]
+    rp_name: Option<String>,
+    user_name: String,
+    #[serde(default)]
+    user_display_name: Option<String>,
+    user_handle_b64u: String,
+}
+
+/// Register a new passkey for `rp_id`. Gated on the RP-id/origin rule and an unlocked vault; mints
+/// + seals a `Passkey` item, then returns the CBOR attestation object for the page shim to hand back.
+fn passkey_register(host: Option<&Host>, env: &NmEnvelope) -> NmEnvelope {
+    let host = match host {
+        Some(h) => h,
+        None => return NmEnvelope::locked(&env.id),
+    };
+    let req: PasskeyRegisterReq = match parse(env) {
+        Ok(r) => r,
+        Err(e) => return e,
+    };
+    if !rp_id_matches_origin(&req.rp_id, &req.origin) {
+        return error(
+            &env.id,
+            env.kind,
+            NmErrorCode::BadOrigin,
+            "rpId is not valid for this origin",
+        );
+    }
+    let user_handle = match URL_SAFE_NO_PAD.decode(req.user_handle_b64u.as_bytes()) {
+        Ok(b) => b,
+        Err(_) => {
+            return error(
+                &env.id,
+                env.kind,
+                NmErrorCode::BadRequest,
+                "bad user handle",
+            )
+        }
+    };
+
+    let pk = mint_passkey(
+        &req.rp_id,
+        req.rp_name.clone(),
+        &req.user_name,
+        req.user_display_name.clone(),
+        &user_handle,
+    );
+    let (auth_data, attestation) = match registration_attestation(&pk) {
+        Ok(a) => a,
+        Err(_) => {
+            return error(
+                &env.id,
+                env.kind,
+                NmErrorCode::Internal,
+                "attestation failed",
+            )
+        }
+    };
+
+    // Seal the passkey as a vault item so it can be used (and shows up) later.
+    let now = time::OffsetDateTime::now_utc().unix_timestamp();
+    let mut item = Item::new_login(format!("{} @ {}", req.user_name, req.rp_id), now);
+    item.item_type = ItemType::Passkey;
+    item.login = None;
+    item.password_changed_at = None;
+    item.urls = vec![UrlMatch {
+        url: req.origin.clone(),
+        mode: UrlMode::Domain,
+    }];
+    item.passkey = Some(pk.clone());
+
+    let sealed = match host.session.seal(&item) {
+        Ok(s) => s,
+        Err(_) => return error(&env.id, env.kind, NmErrorCode::Internal, "seal failed"),
+    };
+    if host.vault.upsert(&sealed).is_err() {
+        return error(
+            &env.id,
+            env.kind,
+            NmErrorCode::Internal,
+            "vault write failed",
+        );
+    }
+    ok(
+        &env.id,
+        NmType::VaultPasskeyRegister,
+        serde_json::json!({
+            "credentialIdB64u": pk.credential_id,
+            "attestationObjectB64u": URL_SAFE_NO_PAD.encode(&attestation),
+            "authenticatorDataB64u": URL_SAFE_NO_PAD.encode(&auth_data),
+        }),
+    )
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PasskeyAssertReq {
+    origin: String,
+    rp_id: String,
+    client_data_json: String,
+    #[serde(default)]
+    allow_credential_ids_b64u: Vec<String>,
+}
+
+/// Produce an assertion for `rp_id`: pick a matching passkey (honoring `allowCredentials` when the
+/// RP restricts it), bump + persist its `sign_count`, and return authenticatorData + the DER
+/// signature over `authenticatorData || SHA-256(clientDataJSON)`.
+fn passkey_assert(host: Option<&Host>, env: &NmEnvelope) -> NmEnvelope {
+    let host = match host {
+        Some(h) => h,
+        None => return NmEnvelope::locked(&env.id),
+    };
+    let req: PasskeyAssertReq = match parse(env) {
+        Ok(r) => r,
+        Err(e) => return e,
+    };
+    if !rp_id_matches_origin(&req.rp_id, &req.origin) {
+        return error(
+            &env.id,
+            env.kind,
+            NmErrorCode::BadOrigin,
+            "rpId is not valid for this origin",
+        );
+    }
+
+    // Matching passkeys for this RP, newest first; then honor allowCredentials if the RP set it.
+    let matches_allow = |pk: &Passkey| {
+        req.allow_credential_ids_b64u.is_empty()
+            || req.allow_credential_ids_b64u.contains(&pk.credential_id)
+    };
+    let mut candidates: Vec<Item> = load_items(host)
+        .into_iter()
+        .filter(|it| {
+            it.item_type == ItemType::Passkey
+                && it
+                    .passkey
+                    .as_ref()
+                    .is_some_and(|p| p.rp_id == req.rp_id && matches_allow(p))
+        })
+        .collect();
+    candidates.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+
+    let mut item = match candidates.into_iter().next() {
+        Some(it) => it,
+        None => {
+            return error(
+                &env.id,
+                env.kind,
+                NmErrorCode::NotFound,
+                "no passkey for this site",
+            )
+        }
+    };
+
+    let pk = item.passkey.as_mut().expect("filtered to passkeys");
+    pk.sign_count = pk.sign_count.wrapping_add(1);
+    let new_count = pk.sign_count;
+    let cred_b64u = pk.credential_id.clone();
+    let user_handle = pk.user_handle.clone();
+    let (auth_data, sig) = match assertion(pk, new_count, req.client_data_json.as_bytes()) {
+        Ok(v) => v,
+        Err(_) => return error(&env.id, env.kind, NmErrorCode::Internal, "assertion failed"),
+    };
+
+    // Persist the incremented counter (best-effort — the assertion is already valid either way).
+    item.updated_at = time::OffsetDateTime::now_utc().unix_timestamp();
+    if let Ok(sealed) = host.session.seal(&item) {
+        let _ = host.vault.upsert(&sealed);
+    }
+
+    ok(
+        &env.id,
+        NmType::VaultPasskeyAssert,
+        serde_json::json!({
+            "credentialIdB64u": cred_b64u,
+            "authenticatorDataB64u": URL_SAFE_NO_PAD.encode(&auth_data),
+            "signatureB64u": URL_SAFE_NO_PAD.encode(&sig),
+            "userHandleB64u": user_handle,
+        }),
     )
 }
 
@@ -745,6 +972,35 @@ mod tests {
             "chrome-extension://pbcngnmfielibgghcofedjmojogohcdf/"
         ])));
         assert!(detect(iter(&["--nm-host"])));
+    }
+
+    #[test]
+    fn rp_id_origin_gate() {
+        // Exact host and registrable-suffix matches over https are allowed.
+        assert!(rp_id_matches_origin("example.com", "https://example.com"));
+        assert!(rp_id_matches_origin(
+            "example.com",
+            "https://login.example.com"
+        ));
+        assert!(rp_id_matches_origin(
+            "example.com",
+            "https://a.b.example.com:443/path"
+        ));
+        // localhost may use http (dev).
+        assert!(rp_id_matches_origin("localhost", "http://localhost:3000"));
+        // Cross-site and suffix-tricks are rejected.
+        assert!(!rp_id_matches_origin("example.com", "https://evil.com"));
+        assert!(!rp_id_matches_origin(
+            "example.com",
+            "https://notexample.com"
+        ));
+        assert!(!rp_id_matches_origin(
+            "example.com",
+            "https://example.com.evil.com"
+        ));
+        // Non-https non-localhost is rejected; empty rpId is rejected.
+        assert!(!rp_id_matches_origin("example.com", "http://example.com"));
+        assert!(!rp_id_matches_origin("", "https://example.com"));
     }
 
     #[test]

@@ -460,6 +460,32 @@ function sendBg(cmd: string, payload: unknown): Promise<BgReply | undefined> {
   });
 }
 
+// Passkeys: bridge the page-context WebAuthn shim (inpage.js, MAIN world) to the desktop.
+// The requesting origin is set HERE from location.origin — never trusted from the page — so a
+// page can't ask the desktop to act for another site. Runs in every frame (no autofill UI here).
+window.addEventListener("message", (ev: MessageEvent) => {
+  if (ev.source !== window) return;
+  const d = ev.data as
+    | { source?: string; kind?: string; reqId?: string; payload?: Record<string, unknown> }
+    | null;
+  if (!d || d.source !== "northkey-passkey" || typeof d.reqId !== "string") return;
+  const cmd = d.kind === "register" ? "passkey_register" : d.kind === "assert" ? "passkey_assert" : null;
+  if (!cmd) return;
+  const payload = { ...(d.payload ?? {}), origin: location.origin };
+  void sendBg(cmd, payload).then((reply) => {
+    window.postMessage(
+      {
+        source: "northkey-passkey-reply",
+        reqId: d.reqId,
+        ok: reply?.ok === true,
+        payload: reply?.payload,
+        err: reply?.err,
+      },
+      location.origin,
+    );
+  });
+});
+
 if (!inCrossOriginFrame()) {
   document.addEventListener("focusin", onFocusIn, true);
   document.addEventListener("focusout", onFocusOut, true);
