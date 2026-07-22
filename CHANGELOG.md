@@ -8,6 +8,24 @@ The format follows [Keep a Changelog](https://keepachangelog.com/). Versions are
 [semantic](https://semver.org/). **Add a new `## [x.y.z]` section at the top in the same PR
 that bumps the app version** — that's how "the changelog updates on every merge."
 
+## [0.1.46] — 2026-07-22
+
+### Added
+- **Unlock your vault on a new device with just your master password.** No more device-code or
+  recovery-code dance for multi-device sync: on a device that has your vault, **Vault sync → "Enable
+  master-password unlock"** escrows your master-password-wrapped key (Argon2id, still zero-knowledge —
+  the server holds no key material and can never unwrap it) and pushes your vault. Then on a new
+  device, **Sign in + Vault sync → "Unlock this device with your master password"** downloads the key,
+  unwraps it locally, and pulls your vault. Same account, same master password, nothing new to create.
+- **File-transfer relay (backend).** The sync server can now hold an opaque, size-capped (25 MiB),
+  24h-expiring encrypted blob addressed to one of your devices — the plumbing for a "send a file to
+  my other device" feature. The desktop send/receive UI lands next; the server half ships now.
+
+### Notes
+- The file the transfer relay stores is encrypted client-side (XChaCha20-Poly1305) and the server
+  never sees the file, its name, or any key. The password key-escrow reuses the exact wrapper the
+  local master-password unlock already uses, so the same password works on disk and across devices.
+
 ## [0.1.45] — 2026-07-22
 
 ### Added
