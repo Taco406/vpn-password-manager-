@@ -325,15 +325,33 @@ write_files:
   # Pull the latest image and recreate the API container. Run by the daily timer and by the
   # path unit the moment the app (via POST /v1/admin/update) drops the flag file. The API
   # container never gets the Docker socket — the host does the privileged work.
+  #
+  # Safety: the box has no SSH (masked), so a bad image must never be able to strand it. The
+  # previous image is kept under the sentinel-api-prev tag; if the new container doesn't answer
+  # /healthz within ~60s, the updater rolls back to it. Only after the new image proves healthy
+  # does it become the new rollback point.
   - path: /opt/sentinel/update.sh
     permissions: '0755'
     content: |
       #!/usr/bin/env bash
       set -euo pipefail
       rm -f /opt/sentinel/flags/update-requested
+      docker tag {{ image_ref }} sentinel-api-prev >/dev/null 2>&1 || true
       docker pull {{ image_ref }}
       docker rm -f sentinel-api >/dev/null 2>&1 || true
       /opt/sentinel/start-api.sh
+      for _ in $(seq 1 30); do
+        sleep 2
+        if curl -fsk https://localhost/healthz >/dev/null 2>&1; then
+          echo "update healthy"
+          exit 0
+        fi
+      done
+      echo "new image failed /healthz — rolling back to previous image" >&2
+      docker rm -f sentinel-api >/dev/null 2>&1 || true
+      docker tag sentinel-api-prev {{ image_ref }}
+      /opt/sentinel/start-api.sh
+      exit 1
 
   - path: /etc/systemd/system/sentinel-update.service
     content: |
@@ -474,6 +492,11 @@ mod tests {
         assert!(yaml.contains("PrivateKey = SPRIV"));
         assert!(yaml.contains("PublicKey = CPUB"));
         assert!(yaml.contains("ListenPort = 51820"));
+        // The embedded Python callback must mirror callback.rs::verify_callback EXACTLY:
+        // HMAC over pubkey‖ip (that order), hex key/mac, JSON keys pubkey/ip/mac. The Python
+        // only ever runs on a live box, so this template assertion is its only test.
+        assert!(yaml.contains("(p + i).encode()"));
+        assert!(yaml.contains(r#"{"pubkey": p, "ip": i, "mac": mac}"#));
         // Firewall default-drop.
         assert!(yaml.contains("policy drop"));
         assert!(yaml.contains("udp dport 51820 accept"));
@@ -614,6 +637,11 @@ mod tests {
         assert!(yaml.contains("systemctl enable --now sentinel-update.path"));
         assert!(yaml.contains("OnCalendar=daily"));
         assert!(yaml.contains("systemctl enable --now sentinel-update.timer"));
+        // A bad image must never strand the (SSH-less) box: the updater health-checks the new
+        // container and rolls back to the saved previous image if /healthz never answers.
+        assert!(yaml.contains("sentinel-api-prev"));
+        assert!(yaml.contains("healthz"));
+        assert!(yaml.contains("rolling back"));
     }
 
     #[test]
