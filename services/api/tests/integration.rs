@@ -150,6 +150,16 @@ fn post(uri: &str, token: Option<&str>, body: Value) -> Request<Body> {
     b.body(Body::from(body.to_string())).unwrap()
 }
 
+/// A bodyless authenticated request (GET/DELETE) with a bearer token.
+fn authed_req(method: &str, uri: &str, token: &str) -> Request<Body> {
+    Request::builder()
+        .method(method)
+        .uri(uri)
+        .header("authorization", format!("Bearer {token}"))
+        .body(Body::empty())
+        .unwrap()
+}
+
 /// Run the full onboarding flow and return an approved-device access token + refresh.
 async fn onboard(app: &Router, sub: &str) -> (String, String) {
     onboard_with(app, sub, "Test Desktop", "linux").await
@@ -334,6 +344,43 @@ async fn wrapped_keys_round_trip() {
             .unwrap(),
     )
     .await;
+    assert_eq!(s, StatusCode::OK);
+    let got = base64::engine::general_purpose::STANDARD
+        .decode(v["blob_b64"].as_str().unwrap())
+        .unwrap();
+    assert_eq!(got, blob);
+}
+
+#[tokio::test]
+async fn password_wrapped_key_escrow_round_trips() {
+    // Wrapper D (master password, type 4) must be storable + fetchable so a second device can
+    // "sign in + master password" and unwrap the vault key. The server never unwraps it.
+    let (app, _) = setup().await;
+    let sub = format!("user-{}", uuid::Uuid::new_v4());
+    let (access, _) = onboard(&app, &sub).await;
+
+    // A canonical 96-byte SNTL Password blob (8 header + 16 params + 24 nonce + 48 ct).
+    let mut blob = vec![0u8; 96];
+    blob[0..4].copy_from_slice(b"SNTL");
+    blob[4] = 1; // version
+    blob[5] = 4; // wrapper_type = Password
+    blob[6] = 16; // params_len LE (16-byte salt)
+    let blob_b64 = base64::engine::general_purpose::STANDARD.encode(&blob);
+
+    let (s, _) = call(
+        &app,
+        Request::builder()
+            .method("PUT")
+            .uri("/v1/wrapped-keys/4")
+            .header("authorization", format!("Bearer {access}"))
+            .header("content-type", "application/json")
+            .body(Body::from(json!({ "blob_b64": blob_b64 }).to_string()))
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(s, StatusCode::NO_CONTENT, "type-4 escrow must be accepted");
+
+    let (s, v) = call(&app, authed_req("GET", "/v1/wrapped-keys/4", &access)).await;
     assert_eq!(s, StatusCode::OK);
     let got = base64::engine::general_purpose::STANDARD
         .decode(v["blob_b64"].as_str().unwrap())
@@ -586,6 +633,167 @@ async fn phone_pins_key_and_desktop_reads_it() {
     assert_eq!(phone_row["phone_pub_b64"], pub_b64);
     let desktop_row = list.iter().find(|d| d["current"] == true).unwrap();
     assert!(desktop_row["phone_pub_b64"].is_null());
+}
+
+// --- file transfer --------------------------------------------------------
+
+/// The device id the given token authenticates as (its own row is `current` in the device list).
+async fn own_device_id(app: &Router, token: &str) -> String {
+    devices(app, token)
+        .await
+        .iter()
+        .find(|d| d["current"] == true)
+        .and_then(|d| d["id"].as_str())
+        .unwrap()
+        .to_string()
+}
+
+#[tokio::test]
+async fn file_transfer_lifecycle_own_devices() {
+    let (app, _) = setup().await;
+    let sub = format!("user-{}", uuid::Uuid::new_v4());
+    let (sender, _) = onboard(&app, &sub).await;
+    let (recipient, _) = onboard(&app, &sub).await;
+
+    // Sender uploads an opaque blob for any of the account's devices to claim (broadcast).
+    let blob = base64::engine::general_purpose::STANDARD.encode(b"opaque-file-ciphertext");
+    let (s, v) = call(
+        &app,
+        post(
+            "/v1/transfers",
+            Some(&sender),
+            json!({ "recipient_device_id": null, "size_bytes": 12, "ciphertext_b64": blob }),
+        ),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    let id = v["id"].as_str().unwrap().to_string();
+
+    // The recipient sees it as incoming and downloads the exact bytes back.
+    let (s, v) = call(&app, authed_req("GET", "/v1/transfers", &recipient)).await;
+    assert_eq!(s, StatusCode::OK);
+    let inbox = v["transfers"].as_array().unwrap();
+    assert!(
+        inbox
+            .iter()
+            .any(|t| t["id"] == id.as_str() && t["outgoing"] == false),
+        "recipient inbox: {v}"
+    );
+    let (s, v) = call(
+        &app,
+        authed_req("GET", &format!("/v1/transfers/{id}"), &recipient),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK);
+    assert_eq!(v["ciphertext_b64"], blob);
+
+    // The sender now sees it delivered on its outgoing side.
+    let (_s, v) = call(&app, authed_req("GET", "/v1/transfers", &sender)).await;
+    let mine = v["transfers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|t| t["id"] == id.as_str())
+        .unwrap()
+        .clone();
+    assert_eq!(mine["state"], "delivered");
+    assert_eq!(mine["outgoing"], true);
+
+    // A different account can neither see nor download it.
+    let other_sub = format!("user-{}", uuid::Uuid::new_v4());
+    let (other, _) = onboard(&app, &other_sub).await;
+    let (s, _) = call(
+        &app,
+        authed_req("GET", &format!("/v1/transfers/{id}"), &other),
+    )
+    .await;
+    assert_eq!(s, StatusCode::NOT_FOUND);
+
+    // The sender deletes it, and it's gone for everyone.
+    let (s, _) = call(
+        &app,
+        authed_req("DELETE", &format!("/v1/transfers/{id}"), &sender),
+    )
+    .await;
+    assert_eq!(s, StatusCode::NO_CONTENT);
+    let (s, _) = call(
+        &app,
+        authed_req("GET", &format!("/v1/transfers/{id}"), &recipient),
+    )
+    .await;
+    assert_eq!(s, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn file_transfer_targeting_and_validation() {
+    let (app, _) = setup().await;
+    let sub = format!("user-{}", uuid::Uuid::new_v4());
+    let (sender, _) = onboard(&app, &sub).await;
+    let (target, _) = onboard(&app, &sub).await;
+    let (bystander, _) = onboard(&app, &sub).await;
+    let target_id = own_device_id(&app, &target).await;
+
+    let blob = base64::engine::general_purpose::STANDARD.encode(b"for-one-device-only");
+    let (s, v) = call(
+        &app,
+        post(
+            "/v1/transfers",
+            Some(&sender),
+            json!({ "recipient_device_id": target_id, "size_bytes": 5, "ciphertext_b64": blob }),
+        ),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    let id = v["id"].as_str().unwrap().to_string();
+
+    // The named target sees and can download it.
+    let (s, _) = call(
+        &app,
+        authed_req("GET", &format!("/v1/transfers/{id}"), &target),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK);
+
+    // A same-account device that is NOT the target neither lists nor may download it.
+    let (_s, v) = call(&app, authed_req("GET", "/v1/transfers", &bystander)).await;
+    assert!(
+        !v["transfers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|t| t["id"] == id.as_str()),
+        "bystander must not see a targeted transfer: {v}"
+    );
+    let (s, _) = call(
+        &app,
+        authed_req("GET", &format!("/v1/transfers/{id}"), &bystander),
+    )
+    .await;
+    assert_eq!(s, StatusCode::FORBIDDEN);
+
+    // Empty ciphertext is rejected.
+    let (s, _) = call(
+        &app,
+        post(
+            "/v1/transfers",
+            Some(&sender),
+            json!({ "recipient_device_id": null, "size_bytes": 0, "ciphertext_b64": "" }),
+        ),
+    )
+    .await;
+    assert_eq!(s, StatusCode::BAD_REQUEST);
+
+    // An unknown recipient device is rejected.
+    let (s, _) = call(
+        &app,
+        post(
+            "/v1/transfers",
+            Some(&sender),
+            json!({ "recipient_device_id": uuid::Uuid::new_v4(), "size_bytes": 5, "ciphertext_b64": blob }),
+        ),
+    )
+    .await;
+    assert_eq!(s, StatusCode::BAD_REQUEST);
 }
 
 // --- attack monitor -------------------------------------------------------

@@ -18,6 +18,7 @@ pub enum Info {
     PairChannelDesktopToPhone,
     PairChannelPhoneToDesktop,
     Export,
+    FileTransfer,
 }
 
 impl Info {
@@ -31,6 +32,7 @@ impl Info {
             Info::PairChannelDesktopToPhone => "sentinel/v1/pair/chan/desktop->phone",
             Info::PairChannelPhoneToDesktop => "sentinel/v1/pair/chan/phone->desktop",
             Info::Export => "sentinel/v1/export",
+            Info::FileTransfer => "sentinel/v1/file/blob",
         }
     }
 }

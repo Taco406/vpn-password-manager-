@@ -21,6 +21,7 @@ use base64::Engine as _;
 use sentinel_core::auth::{BrowserOpener, GoogleAuth, PkceParams, TokenExchanger, TokenSet};
 use sentinel_core::crypto::Key32;
 use sentinel_core::error::{CoreError, Result as CoreResult};
+use sentinel_core::keyring::password::PasswordWrapper;
 use sentinel_core::keyring::recovery::RecoveryWrapper;
 use sentinel_core::keyring::{KeyWrapper, VaultKey, WrappedBlob, WrapperType};
 use sentinel_core::recovery_kit::{self, pdf::render_kit_pdf, RecoveryKey};
@@ -599,25 +600,25 @@ impl Api {
         }
     }
 
-    async fn put_wrapped_key(&self, blob: &[u8]) -> Result<(), String> {
+    async fn put_wrapped_key(&self, wt: u8, blob: &[u8]) -> Result<(), String> {
+        let path = format!("/wrapped-keys/{wt}");
         let body =
             json!({ "blob_b64": STANDARD.encode(blob), "device_id": serde_json::Value::Null });
         let resp = self
-            .authed(reqwest::Method::PUT, "/wrapped-keys/3", &[], Some(body))
+            .authed(reqwest::Method::PUT, &path, &[], Some(body))
             .await?;
         if resp.status().is_success() {
             Ok(())
         } else {
-            Err(format!("PUT /wrapped-keys/3: HTTP {}", resp.status()))
+            Err(format!("PUT {path}: HTTP {}", resp.status()))
         }
     }
 
-    async fn get_wrapped_key(&self) -> Result<Vec<u8>, String> {
-        let resp = self
-            .authed(reqwest::Method::GET, "/wrapped-keys/3", &[], None)
-            .await?;
+    async fn get_wrapped_key(&self, wt: u8) -> Result<Vec<u8>, String> {
+        let path = format!("/wrapped-keys/{wt}");
+        let resp = self.authed(reqwest::Method::GET, &path, &[], None).await?;
         if !resp.status().is_success() {
-            return Err(format!("GET /wrapped-keys/3: HTTP {}", resp.status()));
+            return Err(format!("GET {path}: HTTP {}", resp.status()));
         }
         #[derive(Deserialize)]
         struct W {
@@ -915,7 +916,8 @@ pub async fn sync_backup(state: State<'_, AppState>) -> Result<BackupOut, String
     let blob = wrapper.wrap(&vk).await.map_err(estr)?;
 
     let api = api_for(&state)?;
-    api.put_wrapped_key(&blob.bytes).await?;
+    api.put_wrapped_key(WrapperType::Recovery.code(), &blob.bytes)
+        .await?;
 
     // Push the current vault as one sealed sync blob.
     let current = api.get_vault().await?.map(|(v, _)| v).unwrap_or(0);
@@ -973,7 +975,7 @@ pub async fn sync_restore(
     let api = api_for(&state)?;
     let blob = WrappedBlob {
         wrapper: WrapperType::Recovery,
-        bytes: api.get_wrapped_key().await?,
+        bytes: api.get_wrapped_key(WrapperType::Recovery.code()).await?,
     };
     let rk = recovery_kit::decode(recovery_code.trim()).map_err(estr)?;
     let vk = RecoveryWrapper::new(rk).unwrap(&blob).await.map_err(estr)?;
@@ -1001,6 +1003,75 @@ pub async fn sync_restore(
         restored = report.added as i64;
     }
 
+    Ok(RestoreOut { restored })
+}
+
+/// Escrow the local master-password-wrapped vault key on the sync server (Wrapper D / type 4) and
+/// push the current vault, so another device can unlock with the SAME master password — no device
+/// code, no recovery code. Requires a master password set locally and the vault unlocked.
+#[tauri::command]
+pub async fn sync_enable_password_unlock(state: State<'_, AppState>) -> Result<i64, String> {
+    let dir = data_dir(&state);
+    let blob = std::fs::read(crate::state::wrap_path(&dir))
+        .map_err(|_| "Set a master password first, then enable password unlock.".to_string())?;
+    // Must be a Password (type 4) SNTL envelope — the same blob the local unlock uses.
+    if blob.len() < 8 || &blob[0..4] != b"SNTL" || blob[5] != WrapperType::Password.code() {
+        return Err("the local master-password wrapper is missing or malformed".into());
+    }
+    let vk = session_vault_key(&state)?;
+    let api = api_for(&state)?;
+    api.put_wrapped_key(WrapperType::Password.code(), &blob)
+        .await?;
+    // Make sure the server actually holds the vault, so another device pulls real data (not "0").
+    let current = api.get_vault().await?.map(|(v, _)| v).unwrap_or(0);
+    push_document(&api, &vk, &state, current).await
+}
+
+/// Unlock this (fresh) device from the sync server with the account master password: download the
+/// escrowed Wrapper-D blob, unwrap it, adopt the shared key, and pull the vault. The device must be
+/// signed in (Google/bootstrap) and have no local vault yet.
+#[tauri::command]
+pub async fn sync_unlock_with_password(
+    state: State<'_, AppState>,
+    password: String,
+) -> Result<RestoreOut, String> {
+    // Only ever unlock onto an empty device — never clobber an existing local vault.
+    {
+        let g = state.inner.lock().unwrap();
+        if !g.vault.list_envelopes().map_err(estr)?.is_empty() {
+            return Err("this device already has a vault".into());
+        }
+    }
+
+    let api = api_for(&state)?;
+    let blob = WrappedBlob {
+        wrapper: WrapperType::Password,
+        bytes: api.get_wrapped_key(WrapperType::Password.code()).await?,
+    };
+    let vk = PasswordWrapper::new(&password)
+        .unwrap(&blob)
+        .await
+        .map_err(|_| "wrong master password".to_string())?;
+
+    // Re-assert empty AND adopt the shared key in one locked section (mirrors sync_restore).
+    {
+        let mut g = state.inner.lock().unwrap();
+        if !g.vault.list_envelopes().map_err(estr)?.is_empty() {
+            return Err("this device already has a vault".into());
+        }
+        g.session = VaultSession::unlocked(vk.clone());
+    }
+    kc_set(KC_VAULT_KEY, &STANDARD.encode(vk.key().as_bytes()))?;
+
+    let mut restored = 0i64;
+    if let Some((v, ct)) = api.get_vault().await? {
+        let doc = decode_sync_blob(&vk, &ct, v as u64).map_err(estr)?;
+        let report = {
+            let g = state.inner.lock().unwrap();
+            g.vault.merge(&doc).map_err(estr)?
+        };
+        restored = report.added as i64;
+    }
     Ok(RestoreOut { restored })
 }
 

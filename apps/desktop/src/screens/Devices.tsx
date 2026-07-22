@@ -32,6 +32,8 @@ import {
   syncBackup,
   syncNow,
   syncRestore,
+  syncEnablePasswordUnlock,
+  syncUnlockWithPassword,
   syncDevices,
   syncDeviceRevoke,
   syncSecurityEvents,
@@ -932,6 +934,7 @@ function AccountSync({ sync, onSyncChange }: { sync: SyncStatusInfo | null; onSy
   // Signed-in actions.
   const [backup, setBackup] = useState<{ recoveryCode: string; pdfBase64: string; version: number } | null>(null);
   const [restoreCode, setRestoreCode] = useState("");
+  const [pwUnlock, setPwUnlock] = useState("");
   const [devices, setDevices] = useState<SyncDevice[]>([]);
 
   useEffect(() => {
@@ -1050,6 +1053,35 @@ function AccountSync({ sync, onSyncChange }: { sync: SyncStatusInfo | null; onSy
     setBusy(false);
   };
 
+  const doEnablePwUnlock = async () => {
+    setBusy(true);
+    setMsg("Enabling master-password unlock…");
+    try {
+      const v = await syncEnablePasswordUnlock();
+      setMsg(
+        `Master-password unlock enabled and vault pushed (version ${v}). A new device can now Sign in + enter your master password — no codes.`,
+      );
+    } catch (e) {
+      setMsg(errMsg(e));
+    }
+    setBusy(false);
+  };
+
+  const doUnlockWithPassword = async () => {
+    setBusy(true);
+    setMsg("Unlocking from the server…");
+    try {
+      const r = await syncUnlockWithPassword(pwUnlock);
+      setPwUnlock("");
+      setMsg(
+        `Unlocked — pulled ${r.restored} item${r.restored === 1 ? "" : "s"}. Reopen the vault to see them.`,
+      );
+    } catch (e) {
+      setMsg(errMsg(e));
+    }
+    setBusy(false);
+  };
+
   const loadDevices = async () => {
     setBusy(true);
     try {
@@ -1133,6 +1165,19 @@ function AccountSync({ sync, onSyncChange }: { sync: SyncStatusInfo | null; onSy
             </button>
           </div>
 
+          {/* enable master-password unlock on other devices */}
+          <div>
+            <div className="mb-1 text-sm font-medium">Unlock other devices with your master password</div>
+            <p className="mb-2 text-xs text-[var(--text-secondary)]">
+              Escrows your master-password-wrapped key (still zero-knowledge — the server can’t read it) and pushes your
+              vault, so a new device only needs <span className="font-medium">Sign in + your master password</span> — no
+              device codes. Requires a master password set on this device.
+            </p>
+            <button onClick={doEnablePwUnlock} disabled={busy} className={btnCls}>
+              {busy ? "Working…" : "Enable master-password unlock"}
+            </button>
+          </div>
+
           {/* restore */}
           <div>
             <div className="mb-1 text-sm font-medium">Restore from your recovery code</div>
@@ -1150,6 +1195,27 @@ function AccountSync({ sync, onSyncChange }: { sync: SyncStatusInfo | null; onSy
               />
               <button onClick={doRestore} disabled={busy || !restoreCode.trim()} className={btnCls}>
                 Restore
+              </button>
+            </div>
+          </div>
+
+          {/* unlock a fresh device with the master password */}
+          <div>
+            <div className="mb-1 text-sm font-medium">Unlock this device with your master password</div>
+            <p className="mb-2 text-xs text-[var(--text-secondary)]">
+              On a <span className="font-medium">new</span> signed-in device with an empty vault: enter your account master
+              password to download your key, decrypt, and pull your vault. No recovery code needed.
+            </p>
+            <div className="flex items-center gap-2">
+              <input
+                type="password"
+                value={pwUnlock}
+                onChange={(e) => setPwUnlock(e.target.value)}
+                placeholder="Master password"
+                className={`${inputCls} flex-1`}
+              />
+              <button onClick={doUnlockWithPassword} disabled={busy || !pwUnlock} className={btnCls}>
+                Unlock
               </button>
             </div>
           </div>

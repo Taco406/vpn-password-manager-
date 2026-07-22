@@ -12,6 +12,7 @@
 //! but the envelope is identical, so blobs are opaque and interchangeable at rest.
 
 pub mod mock;
+pub mod password;
 pub mod phone;
 pub mod recovery;
 
