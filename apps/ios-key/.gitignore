@@ -1,0 +1,6 @@
+# The Xcode project is generated from project.yml with `xcodegen generate` — regenerate it on your
+# Mac rather than committing it (keeps the repo free of pbxproj merge conflicts).
+NorthKey.xcodeproj/
+DerivedData/
+build/
+.DS_Store

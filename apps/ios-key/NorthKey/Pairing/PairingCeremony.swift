@@ -6,17 +6,20 @@
 import SwiftUI
 import CryptoKit
 
-enum AppState { case unpaired, paired }
+enum AppState { case needsServer, unpaired, paired }
 
 @MainActor
 final class AppModel: ObservableObject {
-    @Published var state: AppState = .unpaired
+    @Published var state: AppState
     @Published var verificationCode: String?
     @Published var pendingUnlock: UnlockRequest?
     @Published var totpEntries: [TotpEntry] = []
+    /// Transient status/error shown under the header (nil = hidden).
+    @Published var banner: String?
 
     private var enclave: EnclaveKey?
     private var channel: PairingChannel?
+    private var phonePubB64: String?
     private(set) var pairingId: String?
 
     struct DesktopQR: Decodable {
@@ -25,6 +28,32 @@ final class AppModel: ObservableObject {
         let relayUrl: String
         let desktopPub: String // base64 SEC1
         let expires: Int
+    }
+
+    init() {
+        // Resume where we left off: no server yet → onboarding; server but not paired → pairing.
+        if Keychain.read(KeychainAccounts.serverConfig) == nil {
+            state = .needsServer
+        } else if Keychain.read(KeychainAccounts.pairingMarker) == nil {
+            state = .unpaired
+        } else {
+            state = .paired
+        }
+        // A push delivered an unlock-request id → fetch it and surface the approval sheet.
+        PushHandler.shared.onUnlockRequest = { [weak self] id in
+            Task { await self?.loadUnlock(id: id) }
+        }
+    }
+
+    /// Save the sync server URL + bootstrap token, proving them by minting a first session.
+    func saveServer(url: String, token: String) async {
+        do {
+            try await ApiClient.shared.configure(baseUrl: url, bootstrapToken: token)
+            banner = nil
+            state = Keychain.read(KeychainAccounts.pairingMarker) == nil ? .unpaired : .paired
+        } catch {
+            banner = error.localizedDescription
+        }
     }
 
     /// Called when the QR scanner decodes the desktop payload.
@@ -39,6 +68,7 @@ final class AppModel: ObservableObject {
                 qrPayload: data, desktopPubSEC1: desktopPub, phonePubSEC1: enclave.publicSEC1)
             self.enclave = enclave
             self.channel = PairingChannel(role: .phone, sharedSecret: shared, transcript: transcript)
+            self.phonePubB64 = enclave.publicSEC1.base64EncodedString()
             self.pairingId = qr.pairingId
             self.verificationCode = PairingChannel.verificationCode(transcript: transcript)
         } catch {
@@ -46,13 +76,32 @@ final class AppModel: ObservableObject {
         }
     }
 
-    /// The user confirmed the codes match on both screens.
+    /// The user confirmed the codes match on both screens. Register the pinned phone key with the
+    /// sync server so the desktop can seal unlock requests to it, then move to the paired state.
     func confirmVerification() {
-        guard channel != nil else { return }
-        // Register the pinned phone public key with the sync API (over the relay),
-        // then transition to the paired state.
-        state = .paired
-        verificationCode = nil
+        guard channel != nil, let pub = phonePubB64 else { return }
+        Task {
+            do {
+                try await ApiClient.shared.pinKey(phonePubB64: pub)
+                Keychain.write(
+                    KeychainAccounts.pairingMarker, Data((pairingId ?? "paired").utf8))
+                verificationCode = nil
+                banner = nil
+                state = .paired
+            } catch {
+                banner = "Couldn't register with the sync server: \(error.localizedDescription)"
+            }
+        }
+    }
+
+    /// Fetch a pushed unlock request over the relay and surface the approval sheet.
+    private func loadUnlock(id: String) async {
+        do {
+            let u = try await ApiClient.shared.fetchUnlock(id: id)
+            pendingUnlock = UnlockRequest(id: u.id, requestPayload: u.requestPayload)
+        } catch {
+            banner = error.localizedDescription
+        }
     }
 }
 

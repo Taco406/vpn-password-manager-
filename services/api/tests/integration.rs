@@ -152,13 +152,20 @@ fn post(uri: &str, token: Option<&str>, body: Value) -> Request<Body> {
 
 /// Run the full onboarding flow and return an approved-device access token + refresh.
 async fn onboard(app: &Router, sub: &str) -> (String, String) {
+    onboard_with(app, sub, "Test Desktop", "linux").await
+}
+
+/// Onboard a device of a given name/platform on the account keyed by `sub`. A second call with the
+/// same `sub` but a different platform enrolls another device on the *same* account (e.g. an iOS
+/// companion alongside the desktop).
+async fn onboard_with(app: &Router, sub: &str, name: &str, platform: &str) -> (String, String) {
     let (s, v) = call(
         app,
         post(
             "/v1/auth/google",
             None,
             json!({ "id_token": format!("fixture:{sub}:{sub}@example.com"),
-                    "device": { "name": "Test Desktop", "platform": "linux" } }),
+                    "device": { "name": name, "platform": platform } }),
         ),
     )
     .await;
@@ -480,6 +487,22 @@ async fn unlock_relay_lifecycle_is_opaque() {
     assert_eq!(s, StatusCode::OK);
     assert_eq!(v["state"], "pending");
 
+    // The phone fetches the request over the same relay: it gets the opaque request payload it must
+    // open, the kind, and its own device id as the designated approver.
+    let (s, v) = call(
+        &app,
+        Request::builder()
+            .uri(format!("/v1/unlock-requests/{req_id}"))
+            .header("authorization", format!("Bearer {phone}"))
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK);
+    assert_eq!(v["request_payload_b64"], req_payload);
+    assert_eq!(v["kind"], "unlock");
+    assert_eq!(v["phone_device_id"], phone_id);
+
     // The phone approves with its opaque E2E response.
     let resp_payload = base64::engine::general_purpose::STANDARD.encode(b"e2e-ciphertext-share");
     let (s, _) = call(
@@ -506,6 +529,63 @@ async fn unlock_relay_lifecycle_is_opaque() {
     assert_eq!(s, StatusCode::OK);
     assert_eq!(v["state"], "approved");
     assert_eq!(v["response_payload_b64"], resp_payload);
+}
+
+#[tokio::test]
+async fn phone_pins_key_and_desktop_reads_it() {
+    let (app, _) = setup().await;
+    let sub = format!("user-{}", uuid::Uuid::new_v4());
+    let (desktop, _) = onboard(&app, &sub).await;
+    let (phone, _) = onboard_with(&app, &sub, "iPhone", "ios").await;
+
+    // A valid 65-byte SEC1 uncompressed point (0x04 tag). Its content is opaque to the server.
+    let mut point = vec![0u8; 65];
+    point[0] = 0x04;
+    let pub_b64 = base64::engine::general_purpose::STANDARD.encode(&point);
+
+    // A malformed key (wrong length) is rejected before it ever hits the DB.
+    let short = base64::engine::general_purpose::STANDARD.encode([0x04u8; 10]);
+    let (s, _) = call(
+        &app,
+        post(
+            "/v1/devices/pin",
+            Some(&phone),
+            json!({ "phone_pub_b64": short }),
+        ),
+    )
+    .await;
+    assert_eq!(s, StatusCode::BAD_REQUEST);
+
+    // A desktop (non-iOS) device cannot pin a phone key — only iOS companions may.
+    let (s, _) = call(
+        &app,
+        post(
+            "/v1/devices/pin",
+            Some(&desktop),
+            json!({ "phone_pub_b64": pub_b64 }),
+        ),
+    )
+    .await;
+    assert_eq!(s, StatusCode::BAD_REQUEST);
+
+    // The iOS device pins its own key → 204.
+    let (s, _) = call(
+        &app,
+        post(
+            "/v1/devices/pin",
+            Some(&phone),
+            json!({ "phone_pub_b64": pub_b64 }),
+        ),
+    )
+    .await;
+    assert_eq!(s, StatusCode::NO_CONTENT);
+
+    // The desktop reads the account's devices and sees the phone's pinned key; its own row has none.
+    let list = devices(&app, &desktop).await;
+    let phone_row = list.iter().find(|d| d["platform"] == "ios").unwrap();
+    assert_eq!(phone_row["phone_pub_b64"], pub_b64);
+    let desktop_row = list.iter().find(|d| d["current"] == true).unwrap();
+    assert!(desktop_row["phone_pub_b64"].is_null());
 }
 
 // --- attack monitor -------------------------------------------------------

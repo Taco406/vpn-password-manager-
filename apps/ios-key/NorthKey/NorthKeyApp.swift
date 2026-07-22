@@ -5,7 +5,7 @@ import SwiftUI
 import UserNotifications
 
 @main
-struct SentinelKeyApp: App {
+struct NorthKeyApp: App {
     @UIApplicationDelegateAdaptor(AppDelegate.self) private var delegate
 
     var body: some Scene {

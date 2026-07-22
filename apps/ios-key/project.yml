@@ -1,0 +1,43 @@
+# XcodeGen spec for the NorthKey iPhone companion.
+#
+# There is no committed `.xcodeproj` because it can't be produced or built without a Mac. Generate
+# it on your Mac with:
+#
+#     brew install xcodegen           # once
+#     cd apps/ios-key && xcodegen generate
+#     open NorthKey.xcodeproj
+#
+# Then set your Apple **Team** (Signing & Capabilities) and a unique bundle id if `com.northkey.app`
+# is taken. Build to a physical iPhone — the Secure Enclave is unavailable in the simulator.
+
+name: NorthKey
+options:
+  bundleIdPrefix: com.northkey
+  deploymentTarget:
+    iOS: "16.0"
+  createIntermediateGroups: true
+
+settings:
+  base:
+    SWIFT_VERSION: "5.9"
+    MARKETING_VERSION: "0.1.0"
+    CURRENT_PROJECT_VERSION: "1"
+    CODE_SIGN_STYLE: Automatic
+    # Set your 10-character Apple Team ID here, or pick it in Xcode → Signing & Capabilities.
+    DEVELOPMENT_TEAM: ""
+
+targets:
+  NorthKey:
+    type: application
+    platform: iOS
+    sources:
+      - NorthKey
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.northkey.app
+        PRODUCT_NAME: NorthKey
+        INFOPLIST_FILE: Config/Info.plist
+        CODE_SIGN_ENTITLEMENTS: Config/NorthKey.entitlements
+        # iPhone only (the Secure Enclave isn't in the simulator, and there's no iPad layout).
+        TARGETED_DEVICE_FAMILY: "1"
+        GENERATE_INFOPLIST_FILE: NO

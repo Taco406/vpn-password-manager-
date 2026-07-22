@@ -32,6 +32,7 @@ pub fn router(state: AppState) -> Router {
             get(wrapped_get).put(wrapped_put).delete(wrapped_delete),
         )
         .route("/v1/devices", get(devices_list))
+        .route("/v1/devices/pin", post(device_pin))
         .route("/v1/devices/{id}/approve", post(device_approve))
         .route("/v1/devices/{id}", axum::routing::delete(device_revoke))
         .route("/v1/unlock-requests", post(unlock_create))
@@ -617,18 +618,32 @@ async fn wrapped_delete(
 
 // --- devices --------------------------------------------------------------
 
+/// A device row as read for the list: id, name, platform, status, pinned phone key, created_at.
+type DeviceRow = (
+    Uuid,
+    String,
+    String,
+    String,
+    Option<Vec<u8>>,
+    time::OffsetDateTime,
+);
+
 async fn devices_list(State(st): State<AppState>, a: Auth) -> ApiResult<Json<serde_json::Value>> {
-    let rows: Vec<(Uuid, String, String, String, time::OffsetDateTime)> = sqlx::query_as(
-        "SELECT id, name, platform, status, created_at FROM devices WHERE account_id = $1 ORDER BY created_at",
+    let rows: Vec<DeviceRow> = sqlx::query_as(
+        "SELECT id, name, platform, status, phone_pub_p256, created_at FROM devices WHERE account_id = $1 ORDER BY created_at",
     )
     .bind(a.account)
     .fetch_all(&st.pool)
     .await?;
     let devices: Vec<_> = rows
         .into_iter()
-        .map(|(id, name, platform, status, created)| {
+        .map(|(id, name, platform, status, phone_pub, created)| {
             json!({
                 "id": id, "name": name, "platform": platform, "status": status,
+                // The pinned SEC1 P-256 point of an iOS companion (null for other platforms), so the
+                // desktop can derive the pairing channel and seal unlock requests to this phone.
+                "phone_pub_b64": phone_pub
+                    .map(|b| base64::engine::general_purpose::STANDARD.encode(b)),
                 "created_at": created.unix_timestamp(), "current": id == a.device,
             })
         })
@@ -677,7 +692,58 @@ async fn device_revoke(
     Ok(StatusCode::NO_CONTENT)
 }
 
+#[derive(Deserialize)]
+struct DevicePinReq {
+    /// base64 SEC1 uncompressed P-256 point (65 bytes), pinned at the pairing ceremony.
+    phone_pub_b64: String,
+}
+
+/// An iOS companion pins its own Secure-Enclave public key. The 6-digit code compared out-of-band
+/// during pairing is what authenticates this key; the server only stores it so the desktop can read
+/// it back (`GET /v1/devices`) and seal unlock requests to this phone. Only the caller's own iOS
+/// device row is touched.
+async fn device_pin(
+    State(st): State<AppState>,
+    a: Auth,
+    Json(req): Json<DevicePinReq>,
+) -> ApiResult<StatusCode> {
+    let pub_key = base64::engine::general_purpose::STANDARD
+        .decode(req.phone_pub_b64.as_bytes())
+        .map_err(|_| ApiError::BadRequest("phone_pub not base64".into()))?;
+    // SEC1 uncompressed point: 0x04 tag + 32-byte X + 32-byte Y. The DB also enforces length 65.
+    if pub_key.len() != 65 || pub_key[0] != 0x04 {
+        return Err(ApiError::BadRequest(
+            "phone_pub must be a 65-byte SEC1 uncompressed point".into(),
+        ));
+    }
+    let n = sqlx::query(
+        "UPDATE devices SET phone_pub_p256 = $1 WHERE id = $2 AND account_id = $3 AND platform = 'ios'",
+    )
+    .bind(&pub_key)
+    .bind(a.device)
+    .bind(a.account)
+    .execute(&st.pool)
+    .await?
+    .rows_affected();
+    if n == 0 {
+        return Err(ApiError::BadRequest(
+            "only an iOS device can pin a key".into(),
+        ));
+    }
+    Ok(StatusCode::NO_CONTENT)
+}
+
 // --- unlock relay (E2E-opaque) --------------------------------------------
+
+/// An unlock-request row as read on GET: state, response, request, kind, phone_device_id, expires.
+type UnlockRow = (
+    String,
+    Option<Vec<u8>>,
+    Vec<u8>,
+    String,
+    Uuid,
+    time::OffsetDateTime,
+);
 
 #[derive(Deserialize)]
 struct UnlockCreateReq {
@@ -731,17 +797,21 @@ async fn unlock_get(
     a: Auth,
     Path(id): Path<Uuid>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    // Short long-poll: check a few times for a state transition before returning.
+    // The immutable request fields (the phone needs `request_payload_b64` to open the request and
+    // release its share); carried out of the loop so the still-pending return can include them too.
+    let mut meta: Option<(String, Uuid, String)> = None; // kind, phone_device_id, request_payload_b64
+                                                         // Short long-poll: check a few times for a state transition before returning.
     for _ in 0..3 {
-        let row: Option<(String, Option<Vec<u8>>, time::OffsetDateTime)> = sqlx::query_as(
-            "SELECT state, response_payload, expires_at FROM unlock_requests
-             WHERE id = $1 AND account_id = $2",
+        let row: Option<UnlockRow> = sqlx::query_as(
+            "SELECT state, response_payload, request_payload, kind, phone_device_id, expires_at
+                 FROM unlock_requests WHERE id = $1 AND account_id = $2",
         )
         .bind(id)
         .bind(a.account)
         .fetch_optional(&st.pool)
         .await?;
-        let (mut state, resp, expires) = row.ok_or(ApiError::NotFound)?;
+        let (mut state, resp, request_payload, kind, phone_device_id, expires) =
+            row.ok_or(ApiError::NotFound)?;
         if state == "pending" && expires < time::OffsetDateTime::now_utc() {
             sqlx::query("UPDATE unlock_requests SET state = 'expired' WHERE id = $1")
                 .bind(id)
@@ -749,15 +819,29 @@ async fn unlock_get(
                 .await?;
             state = "expired".into();
         }
+        let request_payload_b64 =
+            base64::engine::general_purpose::STANDARD.encode(&request_payload);
         if state != "pending" {
             return Ok(Json(json!({
                 "state": state,
+                "kind": kind,
+                "phone_device_id": phone_device_id,
+                "request_payload_b64": request_payload_b64,
                 "response_payload_b64": resp.map(|b| base64::engine::general_purpose::STANDARD.encode(b)),
             })));
         }
+        meta = Some((kind, phone_device_id, request_payload_b64));
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     }
-    Ok(Json(json!({ "state": "pending" })))
+    match meta {
+        Some((kind, phone_device_id, request_payload_b64)) => Ok(Json(json!({
+            "state": "pending",
+            "kind": kind,
+            "phone_device_id": phone_device_id,
+            "request_payload_b64": request_payload_b64,
+        }))),
+        None => Ok(Json(json!({ "state": "pending" }))),
+    }
 }
 
 #[derive(Deserialize)]

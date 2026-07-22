@@ -14,7 +14,7 @@ struct EnclaveKey {
     /// Load an existing key from the Keychain, or create one gated by Face ID.
     static func loadOrCreate() throws -> EnclaveKey {
         guard SecureEnclave.isAvailable else { throw EnclaveError.unavailable }
-        if let data = Keychain.read("sentinel.enclave.key") {
+        if let data = Keychain.read(KeychainAccounts.enclaveKey) {
             let key = try SecureEnclave.P256.KeyAgreement.PrivateKey(dataRepresentation: data)
             return EnclaveKey(key: key)
         }
@@ -22,7 +22,7 @@ struct EnclaveKey {
             nil, kSecAttrAccessibleWhenUnlockedThisDeviceOnly,
             [.privateKeyUsage, .biometryCurrentSet], nil)!
         let key = try SecureEnclave.P256.KeyAgreement.PrivateKey(accessControl: access)
-        Keychain.write("sentinel.enclave.key", key.dataRepresentation)
+        Keychain.write(KeychainAccounts.enclaveKey, key.dataRepresentation)
         return EnclaveKey(key: key)
     }
 
@@ -60,5 +60,13 @@ enum Keychain {
         ]
         SecItemDelete(q as CFDictionary)
         SecItemAdd(q as CFDictionary, nil)
+    }
+
+    static func delete(_ account: String) {
+        let q: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrAccount as String: account,
+        ]
+        SecItemDelete(q as CFDictionary)
     }
 }
