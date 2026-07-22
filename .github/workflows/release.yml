@@ -136,22 +136,42 @@ jobs:
             echo "SENTINEL_EOF"
           } >> "$GITHUB_OUTPUT"
 
+      # macOS Developer ID signing + notarization — only turned on when the certificate secret is
+      # actually present. Tauri's macOS bundler keys off whether APPLE_CERTIFICATE is *set*, not
+      # whether it's non-empty, so exporting it as an empty string (before the certs are added)
+      # makes it try to import an empty certificate and fails the whole macOS build. Gate it so
+      # unsigned builds keep working until the secrets exist. See docs/macos-signing.md.
+      - name: Configure Apple code signing (only when a certificate secret is present)
+        if: matrix.platform == 'macos-latest'
+        shell: bash
+        env:
+          CERT: ${{ secrets.APPLE_CERTIFICATE }}
+          CERT_PW: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          A_ID: ${{ secrets.APPLE_ID }}
+          A_PW: ${{ secrets.APPLE_PASSWORD }}
+          TEAM: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          if [ -n "$CERT" ]; then
+            {
+              echo "APPLE_CERTIFICATE=$CERT"
+              echo "APPLE_CERTIFICATE_PASSWORD=$CERT_PW"
+              echo "APPLE_SIGNING_IDENTITY=$IDENTITY"
+              echo "APPLE_ID=$A_ID"
+              echo "APPLE_PASSWORD=$A_PW"
+              echo "APPLE_TEAM_ID=$TEAM"
+            } >> "$GITHUB_ENV"
+            echo "Apple signing configured — the macOS app will be signed + notarized."
+          else
+            echo "No APPLE_CERTIFICATE secret set — building the macOS app UNSIGNED."
+          fi
+
       - name: Build + publish release
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-          # macOS Developer ID code signing + notarization. All optional: when these secrets are
-          # empty (e.g. before the Apple certs are added), tauri-action builds an UNSIGNED macOS
-          # app exactly as before — so this is safe to land ahead of the certs. See
-          # docs/macos-signing.md for how to create each one.
-          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
-          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
-          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         with:
           projectPath: apps/desktop
           tagName: ${{ steps.rel.outputs.tag }}
