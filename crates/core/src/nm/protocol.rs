@@ -34,6 +34,10 @@ pub enum NmType {
     VaultGenerate,
     #[serde(rename = "vault.save_candidate")]
     VaultSaveCandidate,
+    #[serde(rename = "vault.passkey.register")]
+    VaultPasskeyRegister,
+    #[serde(rename = "vault.passkey.assert")]
+    VaultPasskeyAssert,
     #[serde(rename = "lock.event")]
     LockEvent,
 }
@@ -138,6 +142,8 @@ mod tests {
             (NmType::Hello, "\"hello\""),
             (NmType::VaultFieldsGet, "\"vault.fields.get\""),
             (NmType::VaultSaveCandidate, "\"vault.save_candidate\""),
+            (NmType::VaultPasskeyRegister, "\"vault.passkey.register\""),
+            (NmType::VaultPasskeyAssert, "\"vault.passkey.assert\""),
             (NmType::LockEvent, "\"lock.event\""),
         ];
         for (t, want) in cases {

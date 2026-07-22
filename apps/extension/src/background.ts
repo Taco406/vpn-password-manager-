@@ -79,13 +79,17 @@ runtime?.onMessage?.addListener((req: { cmd: string; payload?: unknown }, _sende
       case "fields":
       case "totp":
       case "generate":
-      case "save_candidate": {
+      case "save_candidate":
+      case "passkey_register":
+      case "passkey_assert": {
         const map: Record<string, string> = {
           search: "vault.search",
           fields: "vault.fields.get",
           totp: "vault.totp.get",
           generate: "vault.generate",
           save_candidate: "vault.save_candidate",
+          passkey_register: "vault.passkey.register",
+          passkey_assert: "vault.passkey.assert",
         };
         const reply = await send(map[req.cmd], req.payload);
         sendResponse(reply);

@@ -8,6 +8,25 @@ The format follows [Keep a Changelog](https://keepachangelog.com/). Versions are
 [semantic](https://semver.org/). **Add a new `## [x.y.z]` section at the top in the same PR
 that bumps the app version** — that's how "the changelog updates on every merge."
 
+## [0.1.43] — 2026-07-21
+
+### Added
+- **Passkeys that actually sign in — Stage B + C (WebAuthn).** NorthKey can now **create** a
+  passkey for a website and **sign in** with it, through the browser extension. When a site offers
+  "create a passkey" or "sign in with a passkey," NorthKey asks whether to use it; on yes, the
+  desktop does the P-256 signing and hands the browser a valid WebAuthn credential. Passkeys you
+  create show up in your vault like any other item and sync end-to-end encrypted. The private key
+  never leaves the desktop, and the desktop enforces that a site can only use a passkey scoped to
+  its own domain.
+- **Non-hijacking by design.** The extension only steps in when you say yes and NorthKey has (or
+  makes) a matching passkey — otherwise it gets out of the way, so your hardware security keys and
+  built-in platform passkeys keep working exactly as before.
+
+### Notes
+- Requires the NorthKey browser extension (Chrome/Edge) connected to the unlocked desktop app.
+- This is the software-authenticator path (no hardware attestation) — sites see a standard "none"
+  attestation, which is what password-manager passkeys use.
+
 ## [0.1.42] — 2026-07-21
 
 ### Added

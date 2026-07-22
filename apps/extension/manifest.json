@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "NorthKey",
-  "version": "0.1.29",
+  "version": "0.1.43",
   "description": "Vault autofill and VPN status for the NorthKey desktop app.",
   "minimum_chrome_version": "116",
   "icons": {
@@ -23,6 +23,13 @@
       "js": ["content.js"],
       "run_at": "document_idle",
       "all_frames": false
+    },
+    {
+      "matches": ["https://*/*", "http://*/*"],
+      "js": ["inpage.js"],
+      "run_at": "document_start",
+      "all_frames": false,
+      "world": "MAIN"
     }
   ],
   "action": {
