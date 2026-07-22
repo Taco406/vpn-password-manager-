@@ -101,11 +101,15 @@ jobs:
           components: clippy
       - uses: Swatinem/rust-cache@v2
       - run: pnpm install --frozen-lockfile
-      # `tauri::generate_context!` embeds the frontend at compile time, so the dist must exist
-      # before the desktop crate compiles. macOS uses the system WebKit (no webkit2gtk needed),
-      # so unlike the Linux `rust` job this can build sentinel-desktop — which is how the
-      # macOS-specific code (Touch ID, VPN platform gating) gets verified before merge.
+      # `tauri::generate_context!` embeds the frontend at compile time, and tauri-build validates
+      # the bundled `resources/extension` path — so both the frontend dist and the staged
+      # extension must exist before the desktop crate compiles (mirrors the app's
+      # beforeBuildCommand). macOS uses the system WebKit (no webkit2gtk needed), so unlike the
+      # Linux `rust` job this can build sentinel-desktop — which is how the macOS-specific code
+      # (Touch ID, VPN platform gating) gets verified before merge.
       - run: pnpm --filter @sentinel/desktop build
+      - run: pnpm --filter @sentinel/extension build
+      - run: node apps/desktop/scripts/stage-extension.mjs
       - name: clippy (desktop, macOS)
         run: cargo clippy -p sentinel-desktop --all-targets -- -D warnings
       - name: test (desktop, macOS)
