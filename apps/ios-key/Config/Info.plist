@@ -40,6 +40,18 @@
 	     go "Ready to Test" automatically instead of stopping at a manual compliance dialog. -->
 	<key>ITSAppUsesNonExemptEncryption</key>
 	<false/>
+	<!-- App Transport Security: the personal sync server is reached by raw IP with a self-signed
+	     certificate that the app PINS itself (exact-DER match in CertPinDelegate — stronger than
+	     CA trust). ATS at its defaults rejects a self-signed IP endpoint BEFORE the pinning
+	     delegate can accept it, surfacing as NSURLErrorSecureConnectionFailed (-1200) — which is
+	     exactly why the phone couldn't sign in while the desktop (no ATS) and Safari (manual
+	     bypass) could. Turning ATS off hands trust entirely to our certificate pinning, which is
+	     the whole security model here. No plaintext ever rides these connections. -->
+	<key>NSAppTransportSecurity</key>
+	<dict>
+		<key>NSAllowsArbitraryLoads</key>
+		<true/>
+	</dict>
 	<!-- Why the app asks for the camera and Face ID (App Store requires a reason string). -->
 	<key>NSCameraUsageDescription</key>
 	<string>Scan the Add-a-device QR from NorthKey on your computer to connect this phone.</string>
