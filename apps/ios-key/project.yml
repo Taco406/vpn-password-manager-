@@ -47,6 +47,8 @@ targets:
         # iPhone only (no iPad layout).
         TARGETED_DEVICE_FAMILY: "1"
         GENERATE_INFOPLIST_FILE: NO
+        # App Store / TestFlight require an asset-catalog app icon (single 1024px universal).
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         SWIFT_OBJC_BRIDGING_HEADER: NorthKey/Bridging.h
         HEADER_SEARCH_PATHS:
           - "$(SRCROOT)/Vendor/argon2/include"
