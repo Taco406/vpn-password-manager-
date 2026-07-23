@@ -14,7 +14,7 @@ use super::manager::{
 use super::provider::InstanceState;
 use crate::error::{CoreError, Result};
 use async_trait::async_trait;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use time::format_description::well_known::Rfc3339;
 use time::OffsetDateTime;
 
@@ -380,6 +380,135 @@ fn parse_actions(body: &str) -> Result<Vec<ServerEvent>> {
     Ok(out)
 }
 
+// --- /firewalls -------------------------------------------------------------
+
+/// One firewall rule, in Hetzner's exact wire shape so a read→modify→write round-trip is
+/// lossless. Empty vectors are dropped on write (Hetzner rejects `destination_ips` on an `in`
+/// rule and vice-versa), and `port`/`description` are omitted when absent.
+#[derive(Deserialize, Serialize, Clone, Debug, PartialEq)]
+pub struct FirewallRule {
+    pub direction: String, // "in" | "out"
+    pub protocol: String,  // "tcp" | "udp" | "icmp" | "esp" | "gre"
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub port: Option<String>, // "19999", "80-85", or None (icmp/esp/gre)
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub source_ips: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub destination_ips: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+}
+
+/// A Hetzner Cloud Firewall with the servers it's applied to and its current rule set.
+#[derive(Clone, Debug)]
+pub struct Firewall {
+    pub id: u64,
+    pub name: String,
+    pub rules: Vec<FirewallRule>,
+    pub applied_server_ids: Vec<u64>,
+}
+
+#[derive(Deserialize)]
+struct FirewallsPage {
+    #[serde(default)]
+    firewalls: Vec<HetznerFirewall>,
+}
+#[derive(Deserialize)]
+struct HetznerFirewall {
+    id: u64,
+    #[serde(default)]
+    name: String,
+    #[serde(default)]
+    rules: Vec<FirewallRule>,
+    #[serde(default)]
+    applied_to: Vec<AppliedTo>,
+}
+#[derive(Deserialize)]
+struct AppliedTo {
+    #[serde(default)]
+    server: Option<AppliedServer>,
+}
+#[derive(Deserialize)]
+struct AppliedServer {
+    id: u64,
+}
+
+/// Parse a `/firewalls` body → firewalls with their applied-server ids.
+fn parse_firewalls(body: &str) -> Result<Vec<Firewall>> {
+    let page: FirewallsPage = serde_json::from_str(body)
+        .map_err(|e| CoreError::Network(format!("Hetzner API: bad response ({e})")))?;
+    Ok(page
+        .firewalls
+        .into_iter()
+        .map(|f| Firewall {
+            id: f.id,
+            name: f.name,
+            rules: f.rules,
+            applied_server_ids: f
+                .applied_to
+                .into_iter()
+                .filter_map(|a| a.server.map(|s| s.id))
+                .collect(),
+        })
+        .collect())
+}
+
+impl HetznerClient {
+    /// List every firewall on the account (with its rules + applied servers).
+    pub async fn list_firewalls(&self) -> Result<Vec<Firewall>> {
+        let resp = self
+            .http
+            .get(format!("{API}/firewalls?per_page=50"))
+            .bearer_auth(&self.token)
+            .send()
+            .await
+            .map_err(Self::net)?;
+        let body = Self::body_ok(resp).await?;
+        parse_firewalls(&body)
+    }
+
+    /// Replace a firewall's ENTIRE rule set (Hetzner has no add-one-rule endpoint). Callers
+    /// must read the current rules, append, and pass the full list — never a partial set.
+    pub async fn set_firewall_rules(&self, firewall_id: u64, rules: &[FirewallRule]) -> Result<()> {
+        let resp = self
+            .http
+            .post(format!("{API}/firewalls/{firewall_id}/actions/set_rules"))
+            .bearer_auth(&self.token)
+            .json(&serde_json::json!({ "rules": rules }))
+            .send()
+            .await
+            .map_err(Self::net)?;
+        Self::body_ok(resp).await.map(|_| ())
+    }
+
+    /// Create a firewall with `rules` and apply it to `server_id`. Returns the new firewall id.
+    /// Used when a server has no firewall yet and the user asks to open a port.
+    pub async fn create_firewall(
+        &self,
+        name: &str,
+        rules: &[FirewallRule],
+        server_id: u64,
+    ) -> Result<u64> {
+        let resp = self
+            .http
+            .post(format!("{API}/firewalls"))
+            .bearer_auth(&self.token)
+            .json(&serde_json::json!({
+                "name": name,
+                "rules": rules,
+                "apply_to": [{ "type": "server", "server": { "id": server_id } }],
+            }))
+            .send()
+            .await
+            .map_err(Self::net)?;
+        let body = Self::body_ok(resp).await?;
+        serde_json::from_str::<serde_json::Value>(&body)
+            .ok()
+            .and_then(|v| v.get("firewall")?.get("id")?.as_u64())
+            .ok_or_else(|| CoreError::Network("Hetzner API: firewall create returned no id".into()))
+    }
+}
+
 // --- the client -------------------------------------------------------------
 
 #[async_trait]
@@ -619,6 +748,29 @@ mod tests {
         assert!((snaps[0].size_gb.unwrap() - 3.0).abs() < 1e-9);
         assert_eq!(snaps[1].label, "before-upgrade");
         assert!(snaps[1].created_at.unwrap() < snaps[0].created_at.unwrap());
+    }
+
+    #[test]
+    fn parses_firewalls_with_rules_and_applied_servers() {
+        let body = r#"{"firewalls": [{
+            "id": 77, "name": "coolify",
+            "rules": [
+                {"direction":"in","protocol":"tcp","port":"22","source_ips":["0.0.0.0/0","::/0"],"destination_ips":[],"description":"ssh"},
+                {"direction":"in","protocol":"tcp","port":"443","source_ips":["0.0.0.0/0"]}
+            ],
+            "applied_to": [{"type":"server","server":{"id":42}}]
+        }]}"#;
+        let fws = parse_firewalls(body).unwrap();
+        assert_eq!(fws.len(), 1);
+        let f = &fws[0];
+        assert_eq!(f.id, 77);
+        assert_eq!(f.applied_server_ids, vec![42]);
+        assert_eq!(f.rules.len(), 2);
+        assert_eq!(f.rules[0].port.as_deref(), Some("22"));
+        // Round-trips: an `in` rule serializes without the empty destination_ips.
+        let json = serde_json::to_string(&f.rules[0]).unwrap();
+        assert!(json.contains("\"source_ips\""), "{json}");
+        assert!(!json.contains("destination_ips"), "{json}");
     }
 
     #[test]
