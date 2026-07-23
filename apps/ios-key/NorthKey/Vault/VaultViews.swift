@@ -111,6 +111,13 @@ struct VaultListView: View {
     var body: some View {
         NavigationStack {
             List {
+                if vault.offline {
+                    Label(
+                        "Offline — showing your vault from the last sync. Changes are off until the server is reachable; pull down to retry.",
+                        systemImage: "wifi.slash")
+                        .font(.caption).foregroundColor(Color(hex: 0xFBBF24))
+                        .listRowBackground(Color(hex: 0x0F141C))
+                }
                 if let error = vault.error {
                     Text(error)
                         .font(.caption).foregroundColor(Color(hex: 0xF87171))

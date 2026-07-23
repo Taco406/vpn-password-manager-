@@ -12,6 +12,9 @@ final class VaultStore: ObservableObject {
     @Published var items: [VaultItem] = []
     @Published var busy = false
     @Published var error: String?
+    /// True when the vault on screen came from the offline snapshot because the server was
+    /// unreachable. Read-only mode: the list shows, edits are refused until back online.
+    @Published var offline = false
 
     private var vaultKey: Data?
     private var version: Int64 = 0
@@ -29,11 +32,20 @@ final class VaultStore: ObservableObject {
     // MARK: - Unlock
 
     /// Sign-in + master password: download the escrowed wrapped key, unwrap locally, pull.
+    /// When the server is unreachable, both steps fall back to the offline snapshot from the
+    /// last successful sync — the master password still gates everything.
     func unlock(masterPassword: String) async {
         busy = true
         error = nil
         do {
-            let blob = try await ApiClient.shared.getWrappedPasswordKey()
+            let blob: Data
+            do {
+                blob = try await ApiClient.shared.getWrappedPasswordKey()
+                Self.cacheWriteWrappedKey(blob)
+            } catch let e where Self.isTransport(e) {
+                guard let cached = Self.cacheReadWrappedKey() else { throw e }
+                blob = cached
+            }
             // Argon2id at 64 MiB — run off the main thread.
             let password = masterPassword
             let key = try await Task.detached(priority: .userInitiated) {
@@ -56,6 +68,7 @@ final class VaultStore: ObservableObject {
         error = nil
         do {
             let blob = try await ApiClient.shared.getWrappedPasswordKey()
+            Self.cacheWriteWrappedKey(blob)
             let key = try VaultCrypto.unwrapPasswordBlob(blob, kek: kek)
             vaultKey = key
             try await pull()
@@ -108,30 +121,46 @@ final class VaultStore: ObservableObject {
         items = []
         document = VaultDocument(format: 1, items: [], tombstones: [])
         version = 0
+        offline = false
     }
 
     // MARK: - Sync
 
     func pull() async throws {
         guard let key = vaultKey else { return }
-        if let (v, ct) = try await ApiClient.shared.getVault() {
-            let doc = try await Task.detached(priority: .userInitiated) {
-                try VaultCrypto.decodeSyncBlob(vaultKey: key, blob: ct, version: UInt64(v))
-            }.value
-            document = doc
-            version = v
-            items = doc.items.compactMap { b64 in
-                guard let env = Data(base64Encoded: b64) else { return nil }
-                return try? VaultCrypto.openItem(vaultKey: key, envelope: env)
+        do {
+            if let (v, ct) = try await ApiClient.shared.getVault() {
+                try await adopt(key: key, version: v, blob: ct)
+                Self.cacheWrite(version: v, blob: ct)
+            } else {
+                document = VaultDocument(format: 1, items: [], tombstones: [])
+                version = 0
+                items = []
+                Self.cacheClearBlob()
             }
-            // System items (synced app settings) are managed automatically — never listed.
-            .filter { !$0.tags.contains("northkey:system") }
-            .sorted { $0.title.localizedCaseInsensitiveCompare($1.title) == .orderedAscending }
-        } else {
-            document = VaultDocument(format: 1, items: [], tombstones: [])
-            version = 0
-            items = []
+            offline = false
+        } catch let e where Self.isTransport(e) {
+            // Server unreachable — show the snapshot from the last successful sync (read-only).
+            guard let (v, ct) = Self.cacheRead() else { throw e }
+            try await adopt(key: key, version: v, blob: ct)
+            offline = true
         }
+    }
+
+    /// Decode a sync blob and adopt it as the current document + visible item list.
+    private func adopt(key: Data, version v: Int64, blob ct: Data) async throws {
+        let doc = try await Task.detached(priority: .userInitiated) {
+            try VaultCrypto.decodeSyncBlob(vaultKey: key, blob: ct, version: UInt64(v))
+        }.value
+        document = doc
+        version = v
+        items = doc.items.compactMap { b64 in
+            guard let env = Data(base64Encoded: b64) else { return nil }
+            return try? VaultCrypto.openItem(vaultKey: key, envelope: env)
+        }
+        // System items (synced app settings) are managed automatically — never listed.
+        .filter { !$0.tags.contains("northkey:system") }
+        .sorted { $0.title.localizedCaseInsensitiveCompare($1.title) == .orderedAscending }
     }
 
     /// Insert-or-replace an item locally, then push. Retries once on a version conflict by
@@ -186,6 +215,14 @@ final class VaultStore: ObservableObject {
 
     private func applyAndPush(_ mutate: @escaping (Data) throws -> Void) async throws {
         guard let key = vaultKey else { return }
+        if offline {
+            // Give the server one chance to be back before refusing the edit outright.
+            try? await pull()
+            if offline {
+                throw ApiError.transport(
+                    "you're offline, so this vault is read-only right now. Reconnect and try again.")
+            }
+        }
         for attempt in 0..<2 {
             try mutate(key)
             let doc = document
@@ -202,5 +239,57 @@ final class VaultStore: ObservableObject {
             try await pull()
             if attempt == 1 { throw ApiError.http(409, "sync conflict — try again") }
         }
+    }
+
+    // MARK: - Offline snapshot (server-side ciphertext only — the same bytes the server stores,
+    // so keeping them on the phone changes nothing about the zero-knowledge model)
+
+    private static var cacheDir: URL {
+        let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+        let dir = base.appendingPathComponent("NorthKey", isDirectory: true)
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        return dir
+    }
+    private static var blobFile: URL { cacheDir.appendingPathComponent("vault-cache.bin") }
+    private static var versionFile: URL { cacheDir.appendingPathComponent("vault-cache-version") }
+    private static var wrappedKeyFile: URL { cacheDir.appendingPathComponent("wrapped-key-4.bin") }
+
+    private static func cacheWrite(version: Int64, blob: Data) {
+        try? blob.write(to: blobFile, options: [.atomic, .completeFileProtection])
+        try? String(version).data(using: .utf8)?
+            .write(to: versionFile, options: [.atomic, .completeFileProtection])
+    }
+
+    private static func cacheRead() -> (Int64, Data)? {
+        guard let blob = try? Data(contentsOf: blobFile),
+              let vdata = try? Data(contentsOf: versionFile),
+              let vs = String(data: vdata, encoding: .utf8),
+              let v = Int64(vs.trimmingCharacters(in: .whitespacesAndNewlines))
+        else { return nil }
+        return (v, blob)
+    }
+
+    private static func cacheClearBlob() {
+        try? FileManager.default.removeItem(at: blobFile)
+        try? FileManager.default.removeItem(at: versionFile)
+    }
+
+    static func cacheWriteWrappedKey(_ blob: Data) {
+        try? blob.write(to: wrappedKeyFile, options: [.atomic, .completeFileProtection])
+    }
+
+    static func cacheReadWrappedKey() -> Data? {
+        try? Data(contentsOf: wrappedKeyFile)
+    }
+
+    /// Remove everything cached for offline use ("forget server" calls this).
+    static func clearOfflineCache() {
+        cacheClearBlob()
+        try? FileManager.default.removeItem(at: wrappedKeyFile)
+    }
+
+    private static func isTransport(_ error: Error) -> Bool {
+        if case ApiError.transport = error { return true }
+        return false
     }
 }

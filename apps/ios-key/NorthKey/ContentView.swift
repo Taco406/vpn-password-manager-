@@ -50,6 +50,7 @@ struct ContentView: View {
         vault.error = nil
         Keychain.delete(KeychainAccounts.serverConfig)
         Keychain.delete(KeychainAccounts.session)
+        VaultStore.clearOfflineCache()
         configured = false
     }
 }

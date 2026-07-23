@@ -155,6 +155,21 @@ enum ApiError: Error, LocalizedError {
         case let .transport(m): return "Couldn't reach the server: \(m)"
         }
     }
+
+    /// Full technical detail for a thrown connection error — domain, code, and the underlying
+    /// error chain — so a screenshot of the phone's error is enough to diagnose TLS/DNS/socket
+    /// failures without a debugger attached.
+    static func describe(_ error: Error) -> String {
+        if let api = error as? ApiError { return api.localizedDescription }
+        let ns = error as NSError
+        var parts = ["\(ns.localizedDescription) [\(ns.domain) \(ns.code)]"]
+        var underlying = ns.userInfo[NSUnderlyingErrorKey] as? NSError
+        while let u = underlying {
+            parts.append("\(u.localizedDescription) [\(u.domain) \(u.code)]")
+            underlying = u.userInfo[NSUnderlyingErrorKey] as? NSError
+        }
+        return parts.joined(separator: " — ")
+    }
 }
 
 /// One client, serialized so a burst of calls doesn't mint parallel sessions. `@MainActor`-free:
@@ -209,18 +224,37 @@ actor ApiClient {
 
     /// Onboard from the desktop's "Add a device" QR: pin the server cert, redeem the one-time
     /// enrollment code, and store the minted session. No long-lived secret ever enters the phone.
+    /// A failed attempt rolls the stored config back — a config that never connected must not
+    /// survive a relaunch, or the app opens onto an unlock screen for a server it never joined.
     func configureFromQR(ip: String, certPEM: String, enrollCode: String) async throws {
+        let previousConfig = Keychain.read(configAccount)
         let cfg = ServerConfig(baseUrl: "https://\(ip)", bootstrapToken: nil, certPEM: certPEM)
         if let data = try? encoder.encode(cfg) { Keychain.write(configAccount, data) }
         Keychain.delete(sessionAccount)
         cachedSession = nil // rebuild with the new pin
-        let body: [String: Any] = [
-            "code": enrollCode,
-            "device": ["name": "NorthKey iPhone", "platform": "ios"],
-        ]
-        let data = try await send("POST", "/v1/auth/enroll", bearer: nil, jsonBody: body)
-        let tokens = try decoder.decode(TokenResponse.self, from: data)
-        _ = store(tokens)
+        do {
+            let body: [String: Any] = [
+                "code": enrollCode,
+                "device": ["name": "NorthKey iPhone", "platform": "ios"],
+            ]
+            let data = try await send("POST", "/v1/auth/enroll", bearer: nil, jsonBody: body)
+            let tokens = try decoder.decode(TokenResponse.self, from: data)
+            _ = store(tokens)
+        } catch {
+            restoreConfig(previousConfig)
+            throw error
+        }
+    }
+
+    /// Put the stored server config back the way it was before a failed connect attempt.
+    private func restoreConfig(_ previous: Data?) {
+        if let previous {
+            Keychain.write(configAccount, previous)
+        } else {
+            Keychain.delete(configAccount)
+        }
+        Keychain.delete(sessionAccount)
+        cachedSession = nil
     }
 
     // MARK: - THE login (v0.1.48): server address + master password (+ 6-digit code)
@@ -242,7 +276,12 @@ actor ApiClient {
         guard let metaUrl = URL(string: "\(baseUrl)/v1/meta") else {
             throw ApiError.transport("bad address")
         }
-        let (_, resp) = try await session.data(from: metaUrl)
+        let resp: URLResponse
+        do {
+            resp = try await session.data(from: metaUrl).1
+        } catch {
+            throw ApiError.transport(ApiError.describe(error))
+        }
         guard let http = resp as? HTTPURLResponse, (200..<300).contains(http.statusCode),
               let der = capture.leafDER
         else {
@@ -267,34 +306,42 @@ actor ApiClient {
     /// and pin the probed cert for every later call. Returns the derived KEK so the vault can be
     /// unwrapped without a second Argon2 run, or nil when a 6-digit code is required.
     func passwordLogin(probe p: ServerProbe, password: String, code: String?) async throws -> Data? {
-        // Pin FIRST, so params + login already run over the pinned connection.
+        // Pin FIRST, so params + login already run over the pinned connection. Like the QR path,
+        // a failed login rolls the stored config back so a half-configured server can't strand
+        // the app on its unlock screen after a relaunch.
+        let previousConfig = Keychain.read(configAccount)
         let cfg = ServerConfig(baseUrl: p.baseUrl, bootstrapToken: nil, certPEM: p.certPEM)
         if let data = try? encoder.encode(cfg) { Keychain.write(configAccount, data) }
         Keychain.delete(sessionAccount)
         cachedSession = nil
 
-        let data = try await send("GET", "/v1/auth/password/params", bearer: nil, body: nil)
-        guard let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let saltB64 = obj["salt_b64"] as? String,
-              let salt = Data(base64Encoded: saltB64), salt.count == 16
-        else { throw ApiError.badResponse }
-
-        let kek = try VaultCrypto.argon2idKek(password: password, salt: salt)
-        let proof = VaultCrypto.loginProof(kek: kek)
-        var body: [String: Any] = [
-            "proof_b64": proof.base64EncodedString(),
-            "device": ["name": "NorthKey iPhone", "platform": "ios"],
-        ]
-        if let code, !code.trimmingCharacters(in: .whitespaces).isEmpty {
-            body["code"] = code.trimmingCharacters(in: .whitespaces)
-        }
         do {
-            let data = try await send("POST", "/v1/auth/password", bearer: nil, jsonBody: body)
-            let tokens = try decoder.decode(TokenResponse.self, from: data)
-            _ = store(tokens)
-            return kek
-        } catch let ApiError.http(400, msg) where msg.contains("totp_required") {
-            return nil // second factor needed — the UI shows the 6-digit field and retries
+            let data = try await send("GET", "/v1/auth/password/params", bearer: nil, body: nil)
+            guard let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let saltB64 = obj["salt_b64"] as? String,
+                  let salt = Data(base64Encoded: saltB64), salt.count == 16
+            else { throw ApiError.badResponse }
+
+            let kek = try VaultCrypto.argon2idKek(password: password, salt: salt)
+            let proof = VaultCrypto.loginProof(kek: kek)
+            var body: [String: Any] = [
+                "proof_b64": proof.base64EncodedString(),
+                "device": ["name": "NorthKey iPhone", "platform": "ios"],
+            ]
+            if let code, !code.trimmingCharacters(in: .whitespaces).isEmpty {
+                body["code"] = code.trimmingCharacters(in: .whitespaces)
+            }
+            do {
+                let data = try await send("POST", "/v1/auth/password", bearer: nil, jsonBody: body)
+                let tokens = try decoder.decode(TokenResponse.self, from: data)
+                _ = store(tokens)
+                return kek
+            } catch let ApiError.http(400, msg) where msg.contains("totp_required") {
+                return nil // second factor needed — the UI shows the 6-digit field and retries
+            }
+        } catch {
+            restoreConfig(previousConfig)
+            throw error
         }
     }
 
@@ -412,8 +459,17 @@ actor ApiClient {
     /// Force a fresh access token: rotate via the refresh token if we have one, else re-bootstrap
     /// (keeping the refresh token means a normal rotation doesn't enroll a new device row).
     private func renew() async throws -> String {
-        if let s = loadSession(), let refreshed = try? await refresh(using: s.refreshToken) {
-            return refreshed
+        if let s = loadSession() {
+            do {
+                return try await refresh(using: s.refreshToken)
+            } catch let ApiError.transport(m) {
+                // Offline is not "signed out". Surface the transport failure so callers can fall
+                // back to the offline vault snapshot — falling through to bootstrap() would turn
+                // "no signal" into a bogus "no sync server is configured" error.
+                throw ApiError.transport(m)
+            } catch {
+                // The refresh chain was revoked or rejected — try a fresh bootstrap below.
+            }
         }
         return try await bootstrap()
     }
@@ -483,7 +539,7 @@ actor ApiClient {
         do {
             (data, resp) = try await session.data(for: req)
         } catch {
-            throw ApiError.transport(error.localizedDescription)
+            throw ApiError.transport(ApiError.describe(error))
         }
         guard let http = resp as? HTTPURLResponse else { throw ApiError.badResponse }
         guard (200..<300).contains(http.statusCode) else {
