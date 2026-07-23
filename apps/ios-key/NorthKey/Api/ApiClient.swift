@@ -400,6 +400,81 @@ actor ApiClient {
         return v
     }
 
+    // MARK: - File transfer ("send to my devices") — opaque SFIL ciphertext only
+
+    /// One transfer row as the server lists it (the filename stays sealed inside the blob).
+    struct TransferRow: Decodable, Identifiable {
+        let id: String
+        let senderDeviceId: String
+        let recipientDeviceId: String?
+        let sizeBytes: Int64
+        let state: String
+        let createdAt: Int64
+        let expiresAt: Int64
+        let outgoing: Bool
+        enum CodingKeys: String, CodingKey {
+            case id
+            case senderDeviceId = "sender_device_id"
+            case recipientDeviceId = "recipient_device_id"
+            case sizeBytes = "size_bytes"
+            case state
+            case createdAt = "created_at"
+            case expiresAt = "expires_at"
+            case outgoing
+        }
+    }
+
+    /// Transfers this phone can see: incoming (addressed to it or "all my devices") + its outgoing.
+    func listTransfers() async throws -> [TransferRow] {
+        let data = try await authedJSON("GET", "/v1/transfers", jsonBody: nil)
+        struct L: Decodable { let transfers: [TransferRow] }
+        return (try? decoder.decode(L.self, from: data))?.transfers ?? []
+    }
+
+    /// Upload an opaque SFIL blob for one device (or all this account's devices when nil).
+    func createTransfer(recipientDeviceId: String?, sizeBytes: Int, ciphertext: Data) async throws
+        -> String
+    {
+        var body: [String: Any] = [
+            "size_bytes": sizeBytes,
+            "ciphertext_b64": ciphertext.base64EncodedString(),
+        ]
+        body["recipient_device_id"] = recipientDeviceId ?? NSNull()
+        let data = try await authedJSON("POST", "/v1/transfers", jsonBody: body)
+        guard let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let id = obj["id"] as? String
+        else { throw ApiError.badResponse }
+        return id
+    }
+
+    /// Download one transfer's ciphertext (the caller opens it with `VaultCrypto.openFileBlob`).
+    func downloadTransfer(id: String) async throws -> Data {
+        let data = try await authedJSON("GET", "/v1/transfers/\(id)", jsonBody: nil)
+        guard let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let b64 = obj["ciphertext_b64"] as? String,
+              let ct = Data(base64Encoded: b64)
+        else { throw ApiError.badResponse }
+        return ct
+    }
+
+    func deleteTransfer(id: String) async throws {
+        _ = try await authedJSON("DELETE", "/v1/transfers/\(id)", jsonBody: nil)
+    }
+
+    /// The account's devices (id + name + platform), so the sender can pick a recipient.
+    func listDevices() async throws -> [DeviceRow] {
+        let data = try await authedJSON("GET", "/v1/devices", jsonBody: nil)
+        struct L: Decodable { let devices: [DeviceRow] }
+        return (try? decoder.decode(L.self, from: data))?.devices ?? []
+    }
+
+    struct DeviceRow: Decodable, Identifiable {
+        let id: String
+        let name: String
+        let platform: String
+        let current: Bool?
+    }
+
     // MARK: - Endpoints
 
     /// Register the APNs device token so unlock pushes can wake the app.
@@ -445,6 +520,20 @@ actor ApiClient {
             // The token was revoked between the expiry check and the call — renew and retry once.
             let fresh = try await renew()
             return try await send(method, path, bearer: fresh, body: body)
+        }
+    }
+
+    /// Like `authed`, but with an arbitrary JSON body (used by the transfer endpoints, which send
+    /// a null field + an integer). Same refresh-on-401-and-retry-once behaviour.
+    private func authedJSON(_ method: String, _ path: String, jsonBody: [String: Any]?) async throws
+        -> Data
+    {
+        let token = try await validAccessToken()
+        do {
+            return try await send(method, path, bearer: token, jsonBody: jsonBody)
+        } catch ApiError.http(let code, _) where code == 401 {
+            let fresh = try await renew()
+            return try await send(method, path, bearer: fresh, jsonBody: jsonBody)
         }
     }
 

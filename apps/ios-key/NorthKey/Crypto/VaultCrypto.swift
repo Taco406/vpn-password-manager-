@@ -110,6 +110,7 @@ enum VaultCrypto {
     static let infoVaultOuter = "sentinel/v1/vault/outer"
     static let infoVaultItem = "sentinel/v1/vault/item"
     static let infoAuthLogin = "sentinel/v1/auth/login"
+    static let infoFileBlob = "sentinel/v1/file/blob"
 
     static func hkdf32(ikm: Data, salt: Data?, info: String) -> Data {
         let key = HKDF<SHA256>.deriveKey(
@@ -243,6 +244,64 @@ enum VaultCrypto {
         let key = hkdf32(ikm: vaultKey, salt: idBytes, info: infoVaultItem)
         let (nonce, ct) = try xchachaSeal(key: key, plaintext: json, aad: header)
         return header + nonce + ct
+    }
+
+    // MARK: - File transfer blob (SFIL) — matches crates/core/src/vault/fileblob.rs
+    //   "SFIL" | ver=1 | 0 0 0 | salt16 | nonce24 | ct
+    //   plaintext = meta_len(u32 LE) | meta_json | file_bytes, then zstd(3)
+    //   AAD = header(8) ‖ salt(16);  key = HKDF(vault_key, salt, "sentinel/v1/file/blob")
+
+    /// Filename + mime, sealed inside the blob (the server never sees them). Matches Rust `FileMeta`.
+    struct FileMeta: Codable {
+        var filename: String
+        var mime: String
+    }
+
+    /// Open a received transfer blob into its metadata and raw file bytes.
+    static func openFileBlob(vaultKey: Data, blob: Data) throws -> (meta: FileMeta, bytes: Data) {
+        guard blob.count >= 8 + 16 + 24 + 16,
+              blob.prefix(4) == Data("SFIL".utf8), blob[4] == 1
+        else { throw VaultCryptoError.badFormat("file blob") }
+        let header = blob.prefix(8)
+        let salt = blob.subdata(in: 8..<24)
+        let nonce = blob.subdata(in: 24..<48)
+        let ct = blob.subdata(in: 48..<blob.count)
+        var aad = Data(header)
+        aad.append(salt)
+        let key = hkdf32(ikm: vaultKey, salt: salt, info: infoFileBlob)
+        let compressed = try xchachaOpen(key: key, nonce24: nonce, ciphertext: ct, aad: aad)
+        let plaintext = try Zstd.decompress(compressed)
+        guard plaintext.count >= 4 else { throw VaultCryptoError.badFormat("file plaintext") }
+        let b = [UInt8](plaintext)
+        let metaLen = Int(b[0]) | Int(b[1]) << 8 | Int(b[2]) << 16 | Int(b[3]) << 24
+        guard metaLen >= 0, plaintext.count >= 4 + metaLen else {
+            throw VaultCryptoError.badFormat("file meta length")
+        }
+        let metaJson = plaintext.subdata(in: 4..<(4 + metaLen))
+        let fileBytes = plaintext.subdata(in: (4 + metaLen)..<plaintext.count)
+        let meta = try JSONDecoder().decode(FileMeta.self, from: metaJson)
+        return (meta, fileBytes)
+    }
+
+    /// Seal a file (name + mime + bytes) into a transfer blob for the user's other devices.
+    static func sealFileBlob(vaultKey: Data, meta: FileMeta, bytes: Data) throws -> Data {
+        var salt = Data(count: 16)
+        _ = salt.withUnsafeMutableBytes { SecRandomCopyBytes(kSecRandomDefault, 16, $0.baseAddress!) }
+        let metaJson = try JSONEncoder().encode(meta)
+        var plaintext = Data()
+        var len = UInt32(metaJson.count).littleEndian
+        withUnsafeBytes(of: &len) { plaintext.append(contentsOf: $0) }
+        plaintext.append(metaJson)
+        plaintext.append(bytes)
+        let compressed = try Zstd.compress(plaintext, level: 3)
+
+        var header = Data("SFIL".utf8)
+        header.append(contentsOf: [1, 0, 0, 0])
+        var aad = header
+        aad.append(salt)
+        let key = hkdf32(ikm: vaultKey, salt: salt, info: infoFileBlob)
+        let (nonce, ct) = try xchachaSeal(key: key, plaintext: compressed, aad: aad)
+        return header + salt + nonce + ct
     }
 }
 
