@@ -1,4 +1,4 @@
-import { useEffect, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useState, type ReactNode } from "react";
 import {
   Cloud,
   LogIn,
@@ -43,12 +43,16 @@ import {
   syncUnbanIp,
   syncProbeServer,
   syncPasswordSignin,
+  settingsSyncWrite,
+  settingsSyncStatus,
+  onSyncApplied,
   type ServerProbe,
   type SyncServerStatus,
   type SyncStatusInfo,
   type SyncDevice,
   type SecurityEvent,
   type SecuritySummary,
+  type SettingsSyncStatusInfo,
 } from "../bridge";
 import { Card, SectionTitle, Badge } from "../components/ui";
 import { inputCls, btnCls, errMsg } from "../components/kit";
@@ -1282,6 +1286,7 @@ function AccountSync({ sync, onSyncChange }: { sync: SyncStatusInfo | null; onSy
     try {
       const r = await syncNow();
       setMsg(`${r.pulled ? "Pulled remote changes. " : ""}Pushed. Now at version ${r.version}.`);
+      await onSyncChange();
     } catch (e) {
       setMsg(errMsg(e));
     }
@@ -1410,7 +1415,10 @@ function AccountSync({ sync, onSyncChange }: { sync: SyncStatusInfo | null; onSy
           {/* add a device — THE way to put your vault on another computer/phone */}
           <AddDeviceBlock busy={busy} pairCode={pairCode} onAdd={() => void addDevice()} />
 
-          {/* sync now */}
+          {/* shared settings status — what's shared across your devices (no secret values) */}
+          <SharedSettings />
+
+          {/* sync now — rarely needed; auto-sync runs in the background */}
           <div>
             <button
               onClick={doSync}
@@ -1419,6 +1427,9 @@ function AccountSync({ sync, onSyncChange }: { sync: SyncStatusInfo | null; onSy
             >
               <RefreshCw size={15} /> Sync now
             </button>
+            <span className="ml-2 text-xs text-[var(--text-muted)]">
+              Auto-syncs in the background — you rarely need this.
+            </span>
           </div>
 
           {/* unlock a fresh device with the master password */}
@@ -1676,5 +1687,99 @@ function AccountSync({ sync, onSyncChange }: { sync: SyncStatusInfo | null; onSy
 
       {msg && <p className="mt-3 text-xs text-[var(--text-muted)]">{msg}</p>}
     </Card>
+  );
+}
+
+/** Relative "N min/h/d ago" for the shared-settings last-updated line. */
+function timeAgo(unix: number): string {
+  if (!unix) return "";
+  const secs = Math.max(0, Math.floor(Date.now() / 1000) - unix);
+  if (secs < 60) return "just now";
+  const mins = Math.floor(secs / 60);
+  if (mins < 60) return `${mins} min ago`;
+  const hrs = Math.floor(mins / 60);
+  if (hrs < 24) return `${hrs}h ago`;
+  return `${Math.floor(hrs / 24)}d ago`;
+}
+
+/** The visible "Shared settings" status: which non-secret provider settings ride the encrypted
+ * vault to every signed-in device (Linode / Hetzner / Google / Netdata monitors), when they were
+ * last written, and a button to push the current device's settings to the others. No secret values
+ * are shown or fetched — only booleans + a timestamp (see `settings_sync_status`). */
+function SharedSettings() {
+  const [st, setSt] = useState<SettingsSyncStatusInfo | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState("");
+
+  const refresh = useCallback(async () => {
+    try {
+      setSt(await settingsSyncStatus());
+    } catch {
+      /* best-effort */
+    }
+  }, []);
+
+  useEffect(() => {
+    void refresh();
+    // The background auto-sync applies pulled settings; refresh the status when it does.
+    let unsub: (() => void) | undefined;
+    void onSyncApplied(() => void refresh()).then((u) => (unsub = u));
+    return () => unsub?.();
+  }, [refresh]);
+
+  const push = async () => {
+    setBusy(true);
+    setMsg("Sharing your settings with your other devices…");
+    try {
+      await settingsSyncWrite();
+      await refresh();
+      setMsg("Shared. Your other devices pick these up on their next sync.");
+    } catch (e) {
+      setMsg(errMsg(e));
+    }
+    setBusy(false);
+  };
+
+  const rows: { label: string; on: boolean; hint: string }[] = [
+    { label: "Linode API token", on: !!st?.linode, hint: "VPN + server list" },
+    { label: "Hetzner API token", on: !!st?.hetzner, hint: "server list + firewall" },
+    { label: "Google sign-in", on: !!st?.google, hint: "OAuth client" },
+    { label: "Netdata monitors", on: !!st?.netdata, hint: "per-server dashboards" },
+  ];
+
+  return (
+    <div>
+      <div className="mb-1 flex items-center justify-between">
+        <div className="text-sm font-medium">Shared settings</div>
+        {st?.present && st.updatedAt > 0 && (
+          <span className="text-xs text-[var(--text-muted)]">updated {timeAgo(st.updatedAt)}</span>
+        )}
+      </div>
+      <p className="mb-2 text-xs text-[var(--text-secondary)]">
+        These non-secret settings ride your encrypted vault so every signed-in device — including
+        your phone — sees the same servers. The token values themselves are never shown here.
+      </p>
+      <div className="space-y-1">
+        {rows.map((r) => (
+          <div
+            key={r.label}
+            className="flex items-center justify-between rounded-[8px] bg-[var(--bg-inset)] px-2.5 py-1.5 text-xs"
+          >
+            <span>
+              {r.label} <span className="text-[var(--text-muted)]">· {r.hint}</span>
+            </span>
+            {r.on ? (
+              <Badge tone="ok">synced ✓</Badge>
+            ) : (
+              <span className="text-[var(--text-muted)]">not set</span>
+            )}
+          </div>
+        ))}
+      </div>
+      <button onClick={() => void push()} disabled={busy} className={`${btnCls} mt-2`}>
+        {busy ? "Sharing…" : "Push to all my devices"}
+      </button>
+      {msg && <p className="mt-2 text-xs text-[var(--text-muted)]">{msg}</p>}
+    </div>
   );
 }

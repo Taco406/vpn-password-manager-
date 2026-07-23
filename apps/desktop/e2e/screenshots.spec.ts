@@ -12,6 +12,8 @@ const SHOTS: { name: string; url: string; both?: boolean; wait?: number }[] = [
   { name: "vpn-connected", url: "/?unlocked=1&freeze=1&vpn=connected&region=eu-central#/vpn", both: true, wait: 600 },
   { name: "health", url: "/?unlocked=1&freeze=1#/health", both: false, wait: 300 },
   { name: "devices", url: "/?unlocked=1&freeze=1#/devices", both: false },
+  { name: "servers", url: "/?unlocked=1&freeze=1#/servers", both: false, wait: 300 },
+  { name: "transfers", url: "/?unlocked=1&freeze=1#/transfers", both: false, wait: 300 },
   { name: "settings", url: "/?unlocked=1&freeze=1#/settings", both: false },
   { name: "report", url: "/?unlocked=1&freeze=1#/report", both: false, wait: 300 },
 ];

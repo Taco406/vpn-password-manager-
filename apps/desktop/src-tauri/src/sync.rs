@@ -1115,15 +1115,16 @@ pub struct TransferSendOut {
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TransferDownloadOut {
-    /// Final path the decrypted file was written to.
-    pub path: String,
     pub filename: String,
     pub size_bytes: i64,
     pub mime: String,
+    /// The decrypted file bytes, base64. The UI saves them via a browser download (no filesystem
+    /// path crosses the bridge, so nothing can be written outside the user's chosen location).
+    pub data_b64: String,
 }
 
-/// Reduce any path to its bare file-name component, defending against a malicious/garbled sealed
-/// `filename` (e.g. `../../etc/foo`) that could otherwise escape the chosen download folder.
+/// Reduce any path/name to its bare file-name component, defending against a malicious/garbled
+/// sealed `filename` (e.g. `../../etc/foo`) that could otherwise mislead the receiver's save.
 fn safe_basename(name: &str) -> String {
     let base = Path::new(name)
         .file_name()
@@ -1165,22 +1166,25 @@ fn guess_mime(filename: &str) -> String {
     m.to_string()
 }
 
-/// Seal a local file and upload it for one device (or all this account's devices when `None`).
+/// Seal a file (`filename` + base64 `data_b64` from the UI's file picker) and upload it for one
+/// device (or all this account's devices when `recipient_device_id` is `None`). The bytes ride the
+/// bridge as base64 — no filesystem path crosses in, so the app only ever reads what the user picked.
 #[tauri::command]
 pub async fn transfer_send(
     state: State<'_, AppState>,
     recipient_device_id: Option<String>,
-    file_path: String,
+    filename: String,
+    data_b64: String,
 ) -> Result<TransferSendOut, String> {
     let vk = session_vault_key(&state)?;
     let api = api_for(&state)?;
 
-    let bytes = std::fs::read(&file_path).map_err(|e| format!("read {file_path}: {e}"))?;
+    let bytes = STANDARD.decode(data_b64.trim()).map_err(estr)?;
     if bytes.is_empty() {
         return Err("that file is empty".into());
     }
     let plaintext_size = bytes.len() as i64;
-    let filename = safe_basename(&file_path);
+    let filename = safe_basename(&filename);
     let meta = FileMeta {
         filename: filename.clone(),
         mime: guess_mime(&filename),
@@ -1211,14 +1215,13 @@ pub async fn transfer_list(state: State<'_, AppState>) -> Result<Vec<TransferRow
     api.list_transfers().await
 }
 
-/// Download + decrypt one transfer into `dir`, writing the sealed filename (sanitized) inside it.
-/// Returns the final path so the UI can reveal it. Does NOT delete the transfer — the recipient
-/// keeps it until they choose to (server TTL reaps it after 24h regardless).
+/// Download + decrypt one transfer, returning its sealed filename and bytes (base64) for the UI to
+/// save via a browser download. Does NOT delete the transfer — the recipient keeps it until they
+/// choose to (the server TTL reaps it after 24h regardless).
 #[tauri::command]
 pub async fn transfer_download(
     state: State<'_, AppState>,
     id: String,
-    dir: String,
 ) -> Result<TransferDownloadOut, String> {
     let vk = session_vault_key(&state)?;
     let api = api_for(&state)?;
@@ -1226,14 +1229,11 @@ pub async fn transfer_download(
     let ct = api.download_transfer(&id).await?;
     let (meta, data) = open_file(&vk, &ct).map_err(estr)?;
 
-    let name = safe_basename(&meta.filename);
-    let dest = Path::new(&dir).join(&name);
-    std::fs::write(&dest, &data).map_err(|e| format!("write {}: {e}", dest.display()))?;
     Ok(TransferDownloadOut {
-        path: dest.to_string_lossy().to_string(),
-        filename: name,
+        filename: safe_basename(&meta.filename),
         size_bytes: data.len() as i64,
         mime: meta.mime,
+        data_b64: STANDARD.encode(&data),
     })
 }
 
@@ -1825,6 +1825,59 @@ pub async fn settings_sync_write(state: State<'_, AppState>) -> Result<(), Strin
         let _ = push_document(&api, &vk, &state, current).await;
     }
     Ok(())
+}
+
+/// A non-secret view of the shared-settings item for the "Shared settings" status panel: which
+/// provider settings are present in the synced vault item and when it was last written. Only
+/// booleans + a timestamp cross the bridge — never a token, id, or secret value.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SettingsSyncStatus {
+    /// A synced settings item exists in the local vault.
+    pub present: bool,
+    /// When the item was last written (unix seconds), 0 if none.
+    pub updated_at: i64,
+    pub linode: bool,
+    pub google: bool,
+    pub hetzner: bool,
+    pub netdata: bool,
+}
+
+#[tauri::command]
+pub async fn settings_sync_status(
+    state: State<'_, AppState>,
+) -> Result<SettingsSyncStatus, String> {
+    let id = settings_item_id();
+    let item: Option<Item> = {
+        let g = state.inner.lock().unwrap();
+        match g.vault.get(id) {
+            Ok(Some(env)) => g.session.open(&env).ok(),
+            _ => None,
+        }
+    };
+    let Some(item) = item else {
+        return Ok(SettingsSyncStatus {
+            present: false,
+            updated_at: 0,
+            linode: false,
+            google: false,
+            hetzner: false,
+            netdata: false,
+        });
+    };
+    let set = |name: &str| {
+        item.custom_fields
+            .iter()
+            .any(|f| f.name == name && !f.value.trim().is_empty())
+    };
+    Ok(SettingsSyncStatus {
+        present: true,
+        updated_at: item.updated_at,
+        linode: set(SET_LINODE),
+        google: set(SET_GCLIENT),
+        hetzner: set(SET_HETZNER),
+        netdata: set(SET_NETDATA),
+    })
 }
 
 /// Enroll (or refresh) the master-password sign-in verifier from a type-4 SNTL blob + the
