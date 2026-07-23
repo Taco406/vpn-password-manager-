@@ -689,14 +689,19 @@ function NetdataLive({ s, onDisable }: { s: ManagedServer; onDisable: () => void
       }
     };
     const pillsTick = async () => {
-      try {
-        const last = async (kind: string) =>
-          (await netdataMetric(s.provider, s.id, host, kind, 15, 3)).at(-1)?.[1];
-        const [ram, load, disk] = await Promise.all([last("ram"), last("load"), last("disk")]);
-        if (alive) setPills({ ram, load, disk });
-      } catch {
-        /* pills are best-effort */
-      }
+      // Each pill is independent: fetch them in parallel but never let one chart's failure
+      // (e.g. a disk chart missing on some agent) blank the others. allSettled + last-known value.
+      const last = async (kind: string) =>
+        (await netdataMetric(s.provider, s.id, host, kind, 15, 3)).at(-1)?.[1];
+      const [ram, load, disk] = await Promise.allSettled([last("ram"), last("load"), last("disk")]);
+      const val = (r: PromiseSettledResult<number | undefined>) =>
+        r.status === "fulfilled" ? r.value : undefined;
+      if (alive)
+        setPills((prev) => ({
+          ram: val(ram) ?? prev.ram,
+          load: val(load) ?? prev.load,
+          disk: val(disk) ?? prev.disk,
+        }));
     };
     const alarmsTick = async () => {
       try {

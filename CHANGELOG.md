@@ -16,6 +16,11 @@ that bumps the app version** — that's how "the changelog updates on every merg
   "TLS error / secure connection failed" you saw). The app pins your exact server certificate
   itself — stronger than the check iOS was enforcing — so that check is now handed fully to the
   app. The desktop was never affected.
+- **Server live-monitoring: RAM, Load, and Disk now show real numbers.** They were stuck on "—"
+  because the app asked Netdata for the root-disk chart by an outdated name, and that one failed
+  request blanked the other two along with it. The disk chart name is corrected and each reading
+  is now independent, so one missing metric never hides the rest. (A richer server dashboard is
+  coming next.)
 
 ### Changed
 - **The Mac app is signed and notarized by Apple.** It opens with a normal double-click — no

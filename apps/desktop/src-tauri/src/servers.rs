@@ -701,7 +701,9 @@ pub async fn netdata_metric(
         "ram" => ("system.ram", netdata::ram_used_pct),
         "net" => ("system.net", netdata::net_total_bps),
         "load" => ("system.load", netdata::load1),
-        "disk" => ("disk_space._", netdata::disk_used_pct),
+        // Netdata names the root-filesystem chart `disk_space./` (the mount point is part of the
+        // id); the old `disk_space._` guess returns nothing on current agents.
+        "disk" => ("disk_space./", netdata::disk_used_pct),
         k => return Err(format!("unknown metric kind: {k}")),
     };
     let series = ep
