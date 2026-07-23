@@ -63,6 +63,31 @@ jobs:
           done
       - name: test server + core
         run: cargo test -p sentinel-api -p sentinel-core
+      # Make re-dispatching a failed release safe: a draft left by a previous run is deleted so
+      # the builds start clean (drafts have no git tag, so nothing else references them). A
+      # PUBLISHED release with this tag means installed apps may have already updated from it —
+      # refuse to rebuild it; bump the version instead.
+      - name: Reset stale draft (idempotent re-runs)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if [ "${{ github.ref_type }}" = "tag" ]; then
+            tag="${{ github.ref_name }}"
+          elif [ -n "${{ github.event.inputs.tag }}" ]; then
+            tag="${{ github.event.inputs.tag }}"
+          else
+            tag="v$(jq -r .version apps/desktop/src-tauri/tauri.conf.json)"
+          fi
+          state=$(gh release view "$tag" --json isDraft -q .isDraft 2>/dev/null || echo "absent")
+          if [ "$state" = "true" ]; then
+            echo "Deleting stale draft $tag left by a previous failed run"
+            gh release delete "$tag" --yes
+          elif [ "$state" = "false" ]; then
+            echo "::error::$tag is already published — bump the version instead of re-releasing it"
+            exit 1
+          else
+            echo "No existing release for $tag — clean start"
+          fi
 
   # Publish the sync-server image so a one-click "Deploy my sync server" can `docker run` it on a
   # fresh Linode (no on-box Rust build). Runs alongside the desktop release build.
@@ -99,6 +124,12 @@ jobs:
     needs: gate
     strategy:
       fail-fast: false
+      # SERIAL, not parallel: each platform job merges its entry into the shared latest.json
+      # asset on the draft (read → add my platform → overwrite). Run in parallel, two jobs can
+      # read the same base and the last writer erases the other's entry — this dropped darwin-*
+      # from v0.1.49's manifest (the finalize gate caught it). Slower wall-clock is fine;
+      # a manifest missing a platform bricks that platform's auto-update.
+      max-parallel: 1
       matrix:
         include:
           - platform: macos-latest
@@ -191,17 +222,36 @@ jobs:
           A_ID: ${{ secrets.APPLE_ID }}
           A_PW: ${{ secrets.APPLE_PASSWORD }}
           TEAM: ${{ secrets.APPLE_TEAM_ID }}
+          ASC_KEY_ID: ${{ secrets.APPSTORE_API_KEY_ID }}
+          ASC_ISSUER: ${{ secrets.APPSTORE_API_ISSUER_ID }}
+          ASC_KEY_P8: ${{ secrets.APPSTORE_API_PRIVATE_KEY }}
         run: |
           if [ -n "$CERT" ]; then
             {
               echo "APPLE_CERTIFICATE=$CERT"
               echo "APPLE_CERTIFICATE_PASSWORD=$CERT_PW"
               echo "APPLE_SIGNING_IDENTITY=$IDENTITY"
-              echo "APPLE_ID=$A_ID"
-              echo "APPLE_PASSWORD=$A_PW"
               echo "APPLE_TEAM_ID=$TEAM"
             } >> "$GITHUB_ENV"
-            echo "Apple signing configured — the macOS app will be signed + notarized."
+            # Notarization credential: prefer the App Store Connect API key (the same three
+            # APPSTORE_* secrets the TestFlight workflow uses — no extra setup), falling back
+            # to an Apple-ID + app-specific password if that's what's configured instead.
+            if [ -n "$ASC_KEY_P8" ]; then
+              mkdir -p "$RUNNER_TEMP/apple_keys"
+              printf '%s' "$ASC_KEY_P8" > "$RUNNER_TEMP/apple_keys/AuthKey_$ASC_KEY_ID.p8"
+              {
+                echo "APPLE_API_KEY=$ASC_KEY_ID"
+                echo "APPLE_API_ISSUER=$ASC_ISSUER"
+                echo "APPLE_API_KEY_PATH=$RUNNER_TEMP/apple_keys/AuthKey_$ASC_KEY_ID.p8"
+              } >> "$GITHUB_ENV"
+              echo "Apple signing configured — notarizing with the App Store Connect API key."
+            else
+              {
+                echo "APPLE_ID=$A_ID"
+                echo "APPLE_PASSWORD=$A_PW"
+              } >> "$GITHUB_ENV"
+              echo "Apple signing configured — notarizing with Apple ID + app-specific password."
+            fi
           else
             echo "No APPLE_CERTIFICATE secret set — building the macOS app UNSIGNED."
           fi

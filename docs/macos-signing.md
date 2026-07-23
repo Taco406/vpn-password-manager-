@@ -26,12 +26,15 @@ You need an **Apple Developer Program** membership ($99/yr). Do this once.
    security find-identity -v -p codesigning
    ```
 
-## 2. Create a notarization credential (app-specific password)
+## 2. Notarization credential — already done if TestFlight is set up
 
-1. At [appleid.apple.com](https://appleid.apple.com) → **Sign-In and Security → App-Specific
-   Passwords → +**, generate one (e.g. label it "NorthKey notarize"). Copy it.
-2. Find your **Team ID** at
-   [developer.apple.com/account](https://developer.apple.com/account) (top-right, 10 characters).
+If the `APPSTORE_API_KEY_ID` / `APPSTORE_API_ISSUER_ID` / `APPSTORE_API_PRIVATE_KEY` secrets
+exist (the iOS TestFlight setup adds them — see `docs/ios-testflight.md`), the release workflow
+notarizes the Mac app with that same App Store Connect API key. **Nothing more to create.**
+
+Only if those don't exist: generate an app-specific password at
+[appleid.apple.com](https://appleid.apple.com) → Sign-In and Security → App-Specific Passwords,
+and add it as `APPLE_PASSWORD` plus your Apple ID email as `APPLE_ID`.
 
 ## 3. Add the GitHub Actions secrets
 
@@ -43,9 +46,9 @@ names** (the release workflow already reads them; blank ⇒ unsigned build):
 | `APPLE_CERTIFICATE` | the base64 of your `.p12` (step 1.3) |
 | `APPLE_CERTIFICATE_PASSWORD` | the `.p12` export password (step 1.2) |
 | `APPLE_SIGNING_IDENTITY` | `Developer ID Application: Your Name (TEAMID)` (step 1.4) |
-| `APPLE_ID` | your Apple ID email |
-| `APPLE_PASSWORD` | the app-specific password (step 2.1) |
-| `APPLE_TEAM_ID` | your 10-char Team ID (step 2.2) |
+
+`APPLE_TEAM_ID` and the `APPSTORE_*` notarization key are already in place from the TestFlight
+setup — reused automatically.
 
 ## 4. Cut a release and verify
 
