@@ -283,6 +283,7 @@ jobs:
     runs-on: ubuntu-24.04
     permissions:
       contents: write
+      actions: write # to chain the iOS TestFlight build after publishing
     env:
       GH_TOKEN: ${{ github.token }}
     steps:
@@ -317,3 +318,8 @@ jobs:
           PY
       - name: publish
         run: gh release edit "${{ steps.rel.outputs.tag }}" --draft=false --latest
+      # GitHub never triggers workflows from events created with a workflow's own token
+      # (recursion guard), so publishing above does NOT fire ios-testflight.yml's
+      # `release: published` trigger — chain the phone build explicitly instead.
+      - name: kick off the iOS TestFlight build
+        run: gh workflow run ios-testflight.yml --ref main
