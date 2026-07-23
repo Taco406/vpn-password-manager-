@@ -8,6 +8,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/). Versions are
 [semantic](https://semver.org/). **Add a new `## [x.y.z]` section at the top in the same PR
 that bumps the app version** — that's how "the changelog updates on every merge."
 
+## [0.1.51] — 2026-07-23
+
+### Changed
+- **The Mac app is signed and notarized by Apple.** It opens with a normal double-click — no
+  more right-click → Open, no "unidentified developer" warning. Self-updates install the
+  signed app too.
+
 ## [0.1.50] — 2026-07-23
 
 ### Added
