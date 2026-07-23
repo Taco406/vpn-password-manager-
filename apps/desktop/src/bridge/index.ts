@@ -57,6 +57,7 @@ export async function vpnSetToken(token: string): Promise<void> {
   if (!inTauri()) return;
   const core = await import("@tauri-apps/api/core");
   await core.invoke("vpn_set_token", { token });
+  void settingsSyncWrite(); // share it with the other devices (encrypted, best-effort)
 }
 
 export async function vpnRealEnabled(): Promise<boolean> {
@@ -805,6 +806,7 @@ export async function syncStatus(): Promise<SyncStatusInfo> {
 export async function syncSetGoogleSecret(secret: string): Promise<void> {
   if (!inTauri()) return;
   await inv("sync_set_google_secret", { secret: secret.trim() });
+  void settingsSyncWrite();
 }
 
 export async function syncSetConfig(
@@ -813,6 +815,7 @@ export async function syncSetConfig(
 ): Promise<void> {
   if (!inTauri()) return;
   await inv("sync_set_config", { serverUrl, googleClientId });
+  void settingsSyncWrite();
 }
 
 export async function authGoogleSignin(): Promise<{ email: string; totpRequired: boolean }> {
@@ -866,6 +869,20 @@ export async function syncEnablePasswordUnlock(password?: string): Promise<numbe
 export async function syncUnlockWithPassword(password: string): Promise<{ restored: number }> {
   if (!inTauri()) throw new Error("Sync is only available in the desktop app.");
   return inv<{ restored: number }>("sync_unlock_with_password", { password });
+}
+
+/**
+ * Refresh the hidden synced-settings vault item from this device's current configuration
+ * (Linode token, Google sign-in) and push quietly. Fire-and-forget after settings changes —
+ * failures are silent (e.g. vault locked or signed out) and the next sync repairs it.
+ */
+export async function settingsSyncWrite(): Promise<void> {
+  if (!inTauri()) return;
+  try {
+    await inv("settings_sync_write");
+  } catch {
+    /* best-effort */
+  }
 }
 
 /** First contact with a server by address: its version, cert to pin, and trust fingerprint. */

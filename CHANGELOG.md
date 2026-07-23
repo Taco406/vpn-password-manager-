@@ -8,6 +8,21 @@ The format follows [Keep a Changelog](https://keepachangelog.com/). Versions are
 [semantic](https://semver.org/). **Add a new `## [x.y.z]` section at the top in the same PR
 that bumps the app version** — that's how "the changelog updates on every merge."
 
+## [0.1.49] — 2026-07-23
+
+### Added
+- **Your app configuration now syncs too.** Signing in on a new computer no longer leaves it
+  half-set-up: the Linode API token and the Google sign-in credentials travel inside your
+  encrypted vault (a hidden system entry — never shown in your password list on any device) and
+  are applied automatically on sync. Change a token on one device and every device has it after
+  the next sync. Same zero-knowledge guarantee as your passwords: the server carries the tokens
+  but can never read them.
+- The device that already has the tokens shares them automatically on its next sync — no manual
+  export step.
+
+### Fixed
+- The iPhone app has a proper app icon (required for TestFlight; previously a blank tile).
+
 ## [0.1.48] — 2026-07-22
 
 ### Changed

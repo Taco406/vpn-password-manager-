@@ -139,6 +139,7 @@ fn main() {
             sync::sync_unlock_with_password,
             sync::sync_probe_server,
             sync::sync_password_signin,
+            sync::settings_sync_write,
             sync::sync_devices,
             sync::sync_device_revoke,
             sync::sync_security_events,

@@ -293,6 +293,10 @@ pub fn vault_list(state: State<AppState>) -> R<Vec<ItemSummary>> {
     let mut out = Vec::new();
     for env in inner.vault.list_envelopes()? {
         let it = inner.session.open(&env)?;
+        // System items (synced app settings) never show next to real logins.
+        if it.tags.iter().any(|t| t == crate::sync::SYSTEM_TAG) {
+            continue;
+        }
         out.push(summary_of(&it));
     }
     Ok(out)

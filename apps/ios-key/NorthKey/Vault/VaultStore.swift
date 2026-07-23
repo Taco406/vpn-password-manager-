@@ -124,6 +124,8 @@ final class VaultStore: ObservableObject {
                 guard let env = Data(base64Encoded: b64) else { return nil }
                 return try? VaultCrypto.openItem(vaultKey: key, envelope: env)
             }
+            // System items (synced app settings) are managed automatically — never listed.
+            .filter { !$0.tags.contains("northkey:system") }
             .sorted { $0.title.localizedCaseInsensitiveCompare($1.title) == .orderedAscending }
         } else {
             document = VaultDocument(format: 1, items: [], tombstones: [])
