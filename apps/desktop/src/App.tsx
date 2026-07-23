@@ -4,6 +4,8 @@ import { useApp } from "./stores/app";
 import { checkForUpdate } from "./updater";
 import { Layout } from "./components/Layout";
 import { CommandPalette } from "./components/palette/CommandPalette";
+import { Toaster } from "./components/Toast";
+import { ErrorBoundary } from "./components/ErrorBoundary";
 import { Unlock } from "./screens/Unlock";
 import { SetupWizard } from "./screens/SetupWizard";
 import { Vault } from "./screens/Vault";
@@ -13,6 +15,7 @@ import { Health } from "./screens/Health";
 import { Devices } from "./screens/Devices";
 import { Servers } from "./screens/Servers";
 import { Transfers } from "./screens/Transfers";
+import { GettingStarted } from "./screens/GettingStarted";
 import { Tools } from "./screens/Tools";
 import { Experimental } from "./screens/Experimental";
 import { Settings } from "./screens/Settings";
@@ -31,11 +34,14 @@ export function App() {
   return (
     <HashRouter>
       <CommandPalette />
+      <Toaster />
+      <ErrorBoundary>
       <Routes>
         <Route path="/unlock" element={<Unlock />} />
         <Route path="/setup" element={<SetupWizard />} />
         <Route element={<Gate />}>
           <Route element={<Layout />}>
+            <Route path="/getting-started" element={<GettingStarted />} />
             <Route path="/vault" element={<Vault />} />
             <Route path="/vault/new" element={<ItemEditor />} />
             <Route path="/vault/:id/edit" element={<ItemEditor />} />
@@ -54,6 +60,7 @@ export function App() {
         </Route>
         <Route path="*" element={<Navigate to="/vault" replace />} />
       </Routes>
+      </ErrorBoundary>
     </HashRouter>
   );
 }

@@ -53,12 +53,18 @@ final class VaultStore: ObservableObject {
     private var document = VaultDocument(format: 1, items: [], tombstones: [])
 
     private static let faceIDKeyAccount = "northkey.vault.key.faceid"
+    /// A NON-secret marker that Face ID unlock is enabled. Critically, this is what the UI checks
+    /// to decide whether to show the "Unlock with Face ID" button — reading the biometric-protected
+    /// key itself would pop a Face ID prompt on every SwiftUI re-render (every keystroke), which is
+    /// exactly the "scans several times before it opens" bug. The protected key is only ever read
+    /// on an explicit unlock tap.
+    private static let faceIDEnabledFlag = "northkey.faceid.enabled"
 
     var isUnlocked: Bool { vaultKey != nil }
 
-    /// Whether a Face-ID-protected key is stored (so the UI can offer "Unlock with Face ID").
+    /// Whether Face ID unlock is set up (cheap flag read — never triggers a biometric prompt).
     static func faceIDAvailable() -> Bool {
-        Keychain.read(faceIDKeyAccount) != nil
+        UserDefaults.standard.bool(forKey: faceIDEnabledFlag)
     }
 
     // MARK: - Unlock
@@ -112,40 +118,65 @@ final class VaultStore: ObservableObject {
         busy = false
     }
 
-    /// Relaunch unlock via the Face-ID-protected key (if the user enabled it).
+    /// Relaunch unlock via the Face-ID-protected key (if the user enabled it). Reads the protected
+    /// item exactly ONCE, on this explicit tap, with a dedicated LAContext so it's a single Face ID
+    /// evaluation with a clear reason — not the per-render storm the availability check used to cause.
     func unlockWithFaceID() async {
         busy = true
         error = nil
-        // Reading the item triggers the Face ID prompt via its access control.
-        if let key = Keychain.read(Self.faceIDKeyAccount), key.count == 32 {
-            vaultKey = key
-            do { try await pull() } catch { self.error = error.localizedDescription }
-        } else {
-            error = "Face ID unlock isn't set up on this phone yet."
+        defer { busy = false }
+        let ctx = LAContext()
+        let q: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrAccount as String: Self.faceIDKeyAccount,
+            kSecReturnData as String: true,
+            kSecUseAuthenticationContext as String: ctx,
+            kSecUseOperationPrompt as String: "Unlock your NorthKey vault",
+        ]
+        var item: CFTypeRef?
+        let status = SecItemCopyMatching(q as CFDictionary, &item)
+        guard status == errSecSuccess, let key = item as? Data, key.count == 32 else {
+            if status == errSecUserCanceled || status == errSecAuthFailed {
+                // User cancelled or Face ID failed — say nothing loud; they can retry or use the password.
+                return
+            }
+            // The protected key is gone (e.g. biometric enrollment changed, which invalidates it).
+            // Clear the flag so the button hides and the user is nudged back to the password.
+            UserDefaults.standard.set(false, forKey: Self.faceIDEnabledFlag)
+            error = "Face ID unlock needs setting up again — unlock with your master password, then re-enable it."
+            return
         }
-        busy = false
+        vaultKey = key
+        do { try await pull() } catch { self.error = error.localizedDescription }
     }
 
-    /// Store the vault key behind Face ID for future launches (optional, off by default).
+    /// Store the vault key behind Face ID for future launches (optional, off by default). Uses an
+    /// LAContext so writing the item never itself prompts, and only flips the enabled flag on a
+    /// successful store.
     func enableFaceID() {
         guard let key = vaultKey else { return }
-        let access = SecAccessControlCreateWithFlags(
-            nil, kSecAttrAccessibleWhenUnlockedThisDeviceOnly, .biometryCurrentSet, nil)!
+        guard let access = SecAccessControlCreateWithFlags(
+            nil, kSecAttrAccessibleWhenUnlockedThisDeviceOnly, .biometryCurrentSet, nil)
+        else { return }
+        SecItemDelete([
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrAccount as String: Self.faceIDKeyAccount,
+        ] as CFDictionary)
         let q: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrAccount as String: Self.faceIDKeyAccount,
             kSecValueData as String: key,
             kSecAttrAccessControl as String: access,
+            kSecUseAuthenticationContext as String: LAContext(),
         ]
-        SecItemDelete([
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrAccount as String: Self.faceIDKeyAccount,
-        ] as CFDictionary)
-        SecItemAdd(q as CFDictionary, nil)
+        if SecItemAdd(q as CFDictionary, nil) == errSecSuccess {
+            UserDefaults.standard.set(true, forKey: Self.faceIDEnabledFlag)
+        }
     }
 
     func disableFaceID() {
         Keychain.delete(Self.faceIDKeyAccount)
+        UserDefaults.standard.set(false, forKey: Self.faceIDEnabledFlag)
     }
 
     func lock() {

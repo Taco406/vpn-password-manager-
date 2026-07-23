@@ -114,6 +114,7 @@ struct TransfersView: View {
                     }
                 }
                 .padding(16)
+                .readableColumn()
             }
             .background(Color(hex: 0x0A0E14).ignoresSafeArea())
             .navigationTitle("Transfers")

@@ -26,9 +26,16 @@ export function Unlock() {
   }, []);
 
   const unlockBiometric = async () => {
-    await bridge.mockBiometricApprove?.();
-    await bridge.unlockPlatform();
-    setLocked(false);
+    setBusy(true);
+    setError("");
+    try {
+      await bridge.mockBiometricApprove?.();
+      await bridge.unlockPlatform();
+      setLocked(false);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    }
+    setBusy(false);
   };
   const unlockPassword = async () => {
     setBusy(true);

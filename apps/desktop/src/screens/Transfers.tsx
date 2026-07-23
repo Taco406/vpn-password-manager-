@@ -189,7 +189,8 @@ export function Transfers() {
             <select
               value={recipient}
               onChange={(e) => setRecipient(e.target.value)}
-              className="rounded-[8px] border border-[var(--border-strong)] bg-[var(--bg-inset)] px-2 py-1.5 text-xs text-[var(--text-primary)]"
+              disabled={busy || !signedIn}
+              className="rounded-[8px] border border-[var(--border-strong)] bg-[var(--bg-inset)] px-2 py-1.5 text-xs text-[var(--text-primary)] disabled:opacity-50"
             >
               <option value="">All my devices</option>
               {devices
@@ -204,7 +205,7 @@ export function Transfers() {
           <input
             ref={fileRef}
             type="file"
-            disabled={busy || signedIn === false}
+            disabled={busy || !signedIn}
             onChange={(e) => {
               const f = e.target.files?.[0];
               if (f) void onPick(f);

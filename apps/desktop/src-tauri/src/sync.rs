@@ -1744,6 +1744,29 @@ pub(crate) fn sync_device_settings(state: &State<'_, AppState>) -> bool {
                     _ => {}
                 }
             }
+
+            // Self-heal (device → vault). The apply loop above NEVER fills a field the synced item
+            // is missing — so a token added on this device after the settings item was first created
+            // (the classic case: a Hetzner token on a settings item that predates it) would never
+            // reach the other devices, which is exactly why the phone showed Linode but not Hetzner.
+            // After applying, `local_settings` is the union of the synced values and this device's
+            // own; if that union carries anything the item lacks, rewrite the item so it propagates.
+            // The apply loop already made local match every non-empty synced value, so this only
+            // ever fills blanks (or a widened Netdata map) — it never clobbers an authoritative value.
+            let locals = local_settings(state);
+            let synced_of = |name: &str| -> String {
+                item.custom_fields
+                    .iter()
+                    .find(|f| f.name == name)
+                    .map(|f| f.value.trim().to_string())
+                    .unwrap_or_default()
+            };
+            let needs_heal = locals
+                .iter()
+                .any(|(name, val)| !val.trim().is_empty() && val.trim() != synced_of(name));
+            if needs_heal {
+                return write_settings_item(state, locals).is_ok();
+            }
             false
         }
         None => {

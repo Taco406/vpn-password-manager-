@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
+import { useNavigate } from "react-router-dom";
 import { motion } from "framer-motion";
-import { Power, Zap, Cpu, MemoryStick, Activity, DollarSign, Gauge, Cloud } from "lucide-react";
+import { Power, Zap, Cpu, MemoryStick, Activity, DollarSign, Gauge, Cloud, FileText } from "lucide-react";
 import type { InstanceType, Region } from "@sentinel/shared";
 import {
   bridge,
@@ -23,8 +24,10 @@ import { Globe } from "../components/globe/Globe";
 import { ThroughputChart, fmtRate, fmtBytes } from "../components/charts/ThroughputChart";
 import { Card, Button, Badge } from "../components/ui";
 import { errMsg, btnCls } from "../components/kit";
+import { toastError } from "../components/Toast";
 
 export function Vpn() {
+  const navigate = useNavigate();
   const [regions, setRegions] = useState<Region[]>([]);
   const [types, setTypes] = useState<InstanceType[]>([]);
   const [selectedRegion, setSelectedRegion] = useState<string>("us-east");
@@ -77,8 +80,22 @@ export function Vpn() {
   // the node running (only "Destroy" tears it down), so the button relabels accordingly.
   const persistentConnected = !!persistS?.connected;
 
-  const doConnect = () => bridge.vpnConnect(selectedRegion, selectedType);
-  const doDisconnect = () => bridge.vpnDisconnect();
+  // The primary Connect/Disconnect must surface failures (WireGuard not installed, not elevated, bad
+  // Linode token) instead of failing silently — the tunnel-state events don't cover a rejected call.
+  const doConnect = async () => {
+    try {
+      await bridge.vpnConnect(selectedRegion, selectedType);
+    } catch (e) {
+      toastError(e);
+    }
+  };
+  const doDisconnect = async () => {
+    try {
+      await bridge.vpnDisconnect();
+    } catch (e) {
+      toastError(e);
+    }
+  };
   const doDestroyPersistent = async () => {
     if (!window.confirm("Destroy the always-on VPN node? This deletes the server and stops billing.")) return;
     try {
@@ -137,6 +154,12 @@ export function Vpn() {
               <Power size={17} /> Connect
             </Button>
             <AlwaysOnVpn status={persistS} regions={regions} types={types} onChange={refreshPersist} />
+            <button
+              onClick={() => navigate("/report")}
+              className="mt-1 flex items-center gap-1.5 self-start text-xs text-[var(--text-muted)] hover:text-[var(--accent)]"
+            >
+              <FileText size={12} /> This month's usage &amp; savings report
+            </button>
           </>
         ) : (
           <>

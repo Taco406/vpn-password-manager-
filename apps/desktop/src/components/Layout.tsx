@@ -1,7 +1,9 @@
+import { useEffect, useState } from "react";
 import { NavLink, Outlet } from "react-router-dom";
-import { Mountain, KeyRound, Globe2, HeartPulse, Smartphone, Settings as Cog, Lock, FlaskConical, Radar, Server, Send } from "lucide-react";
+import { Mountain, KeyRound, Globe2, HeartPulse, Smartphone, Settings as Cog, Lock, FlaskConical, Radar, Server, Send, Rocket } from "lucide-react";
 import { useApp } from "../stores/app";
 import { bridge } from "../bridge";
+import { getSetupProgress } from "../screens/GettingStarted";
 import { ClipboardCountdown } from "./ClipboardCountdown";
 
 const nav = [
@@ -19,6 +21,14 @@ const nav = [
 export function Layout() {
   const connect = useApp((s) => s.connect);
   const connected = connect.stage === "connected";
+  // Live setup progress feeds the "Get started" nav item, which hides once the essentials are done.
+  const [setup, setSetup] = useState<{ done: number; total: number; complete: boolean } | null>(null);
+  useEffect(() => {
+    void getSetupProgress().then(setSetup);
+    const t = window.setInterval(() => void getSetupProgress().then(setSetup), 15_000);
+    return () => window.clearInterval(t);
+  }, []);
+  const showGetStarted = setup !== null && !setup.complete;
 
   return (
     <div className="flex h-full">
@@ -35,6 +45,26 @@ export function Layout() {
           </div>
         </div>
         <nav className="flex flex-col gap-1">
+          {showGetStarted && (
+            <NavLink
+              to="/getting-started"
+              className={({ isActive }) =>
+                `flex items-center gap-3 rounded-[10px] px-3 py-2 text-sm transition-colors ${
+                  isActive
+                    ? "bg-[var(--accent)]/12 text-[var(--accent)]"
+                    : "text-[var(--text-secondary)] hover:bg-[var(--bg-overlay)] hover:text-[var(--text-primary)]"
+                }`
+              }
+            >
+              <Rocket size={18} />
+              <span className="flex-1">Get started</span>
+              {setup && (
+                <span className="rounded-full bg-[var(--accent)]/15 px-1.5 text-[10px] font-medium text-[var(--accent)]">
+                  {setup.done}/{setup.total}
+                </span>
+              )}
+            </NavLink>
+          )}
           {nav.map(({ to, label, icon: Icon }) => (
             <NavLink
               key={to}
