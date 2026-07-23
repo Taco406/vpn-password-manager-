@@ -1,0 +1,45 @@
+name: Check Apple signing secrets
+
+# One-minute preflight for Mac code signing: imports the APPLE_CERTIFICATE secret into a
+# scratch keychain and lists the identities exactly as codesign will see them during a
+# release. Run this from the Actions tab after updating the certificate secrets — a green
+# run means the next release will sign; a red run names the exact problem (bad password,
+# missing private key, wrong certificate) without spending a release cycle to find out.
+# Prints identity names only — never key material.
+
+on:
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  check:
+    name: Verify the certificate can sign
+    runs-on: macos-latest
+    env:
+      CERT: ${{ secrets.APPLE_CERTIFICATE }}
+      CERT_PW: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+    steps:
+      - name: Import + list identities
+        run: |
+          if [ -z "$CERT" ]; then
+            echo "::error::The APPLE_CERTIFICATE secret is not set."
+            exit 1
+          fi
+          p12="$RUNNER_TEMP/cert.p12"
+          printf '%s' "$CERT" | tr -d '\n\r ' | base64 -d > "$p12"
+          kc="$RUNNER_TEMP/probe.keychain-db"
+          security create-keychain -p probepass "$kc"
+          if ! security import "$p12" -k "$kc" -P "$CERT_PW" -T /usr/bin/codesign; then
+            echo "::error::Could not open the .p12 — usually the APPLE_CERTIFICATE_PASSWORD secret doesn't match the password used when exporting."
+            exit 1
+          fi
+          echo "Identities in the certificate (as codesign sees them):"
+          security find-identity -p codesigning "$kc"
+          valid=$(security find-identity -v -p codesigning "$kc" | sed -n 's/^[[:space:]]*[0-9][0-9]*) [0-9A-F]\{40\} "\(.*\)"$/\1/p' | head -1)
+          if [ -n "$valid" ]; then
+            echo "OK — releases will sign as: $valid"
+          else
+            echo "::error::No valid signing identity in the .p12 — it's missing its private key or the wrong certificate was exported. In Keychain Access open the My Certificates tab, right-click the 'Developer ID Application' row, Export as .p12, and update the APPLE_CERTIFICATE secret."
+            exit 1
+          fi
