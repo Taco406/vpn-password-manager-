@@ -95,6 +95,9 @@ struct VaultListView: View {
     @State private var search = ""
     @State private var adding = false
     @State private var faceIDOn = VaultStore.faceIDAvailable()
+    /// Drives the NavigationSplitView: side-by-side list/detail on iPad, and a push on iPhone
+    /// (the split view collapses to a stack automatically on a compact width class).
+    @State private var selectedId: String?
 
     private var filtered: [VaultItem] {
         let q = search.trimmingCharacters(in: .whitespaces).lowercased()
@@ -109,8 +112,8 @@ struct VaultListView: View {
     private var others: [VaultItem] { filtered.filter { $0.type != "login" } }
 
     var body: some View {
-        NavigationStack {
-            List {
+        NavigationSplitView {
+            List(selection: $selectedId) {
                 if vault.offline {
                     Label(
                         "Offline — showing your vault from the last sync. Changes are off until the server is reachable; pull down to retry.",
@@ -145,9 +148,6 @@ struct VaultListView: View {
             .refreshable { try? await vault.pull() }
             .navigationTitle("Vault")
             .navigationBarTitleDisplayMode(.inline)
-            .navigationDestination(for: String.self) { id in
-                ItemDetailView(vault: vault, itemId: id)
-            }
             .toolbar {
                 ToolbarItem(placement: .navigationBarLeading) {
                     Menu {
@@ -188,26 +188,40 @@ struct VaultListView: View {
                 NavigationStack { ItemEditView(vault: vault) }
                     .preferredColorScheme(.dark)
             }
-        }
-    }
-
-    private func row(_ item: VaultItem) -> some View {
-        NavigationLink(value: item.id) {
-            HStack(spacing: 12) {
-                Image(systemName: Self.icon(for: item.type))
-                    .foregroundColor(Color(hex: 0x22D3EE))
-                    .frame(width: 24)
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(item.title.isEmpty ? "Untitled" : item.title)
-                        .font(.subheadline)
-                    if let u = item.login?.username, !u.isEmpty {
-                        Text(u).font(.caption).foregroundColor(.gray)
-                    } else if item.type != "login" {
-                        Text(item.type.capitalized).font(.caption).foregroundColor(.gray)
+        } detail: {
+            if let id = selectedId {
+                NavigationStack { ItemDetailView(vault: vault, itemId: id) }
+            } else {
+                ZStack {
+                    Color(hex: 0x0A0E14).ignoresSafeArea()
+                    VStack(spacing: 8) {
+                        Image(systemName: "key.fill")
+                            .font(.largeTitle)
+                            .foregroundColor(.gray.opacity(0.4))
+                        Text("Select an item").foregroundColor(.gray)
                     }
                 }
             }
         }
+        .navigationSplitViewStyle(.balanced)
+    }
+
+    private func row(_ item: VaultItem) -> some View {
+        HStack(spacing: 12) {
+            Image(systemName: Self.icon(for: item.type))
+                .foregroundColor(Color(hex: 0x22D3EE))
+                .frame(width: 24)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(item.title.isEmpty ? "Untitled" : item.title)
+                    .font(.subheadline)
+                if let u = item.login?.username, !u.isEmpty {
+                    Text(u).font(.caption).foregroundColor(.gray)
+                } else if item.type != "login" {
+                    Text(item.type.capitalized).font(.caption).foregroundColor(.gray)
+                }
+            }
+        }
+        .tag(item.id)
         .listRowBackground(Color(hex: 0x0F141C))
     }
 

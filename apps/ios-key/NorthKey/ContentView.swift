@@ -83,3 +83,19 @@ extension Color {
                   blue: Double(hex & 0xff) / 255)
     }
 }
+
+/// Cap content to a readable centered column on a regular width class (iPad), full-width on
+/// compact (iPhone) — so cards/tiles don't stretch edge-to-edge when the app runs full-screen on
+/// an iPad. Apply to the content inside a `ScrollView`.
+private struct ReadableColumn: ViewModifier {
+    @Environment(\.horizontalSizeClass) private var hSize
+    func body(content: Content) -> some View {
+        content
+            .frame(maxWidth: hSize == .regular ? 720 : .infinity)
+            .frame(maxWidth: .infinity)
+    }
+}
+
+extension View {
+    func readableColumn() -> some View { modifier(ReadableColumn()) }
+}

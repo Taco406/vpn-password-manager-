@@ -35,6 +35,15 @@
 	<array>
 		<string>UIInterfaceOrientationPortrait</string>
 	</array>
+	<!-- On iPad the app runs full-screen native and supports every orientation (a portrait-only
+	     iPad app reads as unfinished and App Store review flags it). iPhone stays portrait above. -->
+	<key>UISupportedInterfaceOrientations~ipad</key>
+	<array>
+		<string>UIInterfaceOrientationPortrait</string>
+		<string>UIInterfaceOrientationPortraitUpsideDown</string>
+		<string>UIInterfaceOrientationLandscapeLeft</string>
+		<string>UIInterfaceOrientationLandscapeRight</string>
+	</array>
 	<!-- Export compliance: the app uses standard, exempt encryption only (user-data protection —
 	     the standard password-manager classification). Declaring it here means TestFlight builds
 	     go "Ready to Test" automatically instead of stopping at a manual compliance dialog. -->
