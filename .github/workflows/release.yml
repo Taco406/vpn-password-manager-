@@ -21,6 +21,10 @@ on:
         description: "Release tag (e.g. v0.1.0). Leave blank to use the app version from tauri.conf.json."
         required: false
         default: ""
+      unsigned_mac:
+        description: "Skip Mac code signing for this run (escape hatch: ships a right-click-to-open Mac app instead of blocking the release)"
+        required: false
+        default: "false"
 
 permissions:
   contents: write
@@ -213,7 +217,7 @@ jobs:
       # makes it try to import an empty certificate and fails the whole macOS build. Gate it so
       # unsigned builds keep working until the secrets exist. See docs/macos-signing.md.
       - name: Configure Apple code signing (only when a certificate secret is present)
-        if: matrix.platform == 'macos-latest'
+        if: matrix.platform == 'macos-latest' && github.event.inputs.unsigned_mac != 'true'
         shell: bash
         env:
           CERT: ${{ secrets.APPLE_CERTIFICATE }}
@@ -230,27 +234,29 @@ jobs:
             # Derive the signing identity from the certificate itself instead of trusting the
             # hand-typed APPLE_SIGNING_IDENTITY secret — codesign matches on the cert's CN, and
             # a copy-paste mismatch ("failed to resolve signing identity") is the most common
-            # way this build breaks. Strictly best-effort under set +e: this can only ever
-            # IMPROVE the identity, never block the build (the step runs with -e -o pipefail,
-            # and Keychain .p12 exports use legacy ciphers OpenSSL 3 needs -legacy to read).
-            # Nothing secret is printed — only the CN.
+            # way this build breaks. Probe with the same `security` tooling the real signing
+            # uses (openssl can't read Keychain's .p12 encryption reliably): import into a
+            # scratch keychain, list the identities as codesign would see them, and take the
+            # first VALID one. Strictly best-effort under set +e — this can only ever improve
+            # the identity, never block the build. Prints identity names only, never secrets.
             set +e
             p12="$RUNNER_TEMP/signing-cert.p12"
             printf '%s' "$CERT" | tr -d '\n\r ' | base64 -d > "$p12" 2>/dev/null
-            certpem=$(openssl pkcs12 -in "$p12" -passin pass:"$CERT_PW" -nokeys 2>/dev/null)
-            if [ -z "$certpem" ]; then
-              certpem=$(openssl pkcs12 -legacy -in "$p12" -passin pass:"$CERT_PW" -nokeys 2>/dev/null)
-            fi
-            cn=$(printf '%s\n' "$certpem" \
-              | openssl x509 -noout -subject -nameopt multiline 2>/dev/null \
-              | awk -F'= ' '/commonName/ {print $2}')
+            kc="$RUNNER_TEMP/idprobe.keychain-db"
+            security create-keychain -p probepass "$kc" 2>/dev/null
+            security import "$p12" -k "$kc" -P "$CERT_PW" -T /usr/bin/codesign >/dev/null 2>&1
+            echo "Identities inside the APPLE_CERTIFICATE .p12 (as codesign sees them):"
+            security find-identity -p codesigning "$kc" 2>/dev/null
+            valid=$(security find-identity -v -p codesigning "$kc" 2>/dev/null \
+              | sed -n 's/^[[:space:]]*[0-9][0-9]*) [0-9A-F]\{40\} "\(.*\)"$/\1/p' | head -1)
+            security delete-keychain "$kc" 2>/dev/null
             rm -f "$p12"
             set -e
-            if [ -n "$cn" ]; then
-              echo "Signing identity (from the certificate): $cn"
-              IDENTITY="$cn"
+            if [ -n "$valid" ]; then
+              echo "Using signing identity from the certificate: $valid"
+              IDENTITY="$valid"
             else
-              echo "Could not read the certificate CN here — using the APPLE_SIGNING_IDENTITY secret as-is."
+              echo "No VALID codesigning identity in the .p12 — falling back to the APPLE_SIGNING_IDENTITY secret; the listing above shows what the file actually contains."
             fi
             {
               echo "APPLE_CERTIFICATE=$CERT"
