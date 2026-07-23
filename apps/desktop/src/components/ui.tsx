@@ -12,6 +12,7 @@ export function Button({
   className = "",
   type = "button",
   disabled = false,
+  ariaLabel,
 }: {
   children: ReactNode;
   onClick?: () => void;
@@ -19,6 +20,7 @@ export function Button({
   className?: string;
   type?: "button" | "submit";
   disabled?: boolean;
+  ariaLabel?: string;
 }) {
   const base =
     "inline-flex items-center justify-center gap-2 rounded-[10px] px-4 py-2 text-sm font-medium transition-colors cursor-pointer select-none disabled:cursor-not-allowed disabled:opacity-50";
@@ -28,7 +30,7 @@ export function Button({
     danger: "bg-transparent text-[var(--danger)] border border-[var(--danger)]/40 hover:bg-[var(--danger)]/10",
   }[variant];
   return (
-    <button type={type} onClick={onClick} disabled={disabled} className={`${base} ${styles} ${className}`}>
+    <button type={type} onClick={onClick} disabled={disabled} aria-label={ariaLabel} title={ariaLabel} className={`${base} ${styles} ${className}`}>
       {children}
     </button>
   );

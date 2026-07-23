@@ -33,6 +33,7 @@ import {
 import { useApp } from "../stores/app";
 import { Card, SectionTitle, Badge } from "../components/ui";
 import { Toggle, Slider, Tabs, inputCls, btnCls } from "../components/kit";
+import { toastError } from "../components/Toast";
 
 type TabId = "general" | "security" | "vpn" | "about";
 
@@ -59,10 +60,16 @@ export function Settings() {
     if (!s) return;
     const next = { ...s, ...p };
     setS(next);
-    void bridge.settingsSet(p);
+    bridge.settingsSet(p).catch((e) => {
+      toastError(e);
+      setS(s); // roll the toggle back so the UI reflects what actually persisted
+    });
   };
 
-  if (!s) return null;
+  if (!s)
+    return (
+      <div className="mx-auto max-w-2xl px-8 py-8 text-sm text-[var(--text-muted)]">Loading settings…</div>
+    );
 
   return (
     <div className="mx-auto max-w-2xl px-8 py-8">

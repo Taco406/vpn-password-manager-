@@ -223,12 +223,19 @@ function BrowserAutofill() {
   const [status, setStatus] = useState("");
   const [extPath, setExtPath] = useState("");
   const [copied, setCopied] = useState(false);
+  const [platform, setPlatform] = useState("");
 
   useEffect(() => {
+    void appPlatform().then(setPlatform);
     void autofillStatus()
       .then((s) => setInstalled(s.installed))
       .catch(() => {});
   }, []);
+
+  // The native-messaging host + guided install are Windows/Edge/Chrome-first; on macOS the
+  // "Get the extension" action hits a host that can't service it, so hide the card there
+  // (matching the platform-gated pattern used elsewhere) until macOS autofill is wired.
+  if (platform === "macos") return null;
 
   // Step 1: unpack the bundled extension to a stable folder + register the host, so the only
   // thing left for the user is the browser's one-time "Load unpacked".

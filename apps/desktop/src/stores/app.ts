@@ -4,6 +4,7 @@
 import { create } from "zustand";
 import type { ConnectState, Settings, VpnMetrics } from "@sentinel/shared";
 import { bridge, lockStatus } from "../bridge";
+import { toastError } from "../components/Toast";
 
 const MAX_SAMPLES = 90;
 
@@ -44,7 +45,7 @@ export const useApp = create<AppState>((set, get) => ({
           : "dark"
         : t;
     document.documentElement.setAttribute("data-theme", resolved);
-    void bridge.settingsSet({ theme: t });
+    bridge.settingsSet({ theme: t }).catch(toastError);
   },
   refreshSettings: async () => {
     const s = await bridge.settingsGet();

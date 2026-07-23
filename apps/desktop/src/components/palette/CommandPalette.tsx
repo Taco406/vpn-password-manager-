@@ -2,7 +2,7 @@
 import { Command } from "cmdk";
 import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { Search, KeyRound, Globe2, HeartPulse, Plus } from "lucide-react";
+import { Search, KeyRound, Globe2, HeartPulse, Plus, Rocket, Smartphone, Server, Send, Radar, Settings as Cog, FileText } from "lucide-react";
 import type { ItemSummary } from "@sentinel/shared";
 import { bridge } from "../../bridge";
 import { Favicon } from "../ui";
@@ -53,6 +53,16 @@ export function CommandPalette() {
               <PaletteItem onSelect={() => go("/vault/new")} icon={<Plus size={16} />}>New login</PaletteItem>
               <PaletteItem onSelect={() => go("/vpn")} icon={<Globe2 size={16} />}>Connect VPN</PaletteItem>
               <PaletteItem onSelect={() => go("/health")} icon={<HeartPulse size={16} />}>Run health audit</PaletteItem>
+            </Command.Group>
+            <Command.Group heading="Go to" className="[&_[cmdk-group-heading]]:px-2 [&_[cmdk-group-heading]]:py-1.5 [&_[cmdk-group-heading]]:text-xs [&_[cmdk-group-heading]]:text-[var(--text-muted)]">
+              <PaletteItem value="getting started setup" onSelect={() => go("/getting-started")} icon={<Rocket size={16} />}>Getting started</PaletteItem>
+              <PaletteItem value="vault passwords" onSelect={() => go("/vault")} icon={<KeyRound size={16} />}>Vault</PaletteItem>
+              <PaletteItem value="devices sync account" onSelect={() => go("/devices")} icon={<Smartphone size={16} />}>Devices &amp; Sync</PaletteItem>
+              <PaletteItem value="servers monitoring" onSelect={() => go("/servers")} icon={<Server size={16} />}>Servers</PaletteItem>
+              <PaletteItem value="transfers send files" onSelect={() => go("/transfers")} icon={<Send size={16} />}>Transfers</PaletteItem>
+              <PaletteItem value="tools network" onSelect={() => go("/tools")} icon={<Radar size={16} />}>Tools</PaletteItem>
+              <PaletteItem value="report monthly security" onSelect={() => go("/report")} icon={<FileText size={16} />}>Monthly report</PaletteItem>
+              <PaletteItem value="settings preferences" onSelect={() => go("/settings")} icon={<Cog size={16} />}>Settings</PaletteItem>
             </Command.Group>
             <Command.Group heading="Vault" className="[&_[cmdk-group-heading]]:px-2 [&_[cmdk-group-heading]]:py-1.5 [&_[cmdk-group-heading]]:text-xs [&_[cmdk-group-heading]]:text-[var(--text-muted)]">
               {items.map((it) => (

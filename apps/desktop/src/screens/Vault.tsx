@@ -4,17 +4,23 @@ import { Search, Plus, Eye, EyeOff, Copy, Globe, StickyNote, CreditCard, User, K
 import type { ItemDetail, ItemSummary } from "@sentinel/shared";
 import { bridge } from "../bridge";
 import { Favicon, Badge, Button, Card } from "../components/ui";
+import { toastError } from "../components/Toast";
 
 const typeIcon = { login: Globe, note: StickyNote, card: CreditCard, identity: User, passkey: KeyRound } as const;
 
 export function Vault() {
   const [items, setItems] = useState<ItemSummary[]>([]);
+  const [loaded, setLoaded] = useState(false);
   const [query, setQuery] = useState("");
   const { id } = useParams();
   const navigate = useNavigate();
 
   useEffect(() => {
-    void bridge.vaultList().then(setItems);
+    bridge
+      .vaultList()
+      .then(setItems)
+      .catch(toastError)
+      .finally(() => setLoaded(true));
   }, []);
 
   const filtered = useMemo(
@@ -45,7 +51,7 @@ export function Vault() {
               <CmdIcon size={10} />K
             </kbd>
           </div>
-          <Button onClick={() => navigate("/vault/new")} className="!px-2.5">
+          <Button onClick={() => navigate("/vault/new")} className="!px-2.5" aria-label="Add a login">
             <Plus size={16} />
           </Button>
         </div>
@@ -77,7 +83,13 @@ export function Vault() {
       </div>
 
       <div className="flex-1 overflow-y-auto">
-        {selectedId ? <ItemDetailPane id={selectedId} /> : <EmptyDetail />}
+        {selectedId ? (
+          <ItemDetailPane id={selectedId} />
+        ) : loaded && items.length === 0 ? (
+          <FirstRunEmpty onAdd={() => navigate("/vault/new")} />
+        ) : (
+          <EmptyDetail />
+        )}
       </div>
     </div>
   );
@@ -256,6 +268,29 @@ function EmptyDetail() {
     <div className="flex h-full flex-col items-center justify-center text-[var(--text-muted)]">
       <Globe size={40} className="mb-3 opacity-40" />
       <p className="text-sm">Select an item to view its details</p>
+    </div>
+  );
+}
+
+/** The very first thing a brand-new user sees: an empty vault with a clear way forward, instead of
+ * "select an item" pointing at nothing. */
+function FirstRunEmpty({ onAdd }: { onAdd: () => void }) {
+  return (
+    <div className="flex h-full flex-col items-center justify-center px-8 text-center">
+      <div className="mb-4 flex h-16 w-16 items-center justify-center rounded-2xl bg-[var(--accent)]/12">
+        <KeyRound size={30} className="text-[var(--accent)]" />
+      </div>
+      <h2 className="text-lg font-semibold">Your vault is empty</h2>
+      <p className="mt-1 max-w-sm text-sm text-[var(--text-secondary)]">
+        Add your first login, or bring your passwords over from Chrome, Bitwarden, or 1Password —
+        everything stays encrypted on this device.
+      </p>
+      <div className="mt-5 flex items-center gap-2">
+        <Button onClick={onAdd}>
+          <Plus size={16} /> Add your first login
+        </Button>
+      </div>
+      <p className="mt-3 text-xs text-[var(--text-muted)]">Import is in the bottom-left panel.</p>
     </div>
   );
 }

@@ -60,7 +60,8 @@ export function SetupWizard() {
     } catch {
       /* ignore — worst case the gate shows the wizard once more */
     }
-    navigate("/vault");
+    // Land on the setup checklist, not a bare vault — it's the guided home for what's left to do.
+    navigate("/getting-started");
   };
 
   return (

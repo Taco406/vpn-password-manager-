@@ -6,6 +6,7 @@ import { test, expect } from "@playwright/test";
 // Screens to capture. `dark`/`light` marks which themes to render for each.
 const SHOTS: { name: string; url: string; both?: boolean; wait?: number }[] = [
   { name: "unlock", url: "/?freeze=1#/unlock", both: false },
+  { name: "getting-started", url: "/?unlocked=1&freeze=1#/getting-started", both: false, wait: 300 },
   { name: "vault", url: "/?unlocked=1&freeze=1#/vault", both: true },
   { name: "vault-item", url: "/?unlocked=1&freeze=1#/vault/06060606-0606-0606-0606-060606060606", both: false },
   { name: "vpn-idle", url: "/?unlocked=1&freeze=1#/vpn", both: false, wait: 400 },
@@ -15,7 +16,7 @@ const SHOTS: { name: string; url: string; both?: boolean; wait?: number }[] = [
   { name: "servers", url: "/?unlocked=1&freeze=1#/servers", both: false, wait: 300 },
   { name: "transfers", url: "/?unlocked=1&freeze=1#/transfers", both: false, wait: 300 },
   { name: "settings", url: "/?unlocked=1&freeze=1#/settings", both: false },
-  { name: "report", url: "/?unlocked=1&freeze=1#/report", both: false, wait: 300 },
+  { name: "report", url: "/?unlocked=1&freeze=1#/report/2026-06", both: false, wait: 300 },
 ];
 
 for (const shot of SHOTS) {

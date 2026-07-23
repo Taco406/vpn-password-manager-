@@ -55,6 +55,7 @@ import {
 } from "../bridge";
 import { Card, SectionTitle, Badge } from "../components/ui";
 import { errMsg, inputCls, btnCls, Toggle } from "../components/kit";
+import { toastError } from "../components/Toast";
 import { TimeSeriesChart, type TimeSeries } from "../components/charts/TimeSeriesChart";
 import { ThroughputChart } from "../components/charts/ThroughputChart";
 
@@ -1193,10 +1194,15 @@ function WatchdogCard() {
     if (!cfg) return;
     const next = { ...cfg, ...p };
     setCfg(next);
-    void serversWatchdogSet(next).then(() => {
-      setSaved(true);
-      window.setTimeout(() => setSaved(false), 1200);
-    });
+    serversWatchdogSet(next)
+      .then(() => {
+        setSaved(true);
+        window.setTimeout(() => setSaved(false), 1200);
+      })
+      .catch((e) => {
+        toastError(e);
+        setCfg(cfg); // revert the toggle to what actually persisted
+      });
   };
 
   if (!cfg) return null;
