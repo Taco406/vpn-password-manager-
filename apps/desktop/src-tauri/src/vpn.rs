@@ -73,7 +73,7 @@ pub fn get_token() -> Option<String> {
         .filter(|s| !s.is_empty())
 }
 
-fn set_token(token: &str) -> std::result::Result<(), String> {
+pub(crate) fn set_token(token: &str) -> std::result::Result<(), String> {
     let entry = keyring::Entry::new(KC_SERVICE, KC_LINODE).map_err(|e| e.to_string())?;
     if token.trim().is_empty() {
         let _ = entry.delete_credential();

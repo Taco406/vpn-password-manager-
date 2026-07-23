@@ -25,6 +25,7 @@ use sentinel_core::keyring::password::PasswordWrapper;
 use sentinel_core::keyring::recovery::RecoveryWrapper;
 use sentinel_core::keyring::{KeyWrapper, VaultKey, WrappedBlob, WrapperType};
 use sentinel_core::recovery_kit::{self, pdf::render_kit_pdf, RecoveryKey};
+use sentinel_core::vault::model::Item;
 use sentinel_core::vault::{decode_sync_blob, encode_sync_blob, VaultSession};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -970,6 +971,9 @@ pub async fn sync_now(state: State<'_, AppState>) -> Result<SyncNowOut, String> 
         current = v;
     }
 
+    // Apply synced device settings (or seed them from this device) before pushing.
+    let _ = sync_device_settings(&state);
+
     let version = push_document(&api, &vk, &state, current).await?;
     Ok(SyncNowOut {
         pushed: true,
@@ -1021,6 +1025,7 @@ pub async fn sync_restore(
         };
         restored = report.added as i64;
     }
+    let _ = sync_device_settings(&state);
 
     Ok(RestoreOut { restored })
 }
@@ -1112,6 +1117,7 @@ pub async fn sync_unlock_with_password(
     // is enrolled, so the next device needs nothing but address + password. Best-effort — an
     // old server without the endpoint changes nothing.
     let _ = enroll_login_verifier(&api, &password, &blob.bytes).await;
+    let _ = sync_device_settings(&state);
     Ok(RestoreOut { restored })
 }
 
@@ -1355,10 +1361,169 @@ pub async fn sync_password_signin(
             restored = report.added as i64;
         }
     }
+    let _ = sync_device_settings(&state);
     Ok(PasswordSigninOut {
         totp_required: false,
         restored,
     })
+}
+
+// ---------------------------------------------------------------------------
+// Settings sync (v0.1.49): device configuration rides the encrypted vault
+// ---------------------------------------------------------------------------
+// A hidden system item inside the vault carries the API credentials a device needs to be fully
+// capable (Linode token, Google sign-in client). It syncs, merges (fixed id + last-writer-wins),
+// and is end-to-end encrypted exactly like every password — the server can't read the tokens.
+// Every list UI filters SYSTEM_TAG so the item never appears next to real logins.
+
+/// Fixed id of the hidden settings item (fixed so concurrent devices merge, never duplicate).
+const SETTINGS_ITEM_ID: &str = "a11d0e5e-771e-4b8a-9f30-0c0ffee5e771";
+/// Tag marking system items — `vault_list` (desktop) and the phone's list filter it out.
+pub const SYSTEM_TAG: &str = "northkey:system";
+
+const SET_LINODE: &str = "linode_token";
+const SET_GCLIENT: &str = "google_client_id";
+const SET_GSECRET: &str = "google_client_secret";
+
+fn settings_item_id() -> uuid::Uuid {
+    uuid::Uuid::parse_str(SETTINGS_ITEM_ID).expect("const uuid")
+}
+
+/// Current local values (empty string = unset), in stable field order.
+fn local_settings(state: &State<'_, AppState>) -> Vec<(&'static str, String)> {
+    let cfg = load_config(&data_dir(state));
+    vec![
+        (SET_LINODE, crate::vpn::get_token().unwrap_or_default()),
+        (SET_GCLIENT, cfg.google_client_id.unwrap_or_default()),
+        (SET_GSECRET, kc_get(KC_GSECRET).unwrap_or_default()),
+    ]
+}
+
+/// Apply the synced settings item to this device (pull direction), or seed the item from local
+/// settings when the vault has none yet (so the device that already had the tokens shares them).
+/// Runs after every pull/merge; best-effort — a failure never breaks the sync that invoked it.
+/// Returns true when it changed the LOCAL VAULT (caller's push then carries the seed).
+pub(crate) fn sync_device_settings(state: &State<'_, AppState>) -> bool {
+    let id = settings_item_id();
+    let item: Option<Item> = {
+        let g = state.inner.lock().unwrap();
+        match g.vault.get(id) {
+            Ok(Some(env)) => g.session.open(&env).ok(),
+            _ => None,
+        }
+    };
+    match item {
+        Some(item) => {
+            // Vault → device. The vault copy is authoritative: local edits go through
+            // `settings_sync_write`, which updates the item first.
+            for f in &item.custom_fields {
+                let v = f.value.trim();
+                if v.is_empty() {
+                    continue;
+                }
+                match f.name.as_str() {
+                    SET_LINODE => {
+                        if crate::vpn::get_token().as_deref() != Some(v) {
+                            let _ = crate::vpn::set_token(v);
+                        }
+                    }
+                    SET_GCLIENT => {
+                        let dir = data_dir(state);
+                        let mut cfg = load_config(&dir);
+                        if cfg.google_client_id.as_deref() != Some(v) {
+                            cfg.google_client_id = Some(v.to_string());
+                            let _ = save_config(&dir, &cfg);
+                        }
+                    }
+                    SET_GSECRET => {
+                        if kc_get(KC_GSECRET).as_deref() != Some(v) {
+                            let _ = kc_set(KC_GSECRET, v);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            false
+        }
+        None => {
+            // Device → vault (first seed). Only when something is actually set locally.
+            let locals = local_settings(state);
+            if locals.iter().all(|(_, v)| v.is_empty()) {
+                return false;
+            }
+            write_settings_item(state, locals).is_ok()
+        }
+    }
+}
+
+/// Build/replace the settings item from the given values and store it in the local vault.
+fn write_settings_item(
+    state: &State<'_, AppState>,
+    values: Vec<(&'static str, String)>,
+) -> Result<(), String> {
+    let now = chrono_now();
+    let g = state.inner.lock().unwrap();
+    let created_at = g
+        .vault
+        .get(settings_item_id())
+        .ok()
+        .flatten()
+        .and_then(|env| g.session.open(&env).ok())
+        .map(|i| i.created_at)
+        .unwrap_or(now);
+    let item = Item {
+        id: settings_item_id(),
+        item_type: sentinel_core::vault::model::ItemType::Note,
+        title: "NorthKey device settings".into(),
+        tags: vec![SYSTEM_TAG.into()],
+        urls: vec![],
+        notes: Some("Synced app configuration — managed automatically, hidden from lists.".into()),
+        custom_fields: values
+            .into_iter()
+            .map(|(name, value)| sentinel_core::vault::model::CustomField {
+                name: name.into(),
+                value,
+                secret: true,
+            })
+            .collect(),
+        login: None,
+        card: None,
+        identity: None,
+        passkey: None,
+        created_at,
+        updated_at: now,
+        password_changed_at: None,
+    };
+    let env = g.session.seal(&item).map_err(estr)?;
+    g.vault.upsert(&env).map_err(estr)
+}
+
+fn chrono_now() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
+/// Called by the frontend after any synced setting changes locally (Linode token, Google
+/// client): refresh the vault item and push quietly so other devices pick it up.
+#[tauri::command]
+pub async fn settings_sync_write(state: State<'_, AppState>) -> Result<(), String> {
+    let locals = local_settings(&state);
+    let had_item = {
+        let g = state.inner.lock().unwrap();
+        matches!(g.vault.get(settings_item_id()), Ok(Some(_)))
+    };
+    if !had_item && locals.iter().all(|(_, v)| v.is_empty()) {
+        return Ok(()); // nothing to share yet
+    }
+    write_settings_item(&state, locals)?;
+    // Quiet best-effort push (same posture as try_push_vault after sign-in).
+    if let (Ok(vk), Ok(api)) = (session_vault_key(&state), api_for(&state)) {
+        let current = api.get_vault().await?.map(|(v, _)| v).unwrap_or(0);
+        let _ = push_document(&api, &vk, &state, current).await;
+    }
+    Ok(())
 }
 
 /// Enroll (or refresh) the master-password sign-in verifier from a type-4 SNTL blob + the
@@ -2219,6 +2384,7 @@ pub async fn sync_pair_complete(
         };
         restored = report.added as i64;
     }
+    let _ = sync_device_settings(&state);
     Ok(PairCompleteOut {
         restored,
         server_ip: bundle.ip,
