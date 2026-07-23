@@ -74,8 +74,10 @@ sign-in/deploy/join; never reintroduce a sign-in path that leaves the server emp
 - **Server**: self-updates via host-side systemd (daily timer + flag-file path unit written by
   cloud-init in `crates/core/src/provision/cloudinit.rs`); the app's "Update server" button hits
   `POST /v1/admin/update`. The API container must NEVER get the Docker socket.
-- **iPhone**: rebuilt from source in Xcode (`cd apps/ios-key && xcodegen generate`). No CI build,
-  so the golden-vector tests are the compatibility gate.
+- **iPhone**: via TestFlight — the `iOS TestFlight` workflow builds/signs/uploads on every
+  published release (cloud signing from the App Store Connect API key secrets; see
+  `docs/ios-testflight.md`). Xcode-from-source (`cd apps/ios-key && xcodegen generate`) remains
+  the fallback. The golden-vector tests stay the crypto compatibility gate either way.
 
 **Compatibility rules**: the `/v1` API is additive-only (old desktops talk to newer self-updated
 servers). Migrations are append-only — never edit a shipped `services/api/migrations/*.sql`
