@@ -247,8 +247,10 @@ jobs:
             security import "$p12" -k "$kc" -P "$CERT_PW" -T /usr/bin/codesign >/dev/null 2>&1
             echo "Identities inside the APPLE_CERTIFICATE .p12 (as codesign sees them):"
             security find-identity -p codesigning "$kc" 2>/dev/null
+            # Only "Developer ID Application" identities can distribute outside the App Store —
+            # notarization rejects a build signed with anything else (e.g. Apple Development).
             valid=$(security find-identity -v -p codesigning "$kc" 2>/dev/null \
-              | sed -n 's/^[[:space:]]*[0-9][0-9]*) [0-9A-F]\{40\} "\(.*\)"$/\1/p' | head -1)
+              | sed -n 's/^[[:space:]]*[0-9][0-9]*) [0-9A-F]\{40\} "\(Developer ID Application:[^"]*\)"$/\1/p' | head -1)
             security delete-keychain "$kc" 2>/dev/null
             rm -f "$p12"
             set -e
@@ -256,7 +258,7 @@ jobs:
               echo "Using signing identity from the certificate: $valid"
               IDENTITY="$valid"
             else
-              echo "No VALID codesigning identity in the .p12 — falling back to the APPLE_SIGNING_IDENTITY secret; the listing above shows what the file actually contains."
+              echo "No valid 'Developer ID Application' identity in the .p12 — falling back to the APPLE_SIGNING_IDENTITY secret; the listing above shows what the file actually contains (run the 'Check Apple signing secrets' workflow for a verdict without a release cycle)."
             fi
             {
               echo "APPLE_CERTIFICATE=$CERT"

@@ -36,9 +36,15 @@ jobs:
           fi
           echo "Identities in the certificate (as codesign sees them):"
           security find-identity -p codesigning "$kc"
-          valid=$(security find-identity -v -p codesigning "$kc" | sed -n 's/^[[:space:]]*[0-9][0-9]*) [0-9A-F]\{40\} "\(.*\)"$/\1/p' | head -1)
-          if [ -n "$valid" ]; then
-            echo "OK — releases will sign as: $valid"
+          # Only a "Developer ID Application" identity can distribute outside the App Store —
+          # notarization rejects everything else (Apple Development, Apple Distribution, ...).
+          devid=$(security find-identity -v -p codesigning "$kc" | sed -n 's/^[[:space:]]*[0-9][0-9]*) [0-9A-F]\{40\} "\(Developer ID Application:[^"]*\)"$/\1/p' | head -1)
+          anyvalid=$(security find-identity -v -p codesigning "$kc" | sed -n 's/^[[:space:]]*[0-9][0-9]*) [0-9A-F]\{40\} "\(.*\)"$/\1/p' | head -1)
+          if [ -n "$devid" ]; then
+            echo "OK — releases will sign as: $devid"
+          elif [ -n "$anyvalid" ]; then
+            echo "::error::The .p12 contains '$anyvalid' — a certificate for testing on your own devices, not for distribution. Releases need one that starts with 'Developer ID Application:'. In Keychain Access → My Certificates, export THAT row (create it first via Xcode → Settings → Accounts → Manage Certificates → + → Developer ID Application if it isn't listed), then update the APPLE_CERTIFICATE secret."
+            exit 1
           else
             echo "::error::No valid signing identity in the .p12 — it's missing its private key or the wrong certificate was exported. In Keychain Access open the My Certificates tab, right-click the 'Developer ID Application' row, Export as .p12, and update the APPLE_CERTIFICATE secret."
             exit 1
