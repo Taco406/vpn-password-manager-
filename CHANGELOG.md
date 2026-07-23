@@ -22,11 +22,6 @@ that bumps the app version** — that's how "the changelog updates on every merg
   is now independent, so one missing metric never hides the rest. (A richer server dashboard is
   coming next.)
 
-### Changed
-- **The Mac app is signed and notarized by Apple.** It opens with a normal double-click — no
-  more right-click → Open, no "unidentified developer" warning. Self-updates install the
-  signed app too.
-
 ## [0.1.50] — 2026-07-23
 
 ### Added
