@@ -8,7 +8,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/). Versions are
 [semantic](https://semver.org/). **Add a new `## [x.y.z]` section at the top in the same PR
 that bumps the app version** — that's how "the changelog updates on every merge."
 
-## [0.1.51] — 2026-07-23
+## [0.1.52] — 2026-07-23
 
 ### Fixed
 - **The iPhone can sign in to your server again.** iOS was blocking the connection to a
