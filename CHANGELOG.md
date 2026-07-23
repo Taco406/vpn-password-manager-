@@ -35,6 +35,10 @@ that bumps the app version** — that's how "the changelog updates on every merg
 ### Fixed
 - Settings and unlock screens no longer flash blank while loading, and the browser-autofill card is
   hidden on macOS (where its helper isn’t supported yet) instead of showing a button that can’t work.
+- **iPhone: Face ID unlock is instant again.** It was asking for your face several times before
+  opening because the unlock screen re-checked “is Face ID set up?” by reading the protected key —
+  which triggered a Face ID scan on every keystroke. The check now uses a lightweight flag, so your
+  face is scanned exactly once, when you tap **Unlock with Face ID**.
 
 ## [0.1.53] — 2026-07-23
 
