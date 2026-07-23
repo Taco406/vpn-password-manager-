@@ -39,6 +39,11 @@ that bumps the app version** — that's how "the changelog updates on every merg
   opening because the unlock screen re-checked “is Face ID set up?” by reading the protected key —
   which triggered a Face ID scan on every keystroke. The check now uses a lightweight flag, so your
   face is scanned exactly once, when you tap **Unlock with Face ID**.
+- **Your servers now follow you to every device reliably.** The shared settings that ride your vault
+  now back-fill themselves — if one computer has a token (e.g. Hetzner) that your shared settings
+  were missing, it’s added and synced automatically. Previously it only propagated when you happened
+  to change a setting, which is why a second computer or your phone could show your Linode server but
+  not your Hetzner one. The phone’s Servers tab also refreshes these tokens when you open it.
 
 ## [0.1.53] — 2026-07-23
 

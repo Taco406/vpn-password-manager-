@@ -82,15 +82,23 @@ struct ServersView: View {
             .toolbar {
                 ToolbarItem(placement: .topBarTrailing) {
                     Button {
-                        Task { await model.refresh(tokens: vault.providerTokens) }
+                        Task { await reload() }
                     } label: {
                         if model.loading { ProgressView() } else { Image(systemName: "arrow.clockwise") }
                     }
                 }
             }
-            .task { await model.refresh(tokens: vault.providerTokens) }
-            .refreshable { await model.refresh(tokens: vault.providerTokens) }
+            .task { await reload() }
+            .refreshable { await reload() }
         }
+    }
+
+    /// Refresh the synced provider tokens (a vault pull updates `vault.providerTokens`) BEFORE
+    /// listing servers, so a token the desktop just shared — e.g. a back-filled Hetzner token —
+    /// shows up here without the user having to go pull the Vault tab first.
+    private func reload() async {
+        try? await vault.pull()
+        await model.refresh(tokens: vault.providerTokens)
     }
 }
 
