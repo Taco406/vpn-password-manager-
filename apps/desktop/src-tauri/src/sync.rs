@@ -630,17 +630,22 @@ impl Api {
         STANDARD.decode(w.blob_b64.trim()).map_err(estr)
     }
 
-    /// POST /transfers — upload an opaque `SFIL` blob for a device (or all devices when None).
+    /// POST /transfers — upload an opaque `SFIL` blob for a device (or all devices when None), with
+    /// its retention (delete-on-download / permanent / N-day TTL).
     async fn create_transfer(
         &self,
         recipient_device_id: Option<String>,
         size_bytes: i64,
         ciphertext: &[u8],
+        retention: &Retention,
     ) -> Result<String, String> {
         let body = json!({
             "recipient_device_id": recipient_device_id,
             "size_bytes": size_bytes,
             "ciphertext_b64": STANDARD.encode(ciphertext),
+            "delete_on_download": retention.delete_on_download,
+            "permanent": retention.permanent,
+            "ttl_days": retention.ttl_days,
         });
         let resp = self
             .authed(reqwest::Method::POST, "/transfers", &[], Some(body))
@@ -706,25 +711,50 @@ impl Api {
     }
 }
 
-/// One row of the transfer list, as the server sends it (filename stays sealed in the blob).
+/// One row of the transfer list. This type does double duty: it is *deserialized* from the sync
+/// server's response (whose JSON fields are frozen snake_case — `sender_device_id`, `size_bytes`, …)
+/// and *serialized* back out to the desktop frontend (which expects camelCase). `rename_all` gives
+/// the frontend its camelCase, and each multi-word field carries a snake_case `alias` so the read
+/// side still matches the server. Without the aliases, multi-word fields silently defaulted (every
+/// row showed "0 B" with no sender/timestamp — a real bug pre-v0.1.56). Single-word fields (`id`,
+/// `state`, `permanent`, `outgoing`) need no alias since their camelCase equals their snake_case.
 #[derive(Deserialize, Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct TransferRow {
     pub id: String,
-    #[serde(default)]
+    #[serde(default, alias = "sender_device_id")]
     pub sender_device_id: String,
-    #[serde(default)]
+    #[serde(default, alias = "recipient_device_id")]
     pub recipient_device_id: Option<String>,
-    #[serde(default)]
+    #[serde(default, alias = "size_bytes")]
     pub size_bytes: i64,
     #[serde(default)]
     pub state: String,
-    #[serde(default)]
+    #[serde(default, alias = "created_at")]
     pub created_at: i64,
-    #[serde(default)]
+    #[serde(default, alias = "expires_at")]
     pub expires_at: i64,
+    #[serde(default, alias = "delete_on_download")]
+    pub delete_on_download: bool,
+    #[serde(default)]
+    pub permanent: bool,
     #[serde(default)]
     pub outgoing: bool,
+}
+
+/// How long a transfer lives on the relay, chosen per upload.
+#[derive(Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct Retention {
+    /// Delete the moment a device downloads it.
+    #[serde(default)]
+    pub delete_on_download: bool,
+    /// Keep forever (no auto-expiry) — the "file it permanently" option.
+    #[serde(default)]
+    pub permanent: bool,
+    /// Days until auto-expiry when not permanent (server clamps 1..=365; None = 1 day default).
+    #[serde(default)]
+    pub ttl_days: Option<i64>,
 }
 
 /// Build an `Api` from the configured server URL (base `<serverUrl>/v1`), pinning the deployed
@@ -1175,6 +1205,7 @@ pub async fn transfer_send(
     recipient_device_id: Option<String>,
     filename: String,
     data_b64: String,
+    retention: Option<Retention>,
 ) -> Result<TransferSendOut, String> {
     let vk = session_vault_key(&state)?;
     let api = api_for(&state)?;
@@ -1198,7 +1229,12 @@ pub async fn transfer_send(
     }
     let recipient = recipient_device_id.filter(|s| !s.trim().is_empty());
     let id = api
-        .create_transfer(recipient, plaintext_size, &blob)
+        .create_transfer(
+            recipient,
+            plaintext_size,
+            &blob,
+            &retention.unwrap_or_default(),
+        )
         .await?;
     Ok(TransferSendOut {
         id,
