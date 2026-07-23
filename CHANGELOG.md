@@ -10,6 +10,13 @@ that bumps the app version** — that's how "the changelog updates on every merg
 
 ## [0.1.51] — 2026-07-23
 
+### Fixed
+- **The iPhone can sign in to your server again.** iOS was blocking the connection to a
+  self-signed personal server before the app's own certificate check could accept it (the
+  "TLS error / secure connection failed" you saw). The app pins your exact server certificate
+  itself — stronger than the check iOS was enforcing — so that check is now handed fully to the
+  app. The desktop was never affected.
+
 ### Changed
 - **The Mac app is signed and notarized by Apple.** It opens with a normal double-click — no
   more right-click → Open, no "unidentified developer" warning. Self-updates install the
