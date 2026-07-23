@@ -8,6 +8,34 @@ The format follows [Keep a Changelog](https://keepachangelog.com/). Versions are
 [semantic](https://semver.org/). **Add a new `## [x.y.z]` section at the top in the same PR
 that bumps the app version** — that's how "the changelog updates on every merge."
 
+## [0.1.54] — 2026-07-23
+
+### Added
+- **A “Getting started” checklist.** A new screen (and a sidebar item that shows your progress)
+  lays out everything you can set up — protect your vault, add your first login, sync across
+  devices, add another device, browser autofill, VPN, servers — each with a one-click button that
+  takes you straight to it. It marks items done as you go and tucks itself away once the essentials
+  are handled. Finishing the first-run setup now drops you here instead of an empty vault.
+- **The iPhone app runs full-screen on iPad.** It’s now a proper iPad app (not a blown-up phone
+  window): full-screen, works in any orientation, and the vault shows a side-by-side list and
+  detail on the larger screen. The iPhone layout is unchanged.
+
+### Changed
+- **Clearer feedback everywhere.** Actions that used to fail silently now tell you what happened —
+  most importantly the VPN **Connect/Disconnect** buttons, which previously gave no error if
+  WireGuard wasn’t installed or the app wasn’t run as administrator. Success and error messages now
+  appear as small notifications, and a screen that hits an unexpected error shows a “try again” card
+  instead of going blank.
+- **A friendlier empty vault.** A brand-new vault now shows an “Add your first login” button and an
+  import hint, instead of “select an item” pointing at nothing.
+- **The monthly report works and is easy to find.** You can reach it from the command palette
+  (Ctrl/⌘-K) and the VPN screen, flip between months, and its **Export PNG** button now actually
+  saves a shareable image of the report.
+
+### Fixed
+- Settings and unlock screens no longer flash blank while loading, and the browser-autofill card is
+  hidden on macOS (where its helper isn’t supported yet) instead of showing a button that can’t work.
+
 ## [0.1.53] — 2026-07-23
 
 ### Added

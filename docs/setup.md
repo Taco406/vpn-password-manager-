@@ -16,6 +16,10 @@ the top; each optional feature says exactly what it needs and what (if anything)
 
 You never need all of it. The vault is fully useful on its own.
 
+> **New in v0.1.54:** open the **Get started** item in the sidebar for a checklist that walks you
+> through each of these one at a time, with a one-click button beside anything you haven't set up
+> yet. It's the fastest way to go from "just the vault" to the whole suite.
+
 ---
 
 ## 1. Install the app (required)
