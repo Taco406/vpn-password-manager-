@@ -35,6 +35,11 @@
 	<array>
 		<string>UIInterfaceOrientationPortrait</string>
 	</array>
+	<!-- Export compliance: the app uses standard, exempt encryption only (user-data protection —
+	     the standard password-manager classification). Declaring it here means TestFlight builds
+	     go "Ready to Test" automatically instead of stopping at a manual compliance dialog. -->
+	<key>ITSAppUsesNonExemptEncryption</key>
+	<false/>
 	<!-- Why the app asks for the camera and Face ID (App Store requires a reason string). -->
 	<key>NSCameraUsageDescription</key>
 	<string>Scan the Add-a-device QR from NorthKey on your computer to connect this phone.</string>
