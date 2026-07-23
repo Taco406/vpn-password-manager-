@@ -115,11 +115,8 @@ function SignIn({ onSyncChange }: { onSyncChange: () => void }) {
       const p = await syncProbeServer(address);
       setProbe(p);
       if (!p.fingerprint) setConfirmed(true); // real-CA server: TLS itself is the trust
-      if (!p.passwordSigninReady) {
-        setMsg(
-          "Found your server, but master-password sign-in isn't turned on yet. On a computer that already has your vault: Account & Sync → Advanced → Turn on master-password sign-in. (Old server? Click Update server there first.)",
-        );
-      }
+      // Not-ready guidance renders as a persistent block below (not a transient msg), so a
+      // user who already pressed "Trust this server" isn't left staring at a dead end.
     } catch (e) {
       setMsg(errMsg(e));
     }
@@ -222,6 +219,21 @@ function SignIn({ onSyncChange }: { onSyncChange: () => void }) {
               {busy ? "Signing in…" : "Sign in"}
             </button>
           </>
+        )}
+
+        {probe && confirmed && !probe.passwordSigninReady && (
+          <div className="rounded-[10px] border border-[var(--warn)]/40 bg-[var(--warn)]/10 p-3">
+            <div className="mb-1 text-xs font-semibold">One step left — on your other computer</div>
+            <p className="mb-2 text-xs text-[var(--text-secondary)]">
+              This server is yours, but master-password sign-in isn’t turned on yet. On the computer that already has your
+              vault: <span className="font-medium">Account &amp; Sync → Advanced → Turn on master-password sign-in</span>{" "}
+              (if that computer says the server is old, click <span className="font-medium">Update server</span> first).
+              Then come back here and press Check again.
+            </p>
+            <button onClick={() => void doProbe()} disabled={busy} className={btnCls}>
+              {busy ? "Checking…" : "Check again"}
+            </button>
+          </div>
         )}
 
         {msg && <p className="text-xs text-[var(--text-secondary)]">{msg}</p>}
@@ -1077,7 +1089,9 @@ function GoogleGuideSteps() {
   );
 }
 
-/** "Add a device" affordance: mint a join code and show it with copy + a sensitivity warning. */
+/** "Add a device" affordance: mint a join code and show it with copy + a sensitivity warning.
+ * The QR carries a ~5-minute one-time enroll code, so it shows a live countdown and flips to an
+ * "expired — get a fresh one" state instead of silently going stale on screen. */
 function AddDeviceBlock({
   busy,
   pairCode,
@@ -1087,6 +1101,15 @@ function AddDeviceBlock({
   pairCode: PairCodeInfo | null;
   onAdd: () => void;
 }) {
+  const [now, setNow] = useState(() => Math.floor(Date.now() / 1000));
+  useEffect(() => {
+    if (!pairCode?.qrExpiresAt) return;
+    const t = setInterval(() => setNow(Math.floor(Date.now() / 1000)), 1000);
+    return () => clearInterval(t);
+  }, [pairCode?.qrExpiresAt]);
+  const secondsLeft = pairCode?.qrExpiresAt ? Math.max(0, pairCode.qrExpiresAt - now) : null;
+  const qrExpired = secondsLeft !== null && secondsLeft <= 0;
+
   return (
     <div className="!mt-2">
       {!pairCode ? (
@@ -1101,20 +1124,34 @@ function AddDeviceBlock({
         </div>
       ) : (
         <div className="space-y-2">
-          {pairCode.qrSvg && (
+          {pairCode.qrSvg && !qrExpired && (
             <div>
               <div className="mb-1 text-xs font-medium text-[var(--text-primary)]">iPhone — scan this QR</div>
               <p className="mb-2 text-[11px] text-[var(--text-secondary)]">
                 In NorthKey on your phone, tap <span className="font-medium">Scan QR from desktop</span> and point it here.
-                It connects the phone to your account (expires in ~5 minutes); your master password then unlocks the vault.
+                It connects the phone to your account; your master password then unlocks the vault.
               </p>
               <div
                 className="w-fit rounded-[10px] bg-white p-2"
                 // eslint-disable-next-line react/no-danger
                 dangerouslySetInnerHTML={{ __html: pairCode.qrSvg }}
               />
+              {secondsLeft !== null && (
+                <p className="mt-1 text-[11px] text-[var(--text-secondary)]">
+                  Good for {Math.floor(secondsLeft / 60)}:{String(secondsLeft % 60).padStart(2, "0")} more — then press New QR below.
+                </p>
+              )}
             </div>
           )}
+          {qrExpired && (
+            <div className="rounded-[10px] border border-[var(--warn)]/40 bg-[var(--warn)]/10 p-2 text-[11px] text-[var(--warn)]">
+              That QR expired — they only last about 5 minutes. Press <span className="font-medium">New QR</span> for a fresh
+              one and scan again.
+            </div>
+          )}
+          <button onClick={onAdd} disabled={busy} className="inline-flex items-center gap-1.5 rounded-[10px] border border-[var(--border-strong)] px-3 py-1.5 text-sm hover:border-[var(--accent)]/50 disabled:opacity-50">
+            <RefreshCw size={14} /> {busy ? "Working…" : "New QR"}
+          </button>
           <div className="rounded-[10px] border border-[var(--warn)]/40 bg-[var(--warn)]/10 p-2 text-[11px] text-[var(--warn)]">
             Another computer instead? This code unlocks your vault on another device — treat it like a password. It’s shown
             once; paste it into <span className="font-medium">Account &amp; Sync → Join with a device code</span> on the
@@ -1270,6 +1307,8 @@ function AccountSync({ sync, onSyncChange }: { sync: SyncStatusInfo | null; onSy
     try {
       setPairCode(await syncPairBegin());
     } catch (e) {
+      // Never leave a stale QR on screen next to an error — that reads as "scan me" while dead.
+      setPairCode(null);
       setMsg(errMsg(e));
     }
     setBusy(false);

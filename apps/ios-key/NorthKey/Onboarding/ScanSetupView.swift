@@ -76,9 +76,16 @@ struct ScanSetupView: View {
                 try await ApiClient.shared.configureFromQR(
                     ip: qr.ip, certPEM: qr.cert, enrollCode: qr.enroll)
                 await MainActor.run { onDone() }
-            } catch {
+            } catch let ApiError.http(code, _) where code == 400 || code == 404 || code == 410 {
+                // The server answered — the code itself is dead (expired/used), not the connection.
                 await MainActor.run {
-                    self.error = "Couldn't connect: \(error.localizedDescription). Codes expire after ~5 minutes — mint a fresh one and rescan."
+                    self.error = "This device code has expired or was already used. On your computer press Add a device for a fresh QR, then scan again."
+                    self.busy = false
+                }
+            } catch {
+                // A real connection failure — show full detail, and DON'T blame the QR's age.
+                await MainActor.run {
+                    self.error = "Couldn't connect to your server: \(error.localizedDescription)"
                     self.busy = false
                 }
             }

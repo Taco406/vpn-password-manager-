@@ -8,6 +8,30 @@ The format follows [Keep a Changelog](https://keepachangelog.com/). Versions are
 [semantic](https://semver.org/). **Add a new `## [x.y.z]` section at the top in the same PR
 that bumps the app version** — that's how "the changelog updates on every merge."
 
+## [0.1.50] — 2026-07-23
+
+### Added
+- **The iPhone works without a connection now.** After the first successful sync, the phone
+  keeps an encrypted copy of your vault (the same unreadable-without-your-master-password bytes
+  the server stores). No signal, server rebooting, plane mode — unlock still works and your
+  passwords still show, with an "Offline" note; editing switches back on when the server is
+  reachable again.
+
+### Fixed
+- **The "Add a device" QR shows a live countdown and refreshes with one click.** QRs are only
+  good for ~5 minutes; the desktop now counts that down, swaps the dead QR for an "expired —
+  press New QR" notice instead of leaving it on screen, and clears it when minting fails.
+- **The phone tells you what actually went wrong when it can't connect.** Connection failures
+  now show the full technical reason (so a screenshot is enough to diagnose), and the misleading
+  "codes expire after ~5 minutes" hint only appears when the code is actually the problem.
+- **A failed first connection no longer strands the phone.** Previously, if scanning the QR or
+  the address sign-in failed part-way, the phone remembered the half-configured server and
+  reopened onto an unlock screen for a server it never joined (until you tapped "forget" — the
+  extra step several first logins hit). Failed attempts now roll back cleanly.
+- After pressing "Trust this server", a server without master-password sign-in shows a clear
+  what-to-do-next card (with a "Check again" button) instead of a small message that was easy
+  to miss.
+
 ## [0.1.49] — 2026-07-23
 
 ### Added
