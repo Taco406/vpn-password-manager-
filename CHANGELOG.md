@@ -8,6 +8,22 @@ The format follows [Keep a Changelog](https://keepachangelog.com/). Versions are
 [semantic](https://semver.org/). **Add a new `## [x.y.z]` section at the top in the same PR
 that bumps the app version** — that's how "the changelog updates on every merge."
 
+## [0.1.55] — 2026-07-23
+
+### Added
+- **iPhone & iPad: a full server dashboard, matching your computer.** Tapping a server on the
+  Servers tab now opens a live dashboard with the whole tile grid — CPU, RAM, Swap, Disk, Load
+  (1/5/15 min), CPU steal, processes, uptime, and CPU/memory/disk “pressure” — plus live Network,
+  Disk I/O, and Load charts and your server’s active alarms. It reads Netdata directly, the same
+  numbers the desktop shows.
+- **Power your servers from your phone.** Start, reboot, or stop any Linode or Hetzner server right
+  from its dashboard (with a confirmation), using the tokens that already ride your encrypted vault.
+
+### Notes
+- The monitoring math on the phone is the same as the desktop’s, checked by unit tests so the two
+  always agree. If a server’s Netdata is behind a username/password, the phone skips it (set that up
+  from the computer); if the port is firewalled, open it from the desktop’s one-click button.
+
 ## [0.1.54] — 2026-07-23
 
 ### Added
