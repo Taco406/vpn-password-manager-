@@ -1,0 +1,110 @@
+name: iOS TestFlight
+
+# Build the iPhone app in the cloud, sign it, and push it to TestFlight — so updating the phone
+# becomes "open TestFlight, tap Update". No Mac, no Xcode, no 7-day expiry.
+#
+# Signing uses Apple's CLOUD SIGNING: `xcodebuild -allowProvisioningUpdates` with an App Store
+# Connect API key creates and manages the distribution certificate + provisioning profile
+# server-side. Nothing is ever exported from anyone's Keychain.
+#
+# Required repo secrets (see docs/ios-testflight.md for the exact click-path):
+#   APPSTORE_API_KEY_ID       App Store Connect API key ID
+#   APPSTORE_API_ISSUER_ID    App Store Connect issuer ID
+#   APPSTORE_API_PRIVATE_KEY  contents of the downloaded AuthKey_XXXX.p8
+#   APPLE_TEAM_ID             10-char team ID (same secret the Mac signing uses)
+#
+# Runs on every published release (so the phone build tracks the desktop version) and on demand.
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+
+jobs:
+  testflight:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check secrets are configured
+        env:
+          KEY_ID: ${{ secrets.APPSTORE_API_KEY_ID }}
+          ISSUER: ${{ secrets.APPSTORE_API_ISSUER_ID }}
+          P8: ${{ secrets.APPSTORE_API_PRIVATE_KEY }}
+          TEAM: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          missing=""
+          [ -z "$KEY_ID" ] && missing="$missing APPSTORE_API_KEY_ID"
+          [ -z "$ISSUER" ] && missing="$missing APPSTORE_API_ISSUER_ID"
+          [ -z "$P8" ] && missing="$missing APPSTORE_API_PRIVATE_KEY"
+          [ -z "$TEAM" ] && missing="$missing APPLE_TEAM_ID"
+          if [ -n "$missing" ]; then
+            echo "::error::Missing repo secrets:$missing — see docs/ios-testflight.md"
+            exit 1
+          fi
+
+      - name: Generate the Xcode project
+        run: |
+          brew install xcodegen
+          cd apps/ios-key
+          xcodegen generate
+
+      - name: Install the App Store Connect API key
+        env:
+          KEY_ID: ${{ secrets.APPSTORE_API_KEY_ID }}
+          P8: ${{ secrets.APPSTORE_API_PRIVATE_KEY }}
+        run: |
+          mkdir -p ~/private_keys
+          printf '%s' "$P8" > ~/private_keys/AuthKey_${KEY_ID}.p8
+
+      - name: Archive (cloud signing)
+        env:
+          KEY_ID: ${{ secrets.APPSTORE_API_KEY_ID }}
+          ISSUER: ${{ secrets.APPSTORE_API_ISSUER_ID }}
+          TEAM: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          v=$(node -p "require('./apps/desktop/src-tauri/tauri.conf.json').version")
+          echo "App version: $v  build: ${{ github.run_number }}"
+          cd apps/ios-key
+          xcodebuild archive \
+            -project NorthKey.xcodeproj \
+            -scheme NorthKey \
+            -destination 'generic/platform=iOS' \
+            -archivePath build/NorthKey.xcarchive \
+            -allowProvisioningUpdates \
+            -authenticationKeyPath ~/private_keys/AuthKey_${KEY_ID}.p8 \
+            -authenticationKeyID "$KEY_ID" \
+            -authenticationKeyIssuerID "$ISSUER" \
+            DEVELOPMENT_TEAM="$TEAM" \
+            CODE_SIGN_STYLE=Automatic \
+            MARKETING_VERSION="$v" \
+            CURRENT_PROJECT_VERSION="${{ github.run_number }}"
+
+      - name: Upload to TestFlight
+        env:
+          KEY_ID: ${{ secrets.APPSTORE_API_KEY_ID }}
+          ISSUER: ${{ secrets.APPSTORE_API_ISSUER_ID }}
+          TEAM: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          cd apps/ios-key
+          cat > ExportOptions.plist <<EOF
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+            <key>method</key><string>app-store-connect</string>
+            <key>destination</key><string>upload</string>
+            <key>teamID</key><string>${TEAM}</string>
+            <key>manageAppVersionAndBuildNumber</key><false/>
+          </dict>
+          </plist>
+          EOF
+          xcodebuild -exportArchive \
+            -archivePath build/NorthKey.xcarchive \
+            -exportOptionsPlist ExportOptions.plist \
+            -exportPath build/out \
+            -allowProvisioningUpdates \
+            -authenticationKeyPath ~/private_keys/AuthKey_${KEY_ID}.p8 \
+            -authenticationKeyID "$KEY_ID" \
+            -authenticationKeyIssuerID "$ISSUER"
+          echo "Uploaded — it appears in TestFlight after Apple's ~5-minute processing."
