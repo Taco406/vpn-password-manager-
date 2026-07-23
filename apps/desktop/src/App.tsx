@@ -12,6 +12,7 @@ import { Vpn } from "./screens/Vpn";
 import { Health } from "./screens/Health";
 import { Devices } from "./screens/Devices";
 import { Servers } from "./screens/Servers";
+import { Transfers } from "./screens/Transfers";
 import { Tools } from "./screens/Tools";
 import { Experimental } from "./screens/Experimental";
 import { Settings } from "./screens/Settings";
@@ -43,6 +44,7 @@ export function App() {
             <Route path="/health" element={<Health />} />
             <Route path="/devices" element={<Devices />} />
             <Route path="/servers" element={<Servers />} />
+            <Route path="/transfers" element={<Transfers />} />
             <Route path="/tools" element={<Tools />} />
             <Route path="/experimental" element={<Experimental />} />
             <Route path="/settings" element={<Settings />} />

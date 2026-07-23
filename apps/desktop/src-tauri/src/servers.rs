@@ -7,8 +7,8 @@
 //! active VPN tunnel is refused (that teardown path lives on the VPN screen).
 
 use sentinel_core::cloud::{
-    netdata, watchdog, HetznerClient, LinodeClient, NetdataEndpoint, PowerAction, ServerEvent,
-    ServerInfo, ServerManager, Snapshot,
+    netdata, watchdog, Firewall, FirewallRule, HetznerClient, LinodeClient, NetdataEndpoint,
+    PowerAction, ServerEvent, ServerInfo, ServerManager, Snapshot,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -20,7 +20,7 @@ use crate::state::AppState;
 const KC_SERVICE: &str = "com.sentinel.desktop";
 const KC_HETZNER: &str = "hetzner-token";
 
-fn hetzner_get_token() -> Option<String> {
+pub(crate) fn hetzner_get_token() -> Option<String> {
     let entry = keyring::Entry::new(KC_SERVICE, KC_HETZNER).ok()?;
     entry
         .get_password()
@@ -29,7 +29,7 @@ fn hetzner_get_token() -> Option<String> {
         .filter(|s| !s.is_empty())
 }
 
-fn hetzner_set_token(token: &str) -> Result<(), String> {
+pub(crate) fn hetzner_set_token(token: &str) -> Result<(), String> {
     let entry = keyring::Entry::new(KC_SERVICE, KC_HETZNER).map_err(|e| e.to_string())?;
     if token.trim().is_empty() {
         let _ = entry.delete_credential();
@@ -532,6 +532,27 @@ fn netdata_key(provider: &str, id: &str) -> String {
     format!("{provider}:{id}")
 }
 
+/// The per-server Netdata config map as JSON (empty string when nothing is configured), so it
+/// can ride the synced settings item. Non-secret only — per-server auth stays device-local.
+pub(crate) fn netdata_config_json(dir: &Path) -> String {
+    let cfg = load_cfg(dir);
+    if cfg.netdata.is_empty() {
+        return String::new();
+    }
+    serde_json::to_string(&cfg.netdata).unwrap_or_default()
+}
+
+/// Merge a synced Netdata config map (from another device) into the local config.
+pub(crate) fn apply_netdata_config_json(dir: &Path, json: &str) {
+    if let Ok(incoming) = serde_json::from_str::<BTreeMap<String, NetdataFileCfg>>(json) {
+        let mut cfg = load_cfg(dir);
+        for (k, v) in incoming {
+            cfg.netdata.insert(k, v);
+        }
+        let _ = save_cfg(dir, &cfg);
+    }
+}
+
 fn netdata_auth_account(provider: &str, id: &str) -> String {
     format!("netdata-auth-{provider}-{id}")
 }
@@ -704,6 +725,14 @@ pub async fn netdata_metric(
         // Netdata names the root-filesystem chart `disk_space./` (the mount point is part of the
         // id); the old `disk_space._` guess returns nothing on current agents.
         "disk" => ("disk_space./", netdata::disk_used_pct),
+        // Dashboard tiles added in v0.1.53.
+        "swap" => ("mem.swap", netdata::swap_used_pct),
+        "steal" => ("system.cpu", netdata::cpu_steal_pct),
+        "procs" => ("system.processes", netdata::procs_running),
+        "uptime" => ("system.uptime", netdata::uptime_secs),
+        "psi_cpu" => ("system.cpu_some_pressure", netdata::psi_some),
+        "psi_mem" => ("system.memory_some_pressure", netdata::psi_some),
+        "psi_io" => ("system.io_some_pressure", netdata::psi_some),
         k => return Err(format!("unknown metric kind: {k}")),
     };
     let series = ep
@@ -711,6 +740,48 @@ pub async fn netdata_metric(
         .await
         .map_err(|e| e.to_string())?;
     Ok(points_out(&agg(&series)))
+}
+
+/// One labelled line of a multi-series chart (load 1/5/15, network in/out, disk read/write).
+#[derive(Serialize)]
+pub struct SeriesOut {
+    label: String,
+    points: Vec<[f64; 2]>,
+}
+
+/// Multi-line live charts. `kind`: `load` (1m/5m/15m), `net` (in/out bytes/s), `diskio`
+/// (read/write KiB/s). Each line degrades independently, so a missing dimension just drops
+/// that line instead of failing the chart.
+#[tauri::command]
+pub async fn netdata_series(
+    state: State<'_, AppState>,
+    provider: String,
+    id: String,
+    host: String,
+    kind: String,
+    after_secs: u32,
+    points: u32,
+) -> Result<Vec<SeriesOut>, String> {
+    let dir = data_dir(&state);
+    let (ep, _) = endpoint_for(&dir, &provider, &id, &host);
+    let (chart, agg): (&str, fn(&netdata::NetdataSeries) -> netdata::NamedSeries) =
+        match kind.as_str() {
+            "load" => ("system.load", netdata::load_all),
+            "net" => ("system.net", netdata::net_in_out),
+            "diskio" => ("system.io", netdata::disk_io_rw),
+            k => return Err(format!("unknown series kind: {k}")),
+        };
+    let series = ep
+        .data(chart, after_secs.clamp(10, 86_400), points.clamp(2, 600))
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(agg(&series)
+        .into_iter()
+        .map(|(label, pts)| SeriesOut {
+            label,
+            points: points_out(&pts),
+        })
+        .collect())
 }
 
 #[derive(Serialize)]
@@ -741,6 +812,151 @@ pub async fn netdata_alarms(
             value: a.value,
         })
         .collect())
+}
+
+// ---------------------------------------------------------------------------
+// Hetzner Cloud firewall (open a port from the app instead of the console)
+// ---------------------------------------------------------------------------
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FirewallRuleOut {
+    direction: String,
+    protocol: String,
+    port: Option<String>,
+    /// source_ips for inbound rules, destination_ips for outbound.
+    ips: Vec<String>,
+    description: Option<String>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FirewallStatusOut {
+    /// True when a Hetzner Cloud Firewall is attached to this server (traffic is filtered).
+    attached: bool,
+    firewall_name: Option<String>,
+    rules: Vec<FirewallRuleOut>,
+    /// True when an inbound TCP rule already admits the queried port (set by allow-port callers).
+    supported: bool,
+}
+
+fn rule_out(r: &FirewallRule) -> FirewallRuleOut {
+    let ips = if r.direction == "out" {
+        r.destination_ips.clone()
+    } else {
+        r.source_ips.clone()
+    };
+    FirewallRuleOut {
+        direction: r.direction.clone(),
+        protocol: r.protocol.clone(),
+        port: r.port.clone(),
+        ips,
+        description: r.description.clone(),
+    }
+}
+
+/// The Hetzner firewall (if any) attached to `server_id`, plus the client, for read-modify-write.
+async fn hetzner_firewall_for(
+    server_id: u64,
+) -> Result<(HetznerClient, Vec<Firewall>, Option<Firewall>), String> {
+    let token = hetzner_get_token().ok_or("No Hetzner token is set.")?;
+    let client = HetznerClient::new(token);
+    let firewalls = client.list_firewalls().await.map_err(|e| e.to_string())?;
+    let attached = firewalls
+        .iter()
+        .find(|f| f.applied_server_ids.contains(&server_id))
+        .cloned();
+    Ok((client, firewalls, attached))
+}
+
+/// Report the firewall attached to a Hetzner server and its rules (for the Manage-server view).
+#[tauri::command]
+pub async fn servers_firewall_get(
+    provider: String,
+    id: String,
+) -> Result<FirewallStatusOut, String> {
+    if provider != "hetzner" {
+        return Ok(FirewallStatusOut {
+            attached: false,
+            firewall_name: None,
+            rules: vec![],
+            supported: false,
+        });
+    }
+    let server_id: u64 = id.parse().map_err(|_| "bad server id".to_string())?;
+    let (_, _, attached) = hetzner_firewall_for(server_id).await?;
+    Ok(match attached {
+        Some(fw) => FirewallStatusOut {
+            attached: true,
+            firewall_name: Some(fw.name),
+            rules: fw.rules.iter().map(rule_out).collect(),
+            supported: true,
+        },
+        None => FirewallStatusOut {
+            attached: false,
+            firewall_name: None,
+            rules: vec![],
+            supported: true,
+        },
+    })
+}
+
+/// Ensure an inbound TCP rule admits `port` from `source` on the Hetzner server's firewall.
+/// `source`: "any" → 0.0.0.0/0 + ::/0 (right for a changing home IP), else a CIDR like
+/// "203.0.113.4/32". Read-modify-write: never wipes existing rules. If the server has no
+/// firewall yet, one is created and applied.
+#[tauri::command]
+pub async fn servers_firewall_allow_port(
+    provider: String,
+    id: String,
+    port: u16,
+    source: String,
+) -> Result<(), String> {
+    if provider != "hetzner" {
+        return Err("Firewall management is available for Hetzner servers.".into());
+    }
+    let server_id: u64 = id.parse().map_err(|_| "bad server id".to_string())?;
+    let source_ips = if source.trim().eq_ignore_ascii_case("any") || source.trim().is_empty() {
+        vec!["0.0.0.0/0".to_string(), "::/0".to_string()]
+    } else {
+        vec![source.trim().to_string()]
+    };
+    let port_s = port.to_string();
+    let new_rule = FirewallRule {
+        direction: "in".into(),
+        protocol: "tcp".into(),
+        port: Some(port_s.clone()),
+        source_ips: source_ips.clone(),
+        destination_ips: vec![],
+        description: Some(format!("NorthKey: port {port}")),
+    };
+
+    let (client, _all, attached) = hetzner_firewall_for(server_id).await?;
+    match attached {
+        Some(fw) => {
+            // Already admitted from these exact sources? Nothing to do.
+            let already = fw.rules.iter().any(|r| {
+                r.direction == "in"
+                    && r.protocol == "tcp"
+                    && r.port.as_deref() == Some(port_s.as_str())
+                    && source_ips.iter().all(|ip| r.source_ips.contains(ip))
+            });
+            if already {
+                return Ok(());
+            }
+            let mut rules = fw.rules.clone();
+            rules.push(new_rule);
+            client
+                .set_firewall_rules(fw.id, &rules)
+                .await
+                .map_err(|e| e.to_string())
+        }
+        None => client
+            .create_firewall(&format!("northkey-{port}"), &[new_rule], server_id)
+            .await
+            .map(|_| ())
+            .map_err(|e| e.to_string()),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -796,7 +1012,7 @@ async fn watchdog_tick(
                     if let Ok(s) = ep.data("system.cpu", 60, 4).await {
                         sample.cpu_pct = netdata::cpu_total_pct(&s).last().map(|p| p.value);
                     }
-                    if let Ok(s) = ep.data("disk_space._", 60, 2).await {
+                    if let Ok(s) = ep.data("disk_space./", 60, 2).await {
                         sample.disk_used_pct = netdata::disk_used_pct(&s).last().map(|p| p.value);
                     }
                     if let Ok(alarms) = ep.alarms_active().await {

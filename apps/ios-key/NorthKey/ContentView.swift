@@ -26,7 +26,14 @@ struct ContentView: View {
                 }
                 .padding(20)
             } else {
-                VaultListView(vault: vault)
+                TabView {
+                    VaultListView(vault: vault)
+                        .tabItem { Label("Vault", systemImage: "key.fill") }
+                    ServersView(vault: vault)
+                        .tabItem { Label("Servers", systemImage: "server.rack") }
+                    TransfersView(vault: vault)
+                        .tabItem { Label("Transfers", systemImage: "paperplane.fill") }
+                }
             }
         }
         .accentColor(Color(hex: 0x22D3EE))

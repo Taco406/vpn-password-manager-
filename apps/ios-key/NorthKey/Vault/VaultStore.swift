@@ -7,6 +7,31 @@ import Foundation
 import LocalAuthentication
 import Security
 
+/// Provider settings the desktop shares through the encrypted `northkey:system` item, so the phone
+/// can monitor Linode/Hetzner/Netdata directly. Field names mirror the desktop's `SET_*` constants
+/// (`apps/desktop/src-tauri/src/sync.rs`) — additive-only, like every synced field.
+struct ProviderTokens: Equatable {
+    var linode = ""
+    var hetzner = ""
+    /// JSON map of `"provider:id" -> {port, https, hasAuth}` from the desktop's Netdata config.
+    var netdataConfigJSON = ""
+
+    var hasAny: Bool { !linode.isEmpty || !hetzner.isEmpty }
+
+    init() {}
+
+    /// Pull the fields out of the (already-decrypted) system settings item, if present.
+    init(fromSystemItems items: [VaultItem]) {
+        guard let sys = items.first(where: { $0.tags.contains("northkey:system") }) else { return }
+        func field(_ name: String) -> String {
+            sys.customFields.first(where: { $0.name == name })?.value ?? ""
+        }
+        linode = field("linode_token")
+        hetzner = field("hetzner_token")
+        netdataConfigJSON = field("netdata_config")
+    }
+}
+
 @MainActor
 final class VaultStore: ObservableObject {
     @Published var items: [VaultItem] = []
@@ -15,6 +40,13 @@ final class VaultStore: ObservableObject {
     /// True when the vault on screen came from the offline snapshot because the server was
     /// unreachable. Read-only mode: the list shows, edits are refused until back online.
     @Published var offline = false
+    /// Provider tokens the desktop shares through the encrypted `northkey:system` settings item,
+    /// so the phone can call Linode/Hetzner/Netdata directly for monitoring (same as the desktop).
+    /// Decrypted only here, in-app — the sync server still only ever holds ciphertext.
+    @Published var providerTokens = ProviderTokens()
+
+    /// The vault key from the live session, exposed so the Transfers tab can seal/open file blobs.
+    var currentVaultKey: Data? { vaultKey }
 
     private var vaultKey: Data?
     private var version: Int64 = 0
@@ -122,6 +154,7 @@ final class VaultStore: ObservableObject {
         document = VaultDocument(format: 1, items: [], tombstones: [])
         version = 0
         offline = false
+        providerTokens = ProviderTokens()
     }
 
     // MARK: - Sync
@@ -154,13 +187,16 @@ final class VaultStore: ObservableObject {
         }.value
         document = doc
         version = v
-        items = doc.items.compactMap { b64 in
+        let opened: [VaultItem] = doc.items.compactMap { b64 in
             guard let env = Data(base64Encoded: b64) else { return nil }
             return try? VaultCrypto.openItem(vaultKey: key, envelope: env)
         }
-        // System items (synced app settings) are managed automatically — never listed.
-        .filter { !$0.tags.contains("northkey:system") }
-        .sorted { $0.title.localizedCaseInsensitiveCompare($1.title) == .orderedAscending }
+        // Capture the synced provider tokens from the system settings item (used for monitoring),
+        // then hide system items from the visible list — they're managed automatically.
+        providerTokens = ProviderTokens(fromSystemItems: opened)
+        items = opened
+            .filter { !$0.tags.contains("northkey:system") }
+            .sorted { $0.title.localizedCaseInsensitiveCompare($1.title) == .orderedAscending }
     }
 
     /// Insert-or-replace an item locally, then push. Retries once on a version conflict by

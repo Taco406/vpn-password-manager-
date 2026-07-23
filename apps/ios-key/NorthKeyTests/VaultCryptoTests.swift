@@ -13,6 +13,12 @@ private struct Golden: Decodable {
         let title: String
         let username: String
     }
+    struct FileTransfer: Decodable {
+        let filename: String
+        let mime: String
+        let bytes_b64: String
+        let blob_b64: String
+    }
     let items: [Item]
     let password: String
     let vault_blob_b64: String
@@ -20,6 +26,7 @@ private struct Golden: Decodable {
     let vault_version: UInt64
     let wrapped_key_b64: String
     let login_proof_b64: String
+    let file_transfer: FileTransfer
 }
 
 final class VaultCryptoTests: XCTestCase {
@@ -128,6 +135,31 @@ final class VaultCryptoTests: XCTestCase {
         if case .ts(let t) = decoded.tombstones[0][1] { XCTAssertEqual(t, 1_700_000_001) } else {
             XCTFail("tombstone[0][1] should be the timestamp")
         }
+    }
+
+    /// SFIL decode: the exact file-transfer blob the desktop (Rust) sealed opens to the same
+    /// filename, mime, and bytes on the phone. This is the file-transfer interop guarantee.
+    func testDecodeGoldenFileBlob() throws {
+        let g = try golden()
+        let vk = try XCTUnwrap(Data(base64Encoded: g.vault_key_b64))
+        let blob = try XCTUnwrap(Data(base64Encoded: g.file_transfer.blob_b64))
+        let (meta, bytes) = try VaultCrypto.openFileBlob(vaultKey: vk, blob: blob)
+        XCTAssertEqual(meta.filename, g.file_transfer.filename)
+        XCTAssertEqual(meta.mime, g.file_transfer.mime)
+        XCTAssertEqual(bytes.base64EncodedString(), g.file_transfer.bytes_b64)
+    }
+
+    /// What the phone seals as an SFIL blob, the phone can open again (and the byte format matches
+    /// the Rust `seal_file`/`open_file` that the golden-vector test above pins).
+    func testSealAndOpenFileBlobRoundTrip() throws {
+        let vk = Data(repeating: 0x42, count: 32)
+        let meta = VaultCrypto.FileMeta(filename: "note.txt", mime: "text/plain")
+        let payload = Data((0..<500).map { UInt8($0 % 256) })
+        let blob = try VaultCrypto.sealFileBlob(vaultKey: vk, meta: meta, bytes: payload)
+        let (reopened, bytes) = try VaultCrypto.openFileBlob(vaultKey: vk, blob: blob)
+        XCTAssertEqual(reopened.filename, "note.txt")
+        XCTAssertEqual(reopened.mime, "text/plain")
+        XCTAssertEqual(bytes, payload)
     }
 
     /// The item JSON the phone writes must use the Rust field names (custom_fields, created_at…).

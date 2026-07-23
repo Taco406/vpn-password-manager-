@@ -293,10 +293,12 @@ export async function serversConfig(): Promise<{ linodeEnabled: boolean; hetzner
   return inv("servers_config");
 }
 
-/** Save (or clear, with "") the Hetzner Cloud API token. */
+/** Save (or clear, with "") the Hetzner Cloud API token. Shares it (encrypted) with the other
+ * devices so a second computer's Servers screen shows the Hetzner box too. */
 export async function serversSetHetznerToken(token: string): Promise<void> {
   if (!inTauri()) throw new Error("Server management is only available in the desktop app.");
   await inv("servers_set_hetzner_token", { token });
+  void settingsSyncWrite();
 }
 
 /** Every server on every configured provider (per-provider errors reported alongside). */
@@ -458,6 +460,26 @@ export async function netdataMetric(
   return inv<[number, number][]>("netdata_metric", { provider, id, host, kind, afterSecs, points });
 }
 
+/** One labelled line of a multi-series chart. */
+export interface NetdataSeriesLine {
+  label: string;
+  points: [number, number][];
+}
+
+/** Multi-line live chart. kind: `load` (1m/5m/15m), `net` (in/out bytes/s), `diskio` (read/write).
+ * Each line degrades independently, so a missing dimension just drops that line. */
+export async function netdataSeries(
+  provider: string,
+  id: string,
+  host: string,
+  kind: string,
+  afterSecs: number,
+  points: number,
+): Promise<NetdataSeriesLine[]> {
+  if (!inTauri()) throw new Error("Netdata monitoring is only available in the desktop app.");
+  return inv<NetdataSeriesLine[]>("netdata_series", { provider, id, host, kind, afterSecs, points });
+}
+
 export async function netdataAlarms(
   provider: string,
   id: string,
@@ -465,6 +487,44 @@ export async function netdataAlarms(
 ): Promise<{ name: string; status: string; value: string }[]> {
   if (!inTauri()) return [];
   return inv("netdata_alarms", { provider, id, host });
+}
+
+// --- Hetzner Cloud firewall (open a monitoring/service port from the app) --------------------
+
+export interface FirewallRuleView {
+  direction: string; // "in" | "out"
+  protocol: string; // "tcp" | "udp" | "icmp" | ...
+  port: string | null;
+  ips: string[];
+  description: string | null;
+}
+
+export interface FirewallStatus {
+  /** A Hetzner Cloud Firewall is attached to this server (its traffic is filtered). */
+  attached: boolean;
+  firewallName: string | null;
+  rules: FirewallRuleView[];
+  /** The provider supports firewall management (true for Hetzner). */
+  supported: boolean;
+}
+
+/** The firewall (if any) attached to a Hetzner server, with its rules. Non-Hetzner → unsupported. */
+export async function serversFirewallGet(provider: string, id: string): Promise<FirewallStatus> {
+  if (!inTauri()) return { attached: false, firewallName: null, rules: [], supported: false };
+  return inv<FirewallStatus>("servers_firewall_get", { provider, id });
+}
+
+/** Open an inbound TCP port on a Hetzner server's firewall. `source`: "any" (0.0.0.0/0 + ::/0,
+ * right for a changing home IP) or a CIDR like "203.0.113.4/32". Read-modify-write; never wipes
+ * existing rules; creates + applies a firewall if the server has none. */
+export async function serversFirewallAllowPort(
+  provider: string,
+  id: string,
+  port: number,
+  source: string,
+): Promise<void> {
+  if (!inTauri()) throw new Error("Firewall management is only available in the desktop app.");
+  await inv("servers_firewall_allow_port", { provider, id, port, source });
 }
 
 /** Subscribe to watchdog alerts; returns an unsubscribe fn. */
@@ -796,6 +856,17 @@ export async function onSyncDeploy(
   return listen<{ stage: string; detail: string }>("sync:deploy", (ev) => cb(ev.payload));
 }
 
+/** Subscribe to "sync cycle finished" events (fired by the manual sync AND the ~90s auto-sync
+ * poller). Screens that depend on synced tokens (Servers, VPN, Devices) refresh on this so a
+ * freshly-signed-in device populates itself. Returns an unsubscribe fn. */
+export async function onSyncApplied(
+  cb: (e: { version: number; pulled: boolean }) => void,
+): Promise<() => void> {
+  if (!inTauri()) return () => {};
+  const { listen } = await import("@tauri-apps/api/event");
+  return listen<{ version: number; pulled: boolean }>("sync:applied", (ev) => cb(ev.payload));
+}
+
 export async function syncStatus(): Promise<SyncStatusInfo> {
   if (!inTauri())
     return { serverUrl: null, googleClientId: null, googleSecretSet: false, signedIn: false, email: null };
@@ -883,6 +954,23 @@ export async function settingsSyncWrite(): Promise<void> {
   } catch {
     /* best-effort */
   }
+}
+
+/** A non-secret view of the shared-settings item: which provider settings are synced, and when
+ * the item was last written. Only booleans + a timestamp — never a token or secret value. */
+export interface SettingsSyncStatusInfo {
+  present: boolean;
+  updatedAt: number;
+  linode: boolean;
+  google: boolean;
+  hetzner: boolean;
+  netdata: boolean;
+}
+
+export async function settingsSyncStatus(): Promise<SettingsSyncStatusInfo> {
+  if (!inTauri())
+    return { present: false, updatedAt: 0, linode: false, google: false, hetzner: false, netdata: false };
+  return inv<SettingsSyncStatusInfo>("settings_sync_status");
 }
 
 /** First contact with a server by address: its version, cert to pin, and trust fingerprint. */
@@ -1013,4 +1101,51 @@ export async function syncPairComplete(code: string): Promise<{ restored: number
 export async function syncForget(): Promise<void> {
   if (!inTauri()) return;
   await inv("sync_forget");
+}
+
+// --- File transfer ("send to my devices") — encrypted, zero-knowledge --------------------------
+
+export interface TransferItem {
+  id: string;
+  senderDeviceId: string;
+  recipientDeviceId: string | null;
+  sizeBytes: number;
+  state: string; // pending | delivered | expired
+  createdAt: number;
+  expiresAt: number;
+  /** This device is the sender (vs. an incoming transfer). */
+  outgoing: boolean;
+}
+
+/** ~25 MiB blob ceiling on the server; used to gate the picker before we bother sealing. */
+export const TRANSFER_MAX_BYTES = 25 * 1024 * 1024;
+
+/** Seal a picked file and upload it for one device (or all my devices when recipient is null). */
+export async function transferSend(
+  recipientDeviceId: string | null,
+  filename: string,
+  dataB64: string,
+): Promise<{ id: string; filename: string; blobBytes: number }> {
+  if (!inTauri()) throw new Error("File transfer is only available in the desktop app.");
+  return inv("transfer_send", { recipientDeviceId, filename, dataB64 });
+}
+
+/** The transfers this device can see (incoming + its own outgoing), newest first. */
+export async function transferList(): Promise<TransferItem[]> {
+  if (!inTauri()) return [];
+  return inv<TransferItem[]>("transfer_list");
+}
+
+/** Download + decrypt one transfer; returns its filename, mime, and bytes (base64) to save. */
+export async function transferDownload(
+  id: string,
+): Promise<{ filename: string; sizeBytes: number; mime: string; dataB64: string }> {
+  if (!inTauri()) throw new Error("File transfer is only available in the desktop app.");
+  return inv("transfer_download", { id });
+}
+
+/** Remove a transfer from the relay (either side may delete). */
+export async function transferDelete(id: string): Promise<void> {
+  if (!inTauri()) return;
+  await inv("transfer_delete", { id });
 }

@@ -25,6 +25,7 @@ use sentinel_core::keyring::password::PasswordWrapper;
 use sentinel_core::keyring::recovery::RecoveryWrapper;
 use sentinel_core::keyring::{KeyWrapper, VaultKey, WrappedBlob, WrapperType};
 use sentinel_core::recovery_kit::{self, pdf::render_kit_pdf, RecoveryKey};
+use sentinel_core::vault::fileblob::{open_file, seal_file, FileMeta};
 use sentinel_core::vault::model::Item;
 use sentinel_core::vault::{decode_sync_blob, encode_sync_blob, VaultSession};
 use serde::{Deserialize, Serialize};
@@ -32,7 +33,7 @@ use serde_json::json;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
-use tauri::{AppHandle, Emitter, State};
+use tauri::{AppHandle, Emitter, Manager, State};
 
 const KC_SERVICE: &str = "com.sentinel.desktop";
 const KC_ACCESS: &str = "sync-access";
@@ -628,6 +629,102 @@ impl Api {
         let w: W = resp.json().await.map_err(estr)?;
         STANDARD.decode(w.blob_b64.trim()).map_err(estr)
     }
+
+    /// POST /transfers — upload an opaque `SFIL` blob for a device (or all devices when None).
+    async fn create_transfer(
+        &self,
+        recipient_device_id: Option<String>,
+        size_bytes: i64,
+        ciphertext: &[u8],
+    ) -> Result<String, String> {
+        let body = json!({
+            "recipient_device_id": recipient_device_id,
+            "size_bytes": size_bytes,
+            "ciphertext_b64": STANDARD.encode(ciphertext),
+        });
+        let resp = self
+            .authed(reqwest::Method::POST, "/transfers", &[], Some(body))
+            .await?;
+        if !resp.status().is_success() {
+            let s = resp.status();
+            let t = resp.text().await.unwrap_or_default();
+            return Err(format!(
+                "POST /transfers: HTTP {s} {}",
+                t.trim().chars().take(200).collect::<String>()
+            ));
+        }
+        #[derive(Deserialize)]
+        struct R {
+            id: String,
+        }
+        let r: R = resp.json().await.map_err(estr)?;
+        Ok(r.id)
+    }
+
+    /// GET /transfers — the pending transfers this device can see (incoming + its own outgoing).
+    async fn list_transfers(&self) -> Result<Vec<TransferRow>, String> {
+        let resp = self
+            .authed(reqwest::Method::GET, "/transfers", &[], None)
+            .await?;
+        if !resp.status().is_success() {
+            return Err(format!("GET /transfers: HTTP {}", resp.status()));
+        }
+        #[derive(Deserialize)]
+        struct L {
+            #[serde(default)]
+            transfers: Vec<TransferRow>,
+        }
+        let l: L = resp.json().await.map_err(estr)?;
+        Ok(l.transfers)
+    }
+
+    /// GET /transfers/{id} — download one blob's ciphertext (marks it delivered server-side).
+    async fn download_transfer(&self, id: &str) -> Result<Vec<u8>, String> {
+        let path = format!("/transfers/{id}");
+        let resp = self.authed(reqwest::Method::GET, &path, &[], None).await?;
+        if !resp.status().is_success() {
+            return Err(format!("GET {path}: HTTP {}", resp.status()));
+        }
+        #[derive(Deserialize)]
+        struct D {
+            ciphertext_b64: String,
+        }
+        let d: D = resp.json().await.map_err(estr)?;
+        STANDARD.decode(d.ciphertext_b64.trim()).map_err(estr)
+    }
+
+    async fn delete_transfer(&self, id: &str) -> Result<(), String> {
+        let path = format!("/transfers/{id}");
+        let resp = self
+            .authed(reqwest::Method::DELETE, &path, &[], None)
+            .await?;
+        if resp.status().is_success() {
+            Ok(())
+        } else {
+            Err(format!("DELETE {path}: HTTP {}", resp.status()))
+        }
+    }
+}
+
+/// One row of the transfer list, as the server sends it (filename stays sealed in the blob).
+#[derive(Deserialize, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct TransferRow {
+    pub id: String,
+    #[serde(default)]
+    pub sender_device_id: String,
+    #[serde(default)]
+    pub recipient_device_id: Option<String>,
+    #[serde(default)]
+    pub size_bytes: i64,
+    #[serde(default)]
+    pub state: String,
+    #[serde(default)]
+    pub created_at: i64,
+    #[serde(default)]
+    pub expires_at: i64,
+    #[serde(default)]
+    pub outgoing: bool,
 }
 
 /// Build an `Api` from the configured server URL (base `<serverUrl>/v1`), pinning the deployed
@@ -954,10 +1051,12 @@ async fn try_push_vault(state: &State<'_, AppState>) -> Option<i64> {
     push_document(&api, &vk, state, current).await.ok()
 }
 
-#[tauri::command]
-pub async fn sync_now(state: State<'_, AppState>) -> Result<SyncNowOut, String> {
-    let vk = session_vault_key(&state)?;
-    let api = api_for(&state)?;
+/// The core pull → merge → apply-settings → push cycle, shared by the `sync_now` command and
+/// the background poller. Emits `sync:applied` afterward so screens that depend on synced tokens
+/// (Servers, VPN) refresh themselves instead of waiting for their own interval.
+async fn sync_once(state: &State<'_, AppState>, app: &AppHandle) -> Result<SyncNowOut, String> {
+    let vk = session_vault_key(state)?;
+    let api = api_for(state)?;
 
     let mut pulled = false;
     let mut current = 0i64;
@@ -972,14 +1071,200 @@ pub async fn sync_now(state: State<'_, AppState>) -> Result<SyncNowOut, String> 
     }
 
     // Apply synced device settings (or seed them from this device) before pushing.
-    let _ = sync_device_settings(&state);
+    let _ = sync_device_settings(state);
 
-    let version = push_document(&api, &vk, &state, current).await?;
+    let version = push_document(&api, &vk, state, current).await?;
+    let _ = app.emit(
+        "sync:applied",
+        json!({ "version": version, "pulled": pulled }),
+    );
     Ok(SyncNowOut {
         pushed: true,
         pulled,
         version,
     })
+}
+
+#[tauri::command]
+pub async fn sync_now(app: AppHandle, state: State<'_, AppState>) -> Result<SyncNowOut, String> {
+    sync_once(&state, &app).await
+}
+
+// ---------------------------------------------------------------------------
+// File transfer ("send to my devices") — encrypted, zero-knowledge relay.
+//
+// The file is sealed locally into an opaque `SFIL` blob (filename + bytes both inside the
+// ciphertext) under the vault key, uploaded to the sync server's short-lived relay, and opened
+// only on a receiving device that holds the same vault key. The server sees ciphertext + a size.
+// ---------------------------------------------------------------------------
+
+/// The server caps a single transfer's ciphertext at 25 MiB; guard client-side so the user gets a
+/// friendly message instead of an opaque HTTP 400. Keep in lockstep with `TRANSFER_MAX_CIPHERTEXT`
+/// in `services/api/src/routes.rs` (additive wire policy: never raise past the server's ceiling).
+const TRANSFER_MAX_BLOB_BYTES: usize = 25 * 1024 * 1024;
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TransferSendOut {
+    pub id: String,
+    pub filename: String,
+    /// Sealed blob size (what the server stores + counts against quota).
+    pub blob_bytes: i64,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TransferDownloadOut {
+    pub filename: String,
+    pub size_bytes: i64,
+    pub mime: String,
+    /// The decrypted file bytes, base64. The UI saves them via a browser download (no filesystem
+    /// path crosses the bridge, so nothing can be written outside the user's chosen location).
+    pub data_b64: String,
+}
+
+/// Reduce any path/name to its bare file-name component, defending against a malicious/garbled
+/// sealed `filename` (e.g. `../../etc/foo`) that could otherwise mislead the receiver's save.
+fn safe_basename(name: &str) -> String {
+    let base = Path::new(name)
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("")
+        .trim();
+    if base.is_empty() || base == "." || base == ".." {
+        "download.bin".to_string()
+    } else {
+        base.to_string()
+    }
+}
+
+/// Best-effort MIME from the file extension (advisory only — the receiver saves by name). The blob
+/// carries this sealed so the phone/desktop can preview sensibly; unknowns fall back to octet-stream.
+fn guess_mime(filename: &str) -> String {
+    let ext = Path::new(filename)
+        .extension()
+        .and_then(|s| s.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    let m = match ext.as_str() {
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "gif" => "image/gif",
+        "webp" => "image/webp",
+        "heic" => "image/heic",
+        "pdf" => "application/pdf",
+        "txt" | "log" | "md" => "text/plain",
+        "json" => "application/json",
+        "csv" => "text/csv",
+        "zip" => "application/zip",
+        "mp4" | "m4v" => "video/mp4",
+        "mov" => "video/quicktime",
+        "mp3" => "audio/mpeg",
+        "wav" => "audio/wav",
+        _ => "application/octet-stream",
+    };
+    m.to_string()
+}
+
+/// Seal a file (`filename` + base64 `data_b64` from the UI's file picker) and upload it for one
+/// device (or all this account's devices when `recipient_device_id` is `None`). The bytes ride the
+/// bridge as base64 — no filesystem path crosses in, so the app only ever reads what the user picked.
+#[tauri::command]
+pub async fn transfer_send(
+    state: State<'_, AppState>,
+    recipient_device_id: Option<String>,
+    filename: String,
+    data_b64: String,
+) -> Result<TransferSendOut, String> {
+    let vk = session_vault_key(&state)?;
+    let api = api_for(&state)?;
+
+    let bytes = STANDARD.decode(data_b64.trim()).map_err(estr)?;
+    if bytes.is_empty() {
+        return Err("that file is empty".into());
+    }
+    let plaintext_size = bytes.len() as i64;
+    let filename = safe_basename(&filename);
+    let meta = FileMeta {
+        filename: filename.clone(),
+        mime: guess_mime(&filename),
+    };
+    let blob = seal_file(&vk, &meta, &bytes).map_err(estr)?;
+    if blob.len() > TRANSFER_MAX_BLOB_BYTES {
+        return Err(format!(
+            "file too large to send ({:.1} MiB sealed; 25 MiB max)",
+            blob.len() as f64 / (1024.0 * 1024.0)
+        ));
+    }
+    let recipient = recipient_device_id.filter(|s| !s.trim().is_empty());
+    let id = api
+        .create_transfer(recipient, plaintext_size, &blob)
+        .await?;
+    Ok(TransferSendOut {
+        id,
+        filename,
+        blob_bytes: blob.len() as i64,
+    })
+}
+
+/// The transfers this device can see: everything it sent (outgoing) plus anything addressed to it
+/// or to "all my devices" (incoming). Filenames stay sealed — the row shows only size/state/age.
+#[tauri::command]
+pub async fn transfer_list(state: State<'_, AppState>) -> Result<Vec<TransferRow>, String> {
+    let api = api_for(&state)?;
+    api.list_transfers().await
+}
+
+/// Download + decrypt one transfer, returning its sealed filename and bytes (base64) for the UI to
+/// save via a browser download. Does NOT delete the transfer — the recipient keeps it until they
+/// choose to (the server TTL reaps it after 24h regardless).
+#[tauri::command]
+pub async fn transfer_download(
+    state: State<'_, AppState>,
+    id: String,
+) -> Result<TransferDownloadOut, String> {
+    let vk = session_vault_key(&state)?;
+    let api = api_for(&state)?;
+
+    let ct = api.download_transfer(&id).await?;
+    let (meta, data) = open_file(&vk, &ct).map_err(estr)?;
+
+    Ok(TransferDownloadOut {
+        filename: safe_basename(&meta.filename),
+        size_bytes: data.len() as i64,
+        mime: meta.mime,
+        data_b64: STANDARD.encode(&data),
+    })
+}
+
+/// Remove a transfer from the relay (either side may delete). Frees the account's quota.
+#[tauri::command]
+pub async fn transfer_delete(state: State<'_, AppState>, id: String) -> Result<(), String> {
+    let api = api_for(&state)?;
+    api.delete_transfer(&id).await
+}
+
+/// How often the background auto-sync polls (seconds). Self-gating: a tick does nothing unless
+/// the device is signed in and unlocked.
+const SYNC_POLL_SECS: u64 = 90;
+
+/// Background auto-sync loop: every ~90s, if signed in + unlocked, run the full sync cycle. This
+/// makes "Sync now" a rarely-needed manual refresh and — crucially — makes a freshly-signed-in
+/// device pull its synced provider tokens and populate the Servers/VPN screens on its own.
+pub fn spawn_sync_poller(app: AppHandle) {
+    tauri::async_runtime::spawn(async move {
+        loop {
+            tokio::time::sleep(Duration::from_secs(SYNC_POLL_SECS)).await;
+            let state = app.state::<AppState>();
+            // Gate: signed in (has an access token) and vault unlocked. Cheap checks first.
+            if kc_get(KC_ACCESS).is_none() || session_vault_key(&state).is_err() {
+                continue;
+            }
+            if let Err(e) = sync_once(&state, &app).await {
+                crate::applog::info("sync.poller", &format!("auto-sync skipped: {e}"));
+            }
+        }
+    });
 }
 
 #[tauri::command]
@@ -1384,6 +1669,8 @@ pub const SYSTEM_TAG: &str = "northkey:system";
 const SET_LINODE: &str = "linode_token";
 const SET_GCLIENT: &str = "google_client_id";
 const SET_GSECRET: &str = "google_client_secret";
+const SET_HETZNER: &str = "hetzner_token";
+const SET_NETDATA: &str = "netdata_config";
 
 fn settings_item_id() -> uuid::Uuid {
     uuid::Uuid::parse_str(SETTINGS_ITEM_ID).expect("const uuid")
@@ -1391,11 +1678,17 @@ fn settings_item_id() -> uuid::Uuid {
 
 /// Current local values (empty string = unset), in stable field order.
 fn local_settings(state: &State<'_, AppState>) -> Vec<(&'static str, String)> {
-    let cfg = load_config(&data_dir(state));
+    let dir = data_dir(state);
+    let cfg = load_config(&dir);
     vec![
         (SET_LINODE, crate::vpn::get_token().unwrap_or_default()),
         (SET_GCLIENT, cfg.google_client_id.unwrap_or_default()),
         (SET_GSECRET, kc_get(KC_GSECRET).unwrap_or_default()),
+        (
+            SET_HETZNER,
+            crate::servers::hetzner_get_token().unwrap_or_default(),
+        ),
+        (SET_NETDATA, crate::servers::netdata_config_json(&dir)),
     ]
 }
 
@@ -1439,6 +1732,14 @@ pub(crate) fn sync_device_settings(state: &State<'_, AppState>) -> bool {
                         if kc_get(KC_GSECRET).as_deref() != Some(v) {
                             let _ = kc_set(KC_GSECRET, v);
                         }
+                    }
+                    SET_HETZNER => {
+                        if crate::servers::hetzner_get_token().as_deref() != Some(v) {
+                            let _ = crate::servers::hetzner_set_token(v);
+                        }
+                    }
+                    SET_NETDATA => {
+                        crate::servers::apply_netdata_config_json(&data_dir(state), v);
                     }
                     _ => {}
                 }
@@ -1524,6 +1825,59 @@ pub async fn settings_sync_write(state: State<'_, AppState>) -> Result<(), Strin
         let _ = push_document(&api, &vk, &state, current).await;
     }
     Ok(())
+}
+
+/// A non-secret view of the shared-settings item for the "Shared settings" status panel: which
+/// provider settings are present in the synced vault item and when it was last written. Only
+/// booleans + a timestamp cross the bridge — never a token, id, or secret value.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SettingsSyncStatus {
+    /// A synced settings item exists in the local vault.
+    pub present: bool,
+    /// When the item was last written (unix seconds), 0 if none.
+    pub updated_at: i64,
+    pub linode: bool,
+    pub google: bool,
+    pub hetzner: bool,
+    pub netdata: bool,
+}
+
+#[tauri::command]
+pub async fn settings_sync_status(
+    state: State<'_, AppState>,
+) -> Result<SettingsSyncStatus, String> {
+    let id = settings_item_id();
+    let item: Option<Item> = {
+        let g = state.inner.lock().unwrap();
+        match g.vault.get(id) {
+            Ok(Some(env)) => g.session.open(&env).ok(),
+            _ => None,
+        }
+    };
+    let Some(item) = item else {
+        return Ok(SettingsSyncStatus {
+            present: false,
+            updated_at: 0,
+            linode: false,
+            google: false,
+            hetzner: false,
+            netdata: false,
+        });
+    };
+    let set = |name: &str| {
+        item.custom_fields
+            .iter()
+            .any(|f| f.name == name && !f.value.trim().is_empty())
+    };
+    Ok(SettingsSyncStatus {
+        present: true,
+        updated_at: item.updated_at,
+        linode: set(SET_LINODE),
+        google: set(SET_GCLIENT),
+        hetzner: set(SET_HETZNER),
+        netdata: set(SET_NETDATA),
+    })
 }
 
 /// Enroll (or refresh) the master-password sign-in verifier from a type-4 SNTL blob + the

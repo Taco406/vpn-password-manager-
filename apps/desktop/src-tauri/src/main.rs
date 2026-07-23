@@ -66,6 +66,9 @@ fn main() {
             vpn::spawn_autoconnect_poller(app.handle().clone());
             // Background server watchdog: down/CPU/disk/Netdata alerts (opt-in; self-gating).
             servers::spawn_servers_watchdog(app.handle().clone());
+            // Background auto-sync: pull synced tokens + vault every ~90s (opt-in; self-gating).
+            // Makes a freshly-signed-in device populate Servers/VPN on its own — no "Sync now".
+            sync::spawn_sync_poller(app.handle().clone());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -140,6 +143,7 @@ fn main() {
             sync::sync_probe_server,
             sync::sync_password_signin,
             sync::settings_sync_write,
+            sync::settings_sync_status,
             sync::sync_devices,
             sync::sync_device_revoke,
             sync::sync_security_events,
@@ -154,6 +158,10 @@ fn main() {
             sync::sync_pair_begin,
             sync::sync_pair_complete,
             sync::sync_forget,
+            sync::transfer_send,
+            sync::transfer_list,
+            sync::transfer_download,
+            sync::transfer_delete,
             nmhost::autofill_status,
             nmhost::autofill_install,
             nmhost::autofill_uninstall,
@@ -182,7 +190,10 @@ fn main() {
             servers::netdata_set,
             servers::netdata_probe,
             servers::netdata_metric,
+            servers::netdata_series,
             servers::netdata_alarms,
+            servers::servers_firewall_get,
+            servers::servers_firewall_allow_port,
         ])
         .build(tauri::generate_context!())
         .expect("error while building NorthKey")

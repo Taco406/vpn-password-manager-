@@ -35,8 +35,12 @@ import {
   netdataSet,
   netdataProbe,
   netdataMetric,
+  netdataSeries,
   netdataAlarms,
+  serversFirewallGet,
+  serversFirewallAllowPort,
   onServersAlert,
+  onSyncApplied,
   netMyIp,
   type ManagedServer,
   type ServerMetricsOut,
@@ -44,12 +48,14 @@ import {
   type ServerEventItem,
   type NetdataCfg,
   type NetdataProbe,
+  type NetdataSeriesLine,
+  type FirewallStatus,
   type WatchdogCfg,
   type ServerAlert,
 } from "../bridge";
 import { Card, SectionTitle, Badge } from "../components/ui";
 import { errMsg, inputCls, btnCls, Toggle } from "../components/kit";
-import { TimeSeriesChart } from "../components/charts/TimeSeriesChart";
+import { TimeSeriesChart, type TimeSeries } from "../components/charts/TimeSeriesChart";
 import { ThroughputChart } from "../components/charts/ThroughputChart";
 
 const LIST_REFRESH_MS = 60_000;
@@ -89,7 +95,14 @@ export function Servers() {
   useEffect(() => {
     void refresh();
     const t = window.setInterval(() => void refresh(), LIST_REFRESH_MS);
-    return () => window.clearInterval(t);
+    // The auto-sync poller applies synced provider tokens (Linode/Hetzner) in the background;
+    // refresh the moment it does so this screen populates itself right after sign-in — no manual sync.
+    let unsub: (() => void) | undefined;
+    void onSyncApplied(() => void refresh()).then((u) => (unsub = u));
+    return () => {
+      window.clearInterval(t);
+      unsub?.();
+    };
   }, [refresh]);
 
   const act = async (s: ManagedServer, action: "start" | "stop" | "reboot") => {
@@ -668,9 +681,88 @@ function NetdataPanel({ s }: { s: ManagedServer }) {
   );
 }
 
+/** A traffic-light tone for a metric against warn/danger thresholds (higher = worse). */
+type Tone = "ok" | "warn" | "danger" | "muted";
+function toneFor(v: number | undefined, warn: number, danger: number): Tone {
+  if (v === undefined) return "muted";
+  if (v >= danger) return "danger";
+  if (v >= warn) return "warn";
+  return "ok";
+}
+const TONE_COLOR: Record<Tone, string> = {
+  ok: "var(--ok)",
+  warn: "var(--warn)",
+  danger: "var(--danger)",
+  muted: "var(--text-muted)",
+};
+
+/** Seconds → a compact "Xd Yh" / "Yh Zm" / "Zm" uptime string. */
+function fmtUptime(secs: number | undefined): string {
+  if (secs === undefined || secs <= 0) return "—";
+  const d = Math.floor(secs / 86400);
+  const h = Math.floor((secs % 86400) / 3600);
+  const m = Math.floor((secs % 3600) / 60);
+  if (d > 0) return `${d}d ${h}h`;
+  if (h > 0) return `${h}h ${m}m`;
+  return `${m}m`;
+}
+
+function Tile({
+  label,
+  value,
+  sub,
+  tone = "muted",
+}: {
+  label: string;
+  value: string;
+  sub?: string;
+  tone?: Tone;
+}) {
+  return (
+    <div className="rounded-[10px] border border-[var(--border-subtle)] bg-[var(--bg-inset)] px-3 py-2">
+      <div className="text-[10px] uppercase tracking-wide text-[var(--text-muted)]">{label}</div>
+      <div className="mono mt-0.5 text-[18px] leading-tight" style={{ color: TONE_COLOR[tone] }}>
+        {value}
+      </div>
+      {sub && <div className="text-[10px] text-[var(--text-muted)]">{sub}</div>}
+    </div>
+  );
+}
+
+/** All the single-value dashboard tiles, keyed by metric kind. */
+interface Tiles {
+  cpu?: number;
+  ram?: number;
+  swap?: number;
+  load?: number;
+  disk?: number;
+  uptime?: number;
+  steal?: number;
+  procs?: number;
+  psi_cpu?: number;
+  psi_mem?: number;
+  psi_io?: number;
+}
+
+const NET_COLORS = ["#22d3ee", "#f472b6"]; // in / out
+const DISK_COLORS = ["#34d399", "#fbbf24"]; // read / write
+const LOAD_COLORS = ["#22d3ee", "#a78bfa", "#f472b6"]; // 1m / 5m / 15m
+
+/** Map an aggregated multi-series result to the chart's `TimeSeries[]`, colouring by index. */
+function toSeries(lines: NetdataSeriesLine[], colors: string[], scale = 1): TimeSeries[] {
+  return lines.map((l, i) => ({
+    label: l.label,
+    color: colors[i % colors.length],
+    points: scale === 1 ? l.points : l.points.map(([t, v]) => [t, v * scale] as [number, number]),
+  }));
+}
+
 function NetdataLive({ s, onDisable }: { s: ManagedServer; onDisable: () => void }) {
   const [cpu, setCpu] = useState<number[]>([]);
-  const [pills, setPills] = useState<{ ram?: number; load?: number; disk?: number }>({});
+  const [tiles, setTiles] = useState<Tiles>({});
+  const [net, setNet] = useState<NetdataSeriesLine[]>([]);
+  const [diskio, setDiskio] = useState<NetdataSeriesLine[]>([]);
+  const [load, setLoad] = useState<NetdataSeriesLine[]>([]);
   const [alarms, setAlarms] = useState<{ name: string; status: string; value: string }[]>([]);
   const [err, setErr] = useState("");
   const host = s.ipv4!;
@@ -688,20 +780,35 @@ function NetdataLive({ s, onDisable }: { s: ManagedServer; onDisable: () => void
         if (alive) setErr(errMsg(e));
       }
     };
-    const pillsTick = async () => {
-      // Each pill is independent: fetch them in parallel but never let one chart's failure
-      // (e.g. a disk chart missing on some agent) blank the others. allSettled + last-known value.
+    // Every tile is independent: fetch in parallel, and never let one missing chart (a metric an
+    // agent doesn't expose) blank the rest — allSettled + keep the last-known value.
+    const tilesTick = async () => {
       const last = async (kind: string) =>
-        (await netdataMetric(s.provider, s.id, host, kind, 15, 3)).at(-1)?.[1];
-      const [ram, load, disk] = await Promise.allSettled([last("ram"), last("load"), last("disk")]);
-      const val = (r: PromiseSettledResult<number | undefined>) =>
-        r.status === "fulfilled" ? r.value : undefined;
-      if (alive)
-        setPills((prev) => ({
-          ram: val(ram) ?? prev.ram,
-          load: val(load) ?? prev.load,
-          disk: val(disk) ?? prev.disk,
-        }));
+        (await netdataMetric(s.provider, s.id, host, kind, 20, 3)).at(-1)?.[1];
+      const kinds: (keyof Tiles)[] = [
+        "cpu", "ram", "swap", "load", "disk", "uptime", "steal", "procs", "psi_cpu", "psi_mem", "psi_io",
+      ];
+      const results = await Promise.allSettled(kinds.map((k) => last(k)));
+      if (!alive) return;
+      setTiles((prev) => {
+        const next = { ...prev };
+        kinds.forEach((k, i) => {
+          const r = results[i];
+          if (r.status === "fulfilled" && r.value !== undefined) next[k] = r.value;
+        });
+        return next;
+      });
+    };
+    const chartsTick = async () => {
+      const [n, d, l] = await Promise.allSettled([
+        netdataSeries(s.provider, s.id, host, "net", 300, 90),
+        netdataSeries(s.provider, s.id, host, "diskio", 300, 90),
+        netdataSeries(s.provider, s.id, host, "load", 300, 90),
+      ]);
+      if (!alive) return;
+      if (n.status === "fulfilled") setNet(n.value);
+      if (d.status === "fulfilled") setDiskio(d.value);
+      if (l.status === "fulfilled") setLoad(l.value);
     };
     const alarmsTick = async () => {
       try {
@@ -712,25 +819,26 @@ function NetdataLive({ s, onDisable }: { s: ManagedServer; onDisable: () => void
       }
     };
     void cpuTick();
-    void pillsTick();
+    void tilesTick();
+    void chartsTick();
     void alarmsTick();
     const t1 = window.setInterval(() => void cpuTick(), 2000);
-    const t2 = window.setInterval(() => void pillsTick(), 10000);
-    const t3 = window.setInterval(() => void alarmsTick(), 30000);
+    const t2 = window.setInterval(() => void tilesTick(), 8000);
+    const t3 = window.setInterval(() => void chartsTick(), 8000);
+    const t4 = window.setInterval(() => void alarmsTick(), 30000);
     return () => {
       alive = false;
       window.clearInterval(t1);
       window.clearInterval(t2);
       window.clearInterval(t3);
+      window.clearInterval(t4);
     };
   }, [s.provider, s.id, host]);
 
-  const pill = (label: string, v: number | undefined, unit: string) => (
-    <div className="rounded-[8px] bg-[var(--bg-inset)] px-2.5 py-1.5 text-[11px]">
-      <span className="text-[var(--text-muted)]">{label} </span>
-      <span className="mono">{v === undefined ? "—" : `${v.toFixed(unit === "" ? 2 : 0)}${unit}`}</span>
-    </div>
-  );
+  const netSeries = toSeries(net, NET_COLORS);
+  // system.io is KiB/s; the throughput chart formats bytes/s → convert so the axis reads right.
+  const diskSeries = toSeries(diskio, DISK_COLORS, 1024);
+  const loadSeries = toSeries(load, LOAD_COLORS);
 
   return (
     <div>
@@ -748,21 +856,45 @@ function NetdataLive({ s, onDisable }: { s: ManagedServer; onDisable: () => void
           </button>
         </p>
       )}
-      <div className="grid gap-4 md:grid-cols-[1fr_auto]">
+
+      {/* Tile grid — the at-a-glance health of the box. */}
+      <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-4">
+        <Tile label="CPU" value={fmtPct(tiles.cpu)} tone={toneFor(tiles.cpu, 75, 90)} sub="all cores" />
+        <Tile label="RAM" value={fmtPct(tiles.ram)} tone={toneFor(tiles.ram, 80, 92)} />
+        <Tile label="Swap" value={fmtPct(tiles.swap)} tone={toneFor(tiles.swap, 25, 60)} />
+        <Tile label="Disk /" value={fmtPct(tiles.disk)} tone={toneFor(tiles.disk, 80, 92)} />
+        <Tile
+          label="Load 1m"
+          value={tiles.load === undefined ? "—" : tiles.load.toFixed(2)}
+          sub={loadSub(loadSeries)}
+        />
+        <Tile label="CPU steal" value={fmtPct(tiles.steal, 1)} tone={toneFor(tiles.steal, 5, 20)} sub="noisy neighbour" />
+        <Tile
+          label="Procs"
+          value={tiles.procs === undefined ? "—" : tiles.procs.toFixed(0)}
+          sub="running"
+        />
+        <Tile label="Uptime" value={fmtUptime(tiles.uptime)} />
+        <Tile label="PSI cpu" value={fmtPct(tiles.psi_cpu, 1)} tone={toneFor(tiles.psi_cpu, 10, 40)} sub="stalled 60s" />
+        <Tile label="PSI mem" value={fmtPct(tiles.psi_mem, 1)} tone={toneFor(tiles.psi_mem, 5, 20)} sub="stalled 60s" />
+        <Tile label="PSI io" value={fmtPct(tiles.psi_io, 1)} tone={toneFor(tiles.psi_io, 10, 40)} sub="stalled 60s" />
+      </div>
+
+      {/* Live CPU + the two throughput charts. */}
+      <div className="mt-4 grid gap-4 lg:grid-cols-2">
         <div>
           <div className="mb-1 flex items-baseline justify-between text-[11px] text-[var(--text-muted)]">
             <span>CPU (per-second, live)</span>
             <span className="mono text-[var(--accent)]">{cpu.at(-1)?.toFixed(0) ?? "—"}%</span>
           </div>
-          <ThroughputChart data={cpu.length ? cpu : [0, 0]} width={420} height={110} />
+          <ThroughputChart data={cpu.length ? cpu : [0, 0]} width={420} height={120} />
         </div>
-        <div className="flex flex-row flex-wrap content-start gap-2 md:flex-col">
-          {pill("RAM", pills.ram, "%")}
-          {pill("Load", pills.load, "")}
-          {pill("Disk /", pills.disk, "%")}
-        </div>
+        <ChartBlock title="Load average (1m · 5m · 15m)" series={loadSeries} unit="iops" />
+        <ChartBlock title="Network (in · out)" series={netSeries} unit="bps" />
+        <ChartBlock title="Disk I/O (read · write)" series={diskSeries} unit="bps" />
       </div>
-      <div className="mt-2 flex flex-wrap items-center gap-2">
+
+      <div className="mt-3 flex flex-wrap items-center gap-2">
         {alarms.length === 0 ? (
           <Badge tone="ok">no active alarms</Badge>
         ) : (
@@ -774,6 +906,46 @@ function NetdataLive({ s, onDisable }: { s: ManagedServer; onDisable: () => void
           ))
         )}
       </div>
+    </div>
+  );
+}
+
+function fmtPct(v: number | undefined, digits = 0): string {
+  return v === undefined ? "—" : `${v.toFixed(digits)}%`;
+}
+
+/** The "5m · 15m" companion line for the Load tile, read from the load series' last values. */
+function loadSub(series: TimeSeries[]): string {
+  const last = (label: string) => series.find((s) => s.label === label)?.points.at(-1)?.[1];
+  const f5 = last("5m");
+  const f15 = last("15m");
+  if (f5 === undefined && f15 === undefined) return "";
+  return `5m ${f5?.toFixed(2) ?? "—"} · 15m ${f15?.toFixed(2) ?? "—"}`;
+}
+
+/** A titled multi-series chart with a small legend; renders a placeholder until data arrives. */
+function ChartBlock({ title, series, unit }: { title: string; series: TimeSeries[]; unit: "pct" | "bps" | "iops" }) {
+  const hasData = series.some((s) => s.points.length >= 2);
+  return (
+    <div>
+      <div className="mb-1 flex items-center justify-between text-[11px] text-[var(--text-muted)]">
+        <span>{title}</span>
+        <span className="flex gap-2">
+          {series.map((s) => (
+            <span key={s.label} className="flex items-center gap-1">
+              <span className="inline-block h-2 w-2 rounded-full" style={{ background: s.color }} />
+              {s.label}
+            </span>
+          ))}
+        </span>
+      </div>
+      {hasData ? (
+        <TimeSeriesChart series={series} width={420} height={120} unit={unit} />
+      ) : (
+        <div className="flex h-[120px] items-center justify-center rounded-[8px] bg-[var(--bg-inset)] text-[11px] text-[var(--text-muted)]">
+          waiting for data…
+        </div>
+      )}
     </div>
   );
 }
@@ -879,6 +1051,9 @@ function NetdataSetup({
               <span className="text-[var(--text-muted)]">Install Netdata (one line):</span>
               <CopyLine text="wget -O /tmp/netdata-kickstart.sh https://get.netdata.cloud/kickstart.sh && sh /tmp/netdata-kickstart.sh --non-interactive" />
             </div>
+            {s.provider === "hetzner" && (
+              <HetznerFirewall s={s} port={port} myIp={myIp} onOpened={() => void runProbe()} />
+            )}
             <div>
               <span className="text-[var(--text-muted)]">
                 Open port 19999 to YOUR IP only (ufw; safer than opening it to the world):
@@ -897,6 +1072,105 @@ function NetdataSetup({
             <span className="mono">ssh -L 19999:localhost:19999 root@{host}</span> — but the app can
             only read it while the tunnel runs.
           </p>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** One-click Hetzner Cloud Firewall opener — the thing `ufw` can't fix, since a Cloud Firewall
+ * sits IN FRONT of the server. Defaults to "Any IPv4" because the user's home IP changes (Starlink);
+ * offer restricting to the current IP as the safer option. Read-modify-write on the backend never
+ * wipes existing rules. */
+function HetznerFirewall({
+  s,
+  port,
+  myIp,
+  onOpened,
+}: {
+  s: ManagedServer;
+  port: number;
+  myIp: string;
+  onOpened: () => void;
+}) {
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState("");
+  const [status, setStatus] = useState<FirewallStatus | null>(null);
+  const [restrict, setRestrict] = useState(false);
+  const ipKnown = myIp !== "<your-ip>" && myIp.trim() !== "";
+
+  const refresh = useCallback(async () => {
+    try {
+      setStatus(await serversFirewallGet(s.provider, s.id));
+    } catch {
+      /* best-effort */
+    }
+  }, [s.provider, s.id]);
+
+  useEffect(() => {
+    void refresh();
+  }, [refresh]);
+
+  const open = async () => {
+    setBusy(true);
+    setMsg("");
+    try {
+      const source = restrict && ipKnown ? `${myIp}/32` : "any";
+      await serversFirewallAllowPort(s.provider, s.id, port, source);
+      setMsg(`Opened TCP ${port} (${restrict && ipKnown ? `from ${myIp}` : "from anywhere"}). Re-checking…`);
+      await refresh();
+      onOpened();
+    } catch (e) {
+      setMsg(errMsg(e));
+    }
+    setBusy(false);
+  };
+
+  return (
+    <div className="space-y-2 rounded-[10px] border border-[var(--accent)]/40 bg-[var(--accent)]/10 p-2.5">
+      <p className="text-[var(--text-secondary)]">
+        This is a Hetzner Cloud server. If a <span className="font-medium">Hetzner Cloud Firewall</span>{" "}
+        is attached, it blocks the port before <span className="mono">ufw</span> ever sees it — NorthKey
+        can open it for you with the Hetzner API.
+      </p>
+      <div className="flex flex-wrap items-center gap-2">
+        <button onClick={() => void open()} disabled={busy} className={btnCls}>
+          {busy ? "Opening…" : `Open port ${port} on the Hetzner firewall`}
+        </button>
+        <label className="flex items-center gap-1 text-[var(--text-muted)]" title={ipKnown ? "" : "Your IP isn't known yet"}>
+          <input
+            type="checkbox"
+            checked={restrict && ipKnown}
+            disabled={!ipKnown}
+            onChange={(e) => setRestrict(e.target.checked)}
+          />
+          restrict to my IP ({ipKnown ? myIp : "unknown"})
+        </label>
+      </div>
+      {!restrict && (
+        <p className="text-[10px] text-[var(--text-muted)]">
+          Default opens the port to any IPv4/IPv6 — the right choice when your home IP changes (Starlink).
+          Anyone can reach the port, but Netdata only serves read-only metrics.
+        </p>
+      )}
+      {msg && <p className="text-[10px] text-[var(--text-secondary)]">{msg}</p>}
+      {status && (
+        <div className="text-[10px] text-[var(--text-muted)]">
+          {status.attached ? (
+            <>
+              Firewall <span className="mono">{status.firewallName}</span> ·{" "}
+              {status.rules.filter((r) => r.direction === "in").length} inbound rule(s)
+              {status.rules
+                .filter((r) => r.direction === "in" && r.protocol === "tcp")
+                .map((r) => (
+                  <span key={`${r.port}-${r.ips.join(",")}`} className="mono ml-1">
+                    · {r.protocol}/{r.port ?? "*"}
+                  </span>
+                ))}
+            </>
+          ) : (
+            "No Hetzner firewall attached — opening a port will create and apply one."
+          )}
         </div>
       )}
     </div>

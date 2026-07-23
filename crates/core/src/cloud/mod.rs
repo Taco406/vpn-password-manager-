@@ -27,6 +27,6 @@ pub use provider::{
 pub use watchdog::{Alert, ServerSample, WatchdogCfg, WatchdogState};
 
 #[cfg(feature = "live-hetzner")]
-pub use hetzner::HetznerClient;
+pub use hetzner::{Firewall, FirewallRule, HetznerClient};
 #[cfg(feature = "live-linode")]
 pub use linode::LinodeClient;

@@ -8,6 +8,40 @@ The format follows [Keep a Changelog](https://keepachangelog.com/). Versions are
 [semantic](https://semver.org/). **Add a new `## [x.y.z]` section at the top in the same PR
 that bumps the app version** — that's how "the changelog updates on every merge."
 
+## [0.1.53] — 2026-07-23
+
+### Added
+- **A real server dashboard.** The live-monitoring panel is now a full grid: CPU, RAM, Swap,
+  Disk, Load (1/5/15 min), CPU steal (how much a noisy neighbour is stealing on a shared box),
+  running processes, uptime, and “pressure” health for CPU/memory/disk — plus live charts for
+  network in/out and disk read/write. Every tile loads on its own, so one missing number never
+  blanks the rest.
+- **Send files to your devices.** A new **Transfers** screen: pick a file, choose a device (or
+  “all my devices”), and it’s encrypted on this computer before it leaves. Your other computers
+  and your iPhone can save it. The server only ever holds the scrambled file and deletes it after
+  24 hours — it can never read the contents or even the file name. Up to 25 MB per file.
+- **One-click Hetzner firewall.** When your server’s monitoring can’t be reached because a
+  Hetzner Cloud Firewall is blocking the port, there’s now a button to open it right from the
+  app — no more digging through the Hetzner website. It defaults to opening the port to any
+  address (right for a home internet connection whose IP changes, like Starlink), with an option
+  to lock it to your current IP.
+- **The iPhone caught up with the computer.** The phone now has its own **Servers** tab (live
+  Netdata tiles for each of your servers) and **Transfers** tab, in addition to the vault. Your
+  server API tokens ride your encrypted vault to the phone, so it talks to Linode/Hetzner/Netdata
+  directly — the sync server still only ever stores scrambled data.
+
+### Changed
+- **Signing in now brings your servers with you.** After you sign in on a new computer, your
+  saved server settings apply automatically and the Servers screen fills itself in — no more
+  hunting for a “Sync now” button. Syncing runs quietly in the background. A new **Shared
+  settings** panel under Account & Sync shows what’s shared across your devices (Linode, Hetzner,
+  Google, monitoring) and when — without ever showing the secret values.
+- **Your Hetzner token now syncs too.** Previously only the Linode and Google settings followed
+  you to a second device, which is why a second computer never showed your Hetzner servers. Now
+  it does.
+- **The Mac app is signed and notarized.** This is the first Mac build signed with a Developer ID
+  certificate, so macOS opens it without the “unidentified developer” warning.
+
 ## [0.1.52] — 2026-07-23
 
 ### Fixed
@@ -21,11 +55,6 @@ that bumps the app version** — that's how "the changelog updates on every merg
   request blanked the other two along with it. The disk chart name is corrected and each reading
   is now independent, so one missing metric never hides the rest. (A richer server dashboard is
   coming next.)
-
-### Changed
-- **The Mac app is signed and notarized by Apple.** It opens with a normal double-click — no
-  more right-click → Open, no "unidentified developer" warning. Self-updates install the
-  signed app too.
 
 ## [0.1.50] — 2026-07-23
 
