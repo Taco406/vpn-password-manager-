@@ -230,25 +230,27 @@ jobs:
             # Derive the signing identity from the certificate itself instead of trusting the
             # hand-typed APPLE_SIGNING_IDENTITY secret — codesign matches on the cert's CN, and
             # a copy-paste mismatch ("failed to resolve signing identity") is the most common
-            # way this build breaks. Also verify the .p12 actually contains the private key
-            # (the other classic export mistake). Nothing secret is printed — only the CN.
+            # way this build breaks. Strictly best-effort under set +e: this can only ever
+            # IMPROVE the identity, never block the build (the step runs with -e -o pipefail,
+            # and Keychain .p12 exports use legacy ciphers OpenSSL 3 needs -legacy to read).
+            # Nothing secret is printed — only the CN.
+            set +e
             p12="$RUNNER_TEMP/signing-cert.p12"
-            printf '%s' "$CERT" | base64 -d > "$p12"
-            cn=$(openssl pkcs12 -in "$p12" -passin pass:"$CERT_PW" -nokeys 2>/dev/null \
+            printf '%s' "$CERT" | tr -d '\n\r ' | base64 -d > "$p12" 2>/dev/null
+            certpem=$(openssl pkcs12 -in "$p12" -passin pass:"$CERT_PW" -nokeys 2>/dev/null)
+            if [ -z "$certpem" ]; then
+              certpem=$(openssl pkcs12 -legacy -in "$p12" -passin pass:"$CERT_PW" -nokeys 2>/dev/null)
+            fi
+            cn=$(printf '%s\n' "$certpem" \
               | openssl x509 -noout -subject -nameopt multiline 2>/dev/null \
               | awk -F'= ' '/commonName/ {print $2}')
-            keycount=$(openssl pkcs12 -in "$p12" -passin pass:"$CERT_PW" -nocerts -nodes 2>/dev/null \
-              | grep -c "PRIVATE KEY" || true)
             rm -f "$p12"
-            if [ "$keycount" = "0" ]; then
-              echo "::error::The APPLE_CERTIFICATE .p12 has no private key inside. In Keychain Access, open the My Certificates tab, right-click the 'Developer ID Application' row itself (not the expanded key), Export, and re-save the .p12 — then update the APPLE_CERTIFICATE secret."
-              exit 1
-            fi
+            set -e
             if [ -n "$cn" ]; then
               echo "Signing identity (from the certificate): $cn"
               IDENTITY="$cn"
             else
-              echo "Could not read the certificate CN — falling back to the APPLE_SIGNING_IDENTITY secret."
+              echo "Could not read the certificate CN here — using the APPLE_SIGNING_IDENTITY secret as-is."
             fi
             {
               echo "APPLE_CERTIFICATE=$CERT"
