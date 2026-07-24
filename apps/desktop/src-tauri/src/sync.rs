@@ -26,7 +26,8 @@ use sentinel_core::keyring::recovery::RecoveryWrapper;
 use sentinel_core::keyring::{KeyWrapper, VaultKey, WrappedBlob, WrapperType};
 use sentinel_core::recovery_kit::{self, pdf::render_kit_pdf, RecoveryKey};
 use sentinel_core::vault::fileblob::{
-    open_file, pack_bundle, seal_file, unpack_bundle, BundleEntry, FileMeta, BUNDLE_MIME,
+    is_passphrase_wrapped, open_file, open_passphrase, pack_bundle, seal_file, seal_passphrase,
+    unpack_bundle, BundleEntry, FileMeta, BUNDLE_MIME,
 };
 use sentinel_core::vault::model::Item;
 use sentinel_core::vault::{decode_sync_blob, encode_sync_blob, VaultSession};
@@ -1158,6 +1159,10 @@ pub struct TransferDownloadOut {
     /// UI saves each one. `None` for an ordinary single-file transfer.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub bundle: Option<Vec<BundleFile>>,
+    /// v0.1.59: true when the transfer is passphrase-protected and no (or a wrong) passphrase was
+    /// supplied — the UI should prompt for it and call `transfer_download` again with it. When true,
+    /// all the other fields are empty.
+    pub needs_passphrase: bool,
 }
 
 /// One file inside a downloaded bundle.
@@ -1220,9 +1225,50 @@ fn guess_mime(filename: &str) -> String {
     m.to_string()
 }
 
+/// v0.1.59: optionally wrap a finished transfer blob under a user passphrase ("double encryption").
+/// Argon2id is deliberately slow, so it runs off the async runtime. Empty/whitespace passphrase =
+/// no wrapping (returns the blob unchanged). Real transfers use the Production Argon2 cost.
+async fn maybe_wrap_passphrase(
+    blob: Vec<u8>,
+    passphrase: Option<String>,
+) -> Result<Vec<u8>, String> {
+    let pass = match passphrase
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+    {
+        Some(p) => p,
+        None => return Ok(blob),
+    };
+    tokio::task::spawn_blocking(move || {
+        seal_passphrase(
+            &pass,
+            &blob,
+            sentinel_core::crypto::Argon2Profile::Production,
+        )
+    })
+    .await
+    .map_err(estr)
+}
+
+/// v0.1.59: unwrap a passphrase-protected blob back to the inner SFIL blob (Argon2id off the async
+/// runtime). A wrong passphrase surfaces as a friendly error, not a crypto one.
+async fn unwrap_passphrase(ct: Vec<u8>, passphrase: String) -> Result<Vec<u8>, String> {
+    tokio::task::spawn_blocking(move || {
+        open_passphrase(
+            &passphrase,
+            &ct,
+            sentinel_core::crypto::Argon2Profile::Production,
+        )
+    })
+    .await
+    .map_err(estr)?
+    .map_err(|_| "That password didn't open the file. Check it and try again.".to_string())
+}
+
 /// Seal a file (`filename` + base64 `data_b64` from the UI's file picker) and upload it for one
 /// device (or all this account's devices when `recipient_device_id` is `None`). The bytes ride the
 /// bridge as base64 — no filesystem path crosses in, so the app only ever reads what the user picked.
+/// An optional `passphrase` adds a second encryption layer only the recipient's password can open.
 #[tauri::command]
 pub async fn transfer_send(
     state: State<'_, AppState>,
@@ -1230,6 +1276,7 @@ pub async fn transfer_send(
     filename: String,
     data_b64: String,
     retention: Option<Retention>,
+    passphrase: Option<String>,
 ) -> Result<TransferSendOut, String> {
     let vk = session_vault_key(&state)?;
     let api = api_for(&state)?;
@@ -1245,6 +1292,7 @@ pub async fn transfer_send(
         mime: guess_mime(&filename),
     };
     let blob = seal_file(&vk, &meta, &bytes).map_err(estr)?;
+    let blob = maybe_wrap_passphrase(blob, passphrase).await?;
     if blob.len() > TRANSFER_MAX_BLOB_BYTES {
         return Err(format!(
             "file too large to send ({:.1} MiB sealed; 25 MiB max)",
@@ -1292,6 +1340,7 @@ pub async fn transfer_send_bundle(
     recipient_device_id: Option<String>,
     files: Vec<BundleInput>,
     retention: Option<Retention>,
+    passphrase: Option<String>,
 ) -> Result<TransferSendOut, String> {
     if files.is_empty() {
         return Err("no files selected".into());
@@ -1321,6 +1370,7 @@ pub async fn transfer_send_bundle(
         mime: BUNDLE_MIME.to_string(),
     };
     let blob = seal_file(&vk, &meta, &payload).map_err(estr)?;
+    let blob = maybe_wrap_passphrase(blob, passphrase).await?;
     if blob.len() > TRANSFER_MAX_BLOB_BYTES {
         return Err(format!(
             "those files are too large together ({:.1} MiB sealed; 25 MiB max) — send fewer at once",
@@ -1358,11 +1408,36 @@ pub async fn transfer_list(state: State<'_, AppState>) -> Result<Vec<TransferRow
 pub async fn transfer_download(
     state: State<'_, AppState>,
     id: String,
+    passphrase: Option<String>,
 ) -> Result<TransferDownloadOut, String> {
     let vk = session_vault_key(&state)?;
     let api = api_for(&state)?;
 
     let ct = api.download_transfer(&id).await?;
+
+    // v0.1.59: a passphrase-protected transfer is wrapped in an outer SPAS envelope. Peel it first,
+    // asking the UI to prompt for the password when it wasn't supplied (all other fields empty then).
+    let ct = if is_passphrase_wrapped(&ct) {
+        match passphrase
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+        {
+            None => {
+                return Ok(TransferDownloadOut {
+                    filename: String::new(),
+                    size_bytes: 0,
+                    mime: String::new(),
+                    data_b64: String::new(),
+                    bundle: None,
+                    needs_passphrase: true,
+                })
+            }
+            Some(p) => unwrap_passphrase(ct, p).await?,
+        }
+    } else {
+        ct
+    };
+
     let (meta, data) = open_file(&vk, &ct).map_err(estr)?;
 
     // v0.1.58: a bundle's plaintext is a NKAR archive of several files — unpack it so the UI can
@@ -1385,6 +1460,7 @@ pub async fn transfer_download(
             mime: meta.mime,
             data_b64: String::new(),
             bundle: Some(files),
+            needs_passphrase: false,
         });
     }
 
@@ -1394,6 +1470,7 @@ pub async fn transfer_download(
         mime: meta.mime,
         data_b64: STANDARD.encode(&data),
         bundle: None,
+        needs_passphrase: false,
     })
 }
 

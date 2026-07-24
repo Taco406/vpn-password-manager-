@@ -39,7 +39,7 @@ jobs:
       # cost — this is the desktop half of the desktop↔iPhone interop guarantee. If this fails,
       # a crypto change just broke every deployed iPhone build.
       - name: iOS golden fixture unwraps (production Argon2)
-        run: cargo test -p sentinel-core --release --test ios_golden_vectors -- --ignored committed_fixture_wrapped_key_unwraps
+        run: cargo test -p sentinel-core --release --test ios_golden_vectors -- --ignored _unwraps
 
   api:
     name: API — Postgres integration

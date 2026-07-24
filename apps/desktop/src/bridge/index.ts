@@ -1139,9 +1139,16 @@ export async function transferSend(
   filename: string,
   dataB64: string,
   retention?: TransferRetention,
+  passphrase?: string,
 ): Promise<{ id: string; filename: string; blobBytes: number }> {
   if (!inTauri()) throw new Error("File transfer is only available in the desktop app.");
-  return inv("transfer_send", { recipientDeviceId, filename, dataB64, retention: retention ?? null });
+  return inv("transfer_send", {
+    recipientDeviceId,
+    filename,
+    dataB64,
+    retention: retention ?? null,
+    passphrase: passphrase ?? null,
+  });
 }
 
 /** Seal SEVERAL files (a multi-select or a dragged folder) into ONE bundle transfer. Files are
@@ -1150,9 +1157,15 @@ export async function transferSendBundle(
   recipientDeviceId: string | null,
   files: { name: string; dataB64: string }[],
   retention?: TransferRetention,
+  passphrase?: string,
 ): Promise<{ id: string; filename: string; blobBytes: number }> {
   if (!inTauri()) throw new Error("File transfer is only available in the desktop app.");
-  return inv("transfer_send_bundle", { recipientDeviceId, files, retention: retention ?? null });
+  return inv("transfer_send_bundle", {
+    recipientDeviceId,
+    files,
+    retention: retention ?? null,
+    passphrase: passphrase ?? null,
+  });
 }
 
 /** The transfers this device can see (incoming + its own outgoing), newest first. */
@@ -1168,20 +1181,27 @@ export interface BundleFile {
   dataB64: string;
 }
 
-/** A downloaded transfer: a single file (`dataB64`) or, when `bundle` is present, several files. */
+/** A downloaded transfer: a single file (`dataB64`) or, when `bundle` is present, several files.
+ * When `needsPassphrase` is true, the transfer is password-protected and no (or a wrong) password
+ * was given — prompt for it and call again; all other fields are empty. */
 export interface TransferDownloadResult {
   filename: string;
   sizeBytes: number;
   mime: string;
   dataB64: string;
   bundle?: BundleFile[];
+  needsPassphrase: boolean;
 }
 
 /** Download + decrypt one transfer; returns its filename, mime, and bytes (base64) to save. When
- * the transfer is a multi-file bundle, `bundle` carries the individual files instead. */
-export async function transferDownload(id: string): Promise<TransferDownloadResult> {
+ * the transfer is a multi-file bundle, `bundle` carries the individual files instead. A
+ * password-protected transfer needs `passphrase`; without it the result flags `needsPassphrase`. */
+export async function transferDownload(
+  id: string,
+  passphrase?: string,
+): Promise<TransferDownloadResult> {
   if (!inTauri()) throw new Error("File transfer is only available in the desktop app.");
-  return inv("transfer_download", { id });
+  return inv("transfer_download", { id, passphrase: passphrase ?? null });
 }
 
 /** Remove a transfer from the relay (either side may delete). */
