@@ -8,6 +8,24 @@ The format follows [Keep a Changelog](https://keepachangelog.com/). Versions are
 [semantic](https://semver.org/). **Add a new `## [x.y.z]` section at the top in the same PR
 that bumps the app version** — that's how "the changelog updates on every merge."
 
+## [0.1.59] — 2026-07-24
+
+### Added
+- **Lock a transfer with a password.** When you send a file (or a bundle) you can now add a password
+  on top of the automatic encryption. The receiving device has to type that password to open it — so
+  even someone who somehow had your vault key still couldn’t read the file without it. It uses the
+  same strong key-stretching (Argon2id) your master password does.
+- **Enter the password to open a protected file.** On any device — computer, iPhone, or iPad — a
+  password-protected file asks for the password when you go to save it, and won’t open without it.
+
+### Notes
+- **The password can’t be recovered.** It’s never stored anywhere and never sent to the server, so if
+  it’s forgotten the file can’t be opened — that’s the point. Share it separately from the file (not
+  in the same place), and don’t forget it. The app warns you about this when you set one.
+- This is a *second* lock on top of the usual encryption, not a replacement: every file is still
+  sealed with your vault key first, and your server still only ever stores ciphertext. Files sent
+  without a password behave exactly as before.
+
 ## [0.1.58] — 2026-07-24
 
 ### Added

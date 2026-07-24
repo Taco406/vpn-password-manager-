@@ -14,6 +14,12 @@ final class TransfersModel: ObservableObject {
     /// Decrypted file(s) waiting to be saved/shared (temp URLs for the share sheet). A single-file
     /// transfer yields one URL; a received bundle yields several.
     @Published var shareItems: [URL] = []
+    /// A downloaded transfer that's still passphrase-wrapped, awaiting the recipient's password.
+    @Published var pendingUnlock: PendingUnlock?
+    struct PendingUnlock {
+        let ct: Data
+        let vaultKey: Data
+    }
 
     private static let maxBytes = 25 * 1024 * 1024
 
@@ -29,7 +35,8 @@ final class TransfersModel: ObservableObject {
     }
 
     func send(
-        fileURL: URL, recipientDeviceId: String?, retention: ApiClient.Retention, vaultKey: Data
+        fileURL: URL, recipientDeviceId: String?, retention: ApiClient.Retention, vaultKey: Data,
+        passphrase: String
     ) async {
         busy = true
         status = "Encrypting and sending…"
@@ -44,17 +51,52 @@ final class TransfersModel: ObservableObject {
             }
             let name = fileURL.lastPathComponent
             let meta = VaultCrypto.FileMeta(filename: name, mime: Self.mime(for: fileURL))
-            let blob = try VaultCrypto.sealFileBlob(vaultKey: vaultKey, meta: meta, bytes: bytes)
+            var blob = try VaultCrypto.sealFileBlob(vaultKey: vaultKey, meta: meta, bytes: bytes)
+            if !passphrase.isEmpty {
+                // Add the optional passphrase layer off the main thread (Argon2id is deliberately slow).
+                let inner = blob
+                blob = try await Task.detached(priority: .userInitiated) {
+                    try VaultCrypto.sealPassphrase(passphrase: passphrase, inner: inner)
+                }.value
+            }
             guard blob.count <= Self.maxBytes else {
                 status = "That file is too large to send once encrypted."; return
             }
             _ = try await ApiClient.shared.createTransfer(
                 recipientDeviceId: recipientDeviceId, sizeBytes: bytes.count, ciphertext: blob,
                 retention: retention)
-            status = "Sent \"\(name)\"."
+            status = passphrase.isEmpty ? "Sent \"\(name)\"." : "Sent \"\(name)\" (password-protected)."
             await refresh()
         } catch {
             status = ApiError.describe(error)
+        }
+    }
+
+    /// Decode a plaintext SFIL blob (single file or bundle) and stage the file(s) for the share sheet.
+    private func presentDecrypted(_ ct: Data, vaultKey: Data) throws {
+        let (meta, bytes) = try VaultCrypto.openFileBlob(vaultKey: vaultKey, blob: ct)
+        if meta.mime == VaultCrypto.bundleMime {
+            // A multi-file bundle: unpack and write each file into a temp folder, then share them all.
+            let entries = try VaultCrypto.unpackBundle(bytes)
+            let dir = FileManager.default.temporaryDirectory
+                .appendingPathComponent("bundle-\(UUID().uuidString)", isDirectory: true)
+            try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+            var urls: [URL] = []
+            for e in entries {
+                let leaf = (e.name as NSString).lastPathComponent
+                let url = dir.appendingPathComponent(leaf.isEmpty ? "file" : leaf)
+                try e.data.write(to: url, options: .atomic)
+                urls.append(url)
+            }
+            shareItems = urls
+            status = "\(entries.count) files ready to save."
+        } else {
+            let safeName = (meta.filename as NSString).lastPathComponent
+            let url = FileManager.default.temporaryDirectory
+                .appendingPathComponent(safeName.isEmpty ? "download.bin" : safeName)
+            try bytes.write(to: url, options: .atomic)
+            shareItems = [url]
+            status = nil
         }
     }
 
@@ -64,33 +106,32 @@ final class TransfersModel: ObservableObject {
         defer { busy = false }
         do {
             let ct = try await ApiClient.shared.downloadTransfer(id: row.id)
-            let (meta, bytes) = try VaultCrypto.openFileBlob(vaultKey: vaultKey, blob: ct)
-            if meta.mime == VaultCrypto.bundleMime {
-                // A multi-file bundle: unpack and write each file into a temp folder, then share them
-                // all so the user can save the set at once.
-                let entries = try VaultCrypto.unpackBundle(bytes)
-                let dir = FileManager.default.temporaryDirectory
-                    .appendingPathComponent("bundle-\(UUID().uuidString)", isDirectory: true)
-                try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-                var urls: [URL] = []
-                for e in entries {
-                    let leaf = (e.name as NSString).lastPathComponent
-                    let url = dir.appendingPathComponent(leaf.isEmpty ? "file" : leaf)
-                    try e.data.write(to: url, options: .atomic)
-                    urls.append(url)
-                }
-                shareItems = urls
-                status = "\(entries.count) files ready to save."
-            } else {
-                let safeName = (meta.filename as NSString).lastPathComponent
-                let url = FileManager.default.temporaryDirectory
-                    .appendingPathComponent(safeName.isEmpty ? "download.bin" : safeName)
-                try bytes.write(to: url, options: .atomic)
-                shareItems = [url]
-                status = nil
+            if VaultCrypto.isPassphraseWrapped(ct) {
+                pendingUnlock = PendingUnlock(ct: ct, vaultKey: vaultKey)
+                status = "This file is password-protected — enter its password to open it."
+                return
             }
+            try presentDecrypted(ct, vaultKey: vaultKey)
         } catch {
             status = ApiError.describe(error)
+        }
+    }
+
+    /// Retry a password-protected download with the entered password (Argon2id off the main thread).
+    func submitUnlock(passphrase: String) async {
+        guard let pending = pendingUnlock, !passphrase.isEmpty else { return }
+        busy = true
+        status = "Unlocking…"
+        defer { busy = false }
+        do {
+            let ct = pending.ct
+            let inner = try await Task.detached(priority: .userInitiated) {
+                try VaultCrypto.openPassphrase(passphrase: passphrase, blob: ct)
+            }.value
+            try presentDecrypted(inner, vaultKey: pending.vaultKey)
+            pendingUnlock = nil
+        } catch {
+            status = "That password didn't open the file — check it and try again."
         }
     }
 
@@ -137,6 +178,8 @@ struct TransfersView: View {
     @State private var recipient: String? // nil = all my devices
     @State private var retMode: RetentionMode = .days
     @State private var ttlDays = 1
+    @State private var passphrase = "" // optional send-side password
+    @State private var unlockPassword = "" // receive-side prompt
 
     private var retention: ApiClient.Retention {
         switch retMode {
@@ -179,14 +222,34 @@ struct TransfersView: View {
             .fileImporter(isPresented: $picking, allowedContentTypes: [.data, .item]) { result in
                 guard case .success(let url) = result, let key = vault.currentVaultKey else { return }
                 let ret = retention
+                let pw = passphrase
+                passphrase = ""
                 Task {
                     await model.send(
-                        fileURL: url, recipientDeviceId: recipient, retention: ret, vaultKey: key)
+                        fileURL: url, recipientDeviceId: recipient, retention: ret, vaultKey: key,
+                        passphrase: pw)
                 }
             }
             .sheet(isPresented: Binding(get: { !model.shareItems.isEmpty },
                                         set: { if !$0 { model.shareItems = [] } })) {
                 ShareSheet(items: model.shareItems)
+            }
+            .alert("Password-protected file", isPresented: Binding(
+                get: { model.pendingUnlock != nil },
+                set: { if !$0 { model.pendingUnlock = nil; unlockPassword = "" } })
+            ) {
+                SecureField("Password", text: $unlockPassword)
+                Button("Open") {
+                    let pw = unlockPassword
+                    unlockPassword = ""
+                    Task { await model.submitUnlock(passphrase: pw) }
+                }
+                Button("Cancel", role: .cancel) {
+                    model.pendingUnlock = nil
+                    unlockPassword = ""
+                }
+            } message: {
+                Text("The sender locked this transfer with a password. Enter it to decrypt and save.")
             }
         }
     }
@@ -214,6 +277,14 @@ struct TransfersView: View {
                         .font(.subheadline)
                 }
                 Text(retentionBlurb).font(.caption2).foregroundColor(.secondary)
+                SecureField("Password (optional)", text: $passphrase)
+                    .textFieldStyle(.roundedBorder)
+                    .textInputAutocapitalization(.never)
+                    .autocorrectionDisabled()
+                if !passphrase.isEmpty {
+                    Text("A second lock only this password opens — it can’t be recovered, so share it separately.")
+                        .font(.caption2).foregroundColor(.orange)
+                }
                 Button {
                     picking = true
                 } label: {
