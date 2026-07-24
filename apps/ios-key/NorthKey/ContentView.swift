@@ -33,6 +33,8 @@ struct ContentView: View {
                         .tabItem { Label("Servers", systemImage: "server.rack") }
                     TransfersView(vault: vault)
                         .tabItem { Label("Transfers", systemImage: "paperplane.fill") }
+                    SettingsView(vault: vault, onForgetServer: forgetServer)
+                        .tabItem { Label("Settings", systemImage: "gearshape.fill") }
                 }
             }
         }

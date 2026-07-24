@@ -4,7 +4,7 @@ import { useApp } from "./stores/app";
 import { checkForUpdate } from "./updater";
 import { Layout } from "./components/Layout";
 import { CommandPalette } from "./components/palette/CommandPalette";
-import { Toaster } from "./components/Toast";
+import { Toaster, toast } from "./components/Toast";
 import { ErrorBoundary } from "./components/ErrorBoundary";
 import { Unlock } from "./screens/Unlock";
 import { SetupWizard } from "./screens/SetupWizard";
@@ -27,8 +27,15 @@ export function App() {
   useEffect(() => {
     init();
     void refreshSettings();
-    // Silently check for an app update on launch (no-op outside the Tauri shell).
-    void checkForUpdate();
+    // Check for an app update on launch but NEVER auto-install (no-op outside the Tauri shell).
+    // Auto-installing here caused a close-and-relaunch loop on Windows when the install couldn't
+    // apply: the app would keep quitting to "update" and never finish. Notify-only instead — the
+    // user installs from Settings → Updates when they choose to. (autoInstall=false)
+    void checkForUpdate((s) => {
+      if (s.state === "ready" && s.version) {
+        toast(`Update ${s.version} is available — install it in Settings → Updates.`, "info");
+      }
+    }, false);
   }, [init, refreshSettings]);
 
   return (

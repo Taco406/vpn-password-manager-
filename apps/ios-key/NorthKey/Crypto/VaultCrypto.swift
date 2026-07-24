@@ -352,6 +352,46 @@ enum VaultCrypto {
         let (nonce, ct) = try xchachaSeal(key: key, plaintext: compressed, aad: aad)
         return header + salt + nonce + ct
     }
+
+    // MARK: - Passphrase envelope (SPAS) — matches crates/core/src/vault/fileblob.rs
+    //   "SPAS" | ver=1 | 0 0 0 | argon_salt(16) | nonce(24) | ct   (ct = sealed SFIL blob)
+    //   key = argon2idKek(passphrase, argon_salt, Production);  AAD = header(8) ‖ argon_salt(16)
+    // An OPTIONAL outer layer wrapping a finished SFIL blob under a user passphrase ("double
+    // encryption"). The passphrase is never stored and isn't recoverable.
+
+    /// True when `bytes` is a passphrase-wrapped (SPAS) transfer rather than a bare SFIL blob.
+    static func isPassphraseWrapped(_ bytes: Data) -> Bool {
+        bytes.count >= 5 && bytes.prefix(4) == Data("SPAS".utf8) && bytes[bytes.startIndex + 4] == 1
+    }
+
+    /// Wrap a finished SFIL blob under `passphrase` (Argon2id at production cost → XChaCha20).
+    static func sealPassphrase(passphrase: String, inner: Data) throws -> Data {
+        var salt = Data(count: 16)
+        _ = salt.withUnsafeMutableBytes { SecRandomCopyBytes(kSecRandomDefault, 16, $0.baseAddress!) }
+        var header = Data("SPAS".utf8)
+        header.append(contentsOf: [1, 0, 0, 0])
+        var aad = header
+        aad.append(salt)
+        let key = try argon2idKek(password: passphrase, salt: salt)
+        let (nonce, ct) = try xchachaSeal(key: key, plaintext: inner, aad: aad)
+        return header + salt + nonce + ct
+    }
+
+    /// Unwrap a passphrase-protected blob back to the inner SFIL blob. Wrong passphrase → throws.
+    static func openPassphrase(passphrase: String, blob: Data) throws -> Data {
+        guard blob.count >= 8 + 16 + 24,
+              blob.prefix(4) == Data("SPAS".utf8), blob[blob.startIndex + 4] == 1
+        else { throw VaultCryptoError.badFormat("passphrase blob") }
+        let base = blob.startIndex
+        let header = blob.prefix(8)
+        let salt = blob.subdata(in: (base + 8)..<(base + 24))
+        let nonce = blob.subdata(in: (base + 24)..<(base + 48))
+        let ct = blob.subdata(in: (base + 48)..<blob.endIndex)
+        var aad = Data(header)
+        aad.append(salt)
+        let key = try argon2idKek(password: passphrase, salt: salt)
+        return try xchachaOpen(key: key, nonce24: nonce, ciphertext: ct, aad: aad)
+    }
 }
 
 // MARK: - zstd bridge (vendored C)

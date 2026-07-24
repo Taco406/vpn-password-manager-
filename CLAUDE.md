@@ -15,6 +15,38 @@ device-joining story; everything else lives under collapsed "Advanced" sections.
 **Zero-knowledge**: the server stores only ciphertext and hashes. If a change would let the
 server read a vault, a key, or a password — it's wrong, redesign it.
 
+## Device & state ledger — READ FIRST, and update it when anything changes
+
+Three apps, three versions, three delivery paths. Most wasted time on this project comes from
+mixing them up: a symptom on ONE device gets debugged as if it were everywhere. Before
+diagnosing anything, say which device you mean.
+
+| Device | Delivery path | Version (as of 2026-07-24) | Confirmed by the user |
+|---|---|---|---|
+| Windows desktop | NSIS `-setup.exe` (per-user, no admin prompt) | **0.1.58** | Servers screen lists **both** Linode and Hetzner. Settings → Hetzner Cloud = "Connected". |
+| iPhone | TestFlight | **0.1.57** | Servers tab lists **only** the Linode `sentinel-sync` box. (Phone has had Hetzner support since 0.1.53 — so this is a data problem, not a missing feature.) |
+| Mac | `.dmg` | — | not in active use |
+
+### Rules that stop the churn (these are lessons, not suggestions)
+
+1. **"Shipped" means the user saw it on their device.** Green CI, a merged PR, and a published
+   GitHub release are NOT delivery. Never say shipped / fixed / verified until they confirm it
+   on hardware. Multiple releases were called "shipped" while the user's app never updated.
+2. **Never re-ask a fact the user already gave**, including in a screenshot. Re-read this ledger
+   and the recent messages before asking. Asking "what does the Servers screen show?" three
+   times is how you burn someone's trust.
+3. **Name the device in every diagnosis.** "Hetzner isn't showing" cost two days because it was
+   missing on the *phone* while working on the *desktop* — two completely different fixes.
+4. **A phone problem is usually not a phone-build problem.** Check the data path first (does the
+   token actually reach it?) before assuming a stale version or an unimplemented feature.
+5. **Delivery breaks silently — check it explicitly.** The iOS build can fail at Apple signing
+   (e.g. the "maximum number of certificates" cap) and the desktop updater can fail to apply;
+   both leave the user on an old build with no error. After any release, verify the artifact
+   actually reached the device before moving on.
+6. **Silent `let _ = …` / swallowed errors are a bug class here**, not a style choice. A
+   fire-and-forget push that reports success is indistinguishable from a working one until the
+   user notices data missing on another device.
+
 ## Component map
 
 | Path | What | Language |

@@ -27,6 +27,11 @@ private struct Golden: Decodable {
         let entries: [Entry]
         let archive_b64: String
     }
+    struct FilePassphrase: Decodable {
+        let passphrase: String
+        let inner_blob_b64: String
+        let wrapped_b64: String
+    }
     let items: [Item]
     let password: String
     let vault_blob_b64: String
@@ -36,6 +41,7 @@ private struct Golden: Decodable {
     let login_proof_b64: String
     let file_transfer: FileTransfer
     let file_bundle: FileBundle
+    let file_passphrase: FilePassphrase
 }
 
 final class VaultCryptoTests: XCTestCase {
@@ -170,6 +176,19 @@ final class VaultCryptoTests: XCTestCase {
             XCTAssertEqual(got.name, want.name)
             XCTAssertEqual(got.data.base64EncodedString(), want.data_b64)
         }
+    }
+
+    /// SPAS decode: the passphrase-wrapped blob the desktop (Rust) sealed unwraps to the same inner
+    /// SFIL blob on the phone. Production-cost Argon2 (~1s on-device) — the transfer-passphrase
+    /// interop guarantee. Rust half: ios_golden_vectors::committed_fixture_passphrase_unwraps.
+    func testDecodeGoldenPassphrase() throws {
+        let g = try golden()
+        let wrapped = try XCTUnwrap(Data(base64Encoded: g.file_passphrase.wrapped_b64))
+        XCTAssertTrue(VaultCrypto.isPassphraseWrapped(wrapped))
+        let inner = try VaultCrypto.openPassphrase(
+            passphrase: g.file_passphrase.passphrase, blob: wrapped)
+        XCTAssertEqual(inner.base64EncodedString(), g.file_passphrase.inner_blob_b64)
+        XCTAssertEqual(inner.base64EncodedString(), g.file_transfer.blob_b64)
     }
 
     /// What the phone seals as an SFIL blob, the phone can open again (and the byte format matches

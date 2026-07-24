@@ -16,6 +16,7 @@ import {
   TRANSFER_MAX_BYTES,
   type TransferItem,
   type TransferRetention,
+  type TransferDownloadResult,
   type SyncDevice,
 } from "../bridge";
 import { Card, SectionTitle, Badge } from "../components/ui";
@@ -148,6 +149,8 @@ export function Transfers() {
   const [msg, setMsg] = useState("");
   const [loaded, setLoaded] = useState(false);
   const [dragOver, setDragOver] = useState(false);
+  const [passphrase, setPassphrase] = useState(""); // optional send-side password
+  const [unlock, setUnlock] = useState<{ id: string; pw: string } | null>(null); // receive-side prompt
   const fileRef = useRef<HTMLInputElement>(null);
 
   const refresh = useCallback(async () => {
@@ -197,20 +200,23 @@ export function Transfers() {
     setBusy(true);
     const to = recipient ? nameOf(recipient) : "all your devices";
     try {
+      const pw = passphrase.trim() || undefined;
+      const locked = pw ? " · password-protected" : "";
       if (files.length === 1) {
         setMsg(`Encrypting and sending "${files[0].name}"…`);
         const b64 = await fileToBase64(files[0]);
-        const r = await transferSend(recipient || null, files[0].name, b64, retentionOf(retMode, ttlDays));
-        setMsg(`Sent "${r.filename}" (${fmtBytes(r.blobBytes)} encrypted) to ${to}.`);
+        const r = await transferSend(recipient || null, files[0].name, b64, retentionOf(retMode, ttlDays), pw);
+        setMsg(`Sent "${r.filename}" (${fmtBytes(r.blobBytes)} encrypted${locked}) to ${to}.`);
       } else {
         setMsg(`Encrypting and sending ${files.length} files…`);
         const payload = await Promise.all(
           files.map(async (f) => ({ name: f.name, dataB64: await fileToBase64(f) })),
         );
-        const r = await transferSendBundle(recipient || null, payload, retentionOf(retMode, ttlDays));
-        setMsg(`Sent ${files.length} files (${fmtBytes(r.blobBytes)} encrypted) to ${to}.`);
+        const r = await transferSendBundle(recipient || null, payload, retentionOf(retMode, ttlDays), pw);
+        setMsg(`Sent ${files.length} files (${fmtBytes(r.blobBytes)} encrypted${locked}) to ${to}.`);
       }
       await refresh();
+      setPassphrase("");
     } catch (e) {
       setMsg(errMsg(e));
     }
@@ -226,17 +232,46 @@ export function Transfers() {
     if (files.length) void onFiles(files);
   };
 
+  // Save a downloaded transfer — several files for a bundle, one otherwise.
+  const saveResult = (f: TransferDownloadResult) => {
+    if (f.bundle && f.bundle.length > 0) {
+      for (const bf of f.bundle) saveBase64(baseName(bf.name), "application/octet-stream", bf.dataB64);
+      setMsg(`Saved ${f.bundle.length} files (${fmtBytes(f.sizeBytes)}). Check your Downloads folder.`);
+    } else {
+      saveBase64(f.filename, f.mime, f.dataB64);
+      setMsg(`Saved "${f.filename}" (${fmtBytes(f.sizeBytes)}). Check your Downloads folder.`);
+    }
+  };
+
   const download = async (it: TransferItem) => {
     setBusy(true);
     setMsg("Downloading and decrypting…");
     try {
       const f = await transferDownload(it.id);
-      if (f.bundle && f.bundle.length > 0) {
-        for (const bf of f.bundle) saveBase64(baseName(bf.name), "application/octet-stream", bf.dataB64);
-        setMsg(`Saved ${f.bundle.length} files (${fmtBytes(f.sizeBytes)}). Check your Downloads folder.`);
+      if (f.needsPassphrase) {
+        setUnlock({ id: it.id, pw: "" });
+        setMsg("This file is password-protected — enter its password to open it.");
       } else {
-        saveBase64(f.filename, f.mime, f.dataB64);
-        setMsg(`Saved "${f.filename}" (${fmtBytes(f.sizeBytes)}). Check your Downloads folder.`);
+        saveResult(f);
+      }
+    } catch (e) {
+      setMsg(errMsg(e));
+    }
+    setBusy(false);
+  };
+
+  // Retry a password-protected download with the entered password.
+  const submitUnlock = async () => {
+    if (!unlock || !unlock.pw.trim()) return;
+    setBusy(true);
+    setMsg("Unlocking…");
+    try {
+      const f = await transferDownload(unlock.id, unlock.pw);
+      if (f.needsPassphrase) {
+        setMsg("That password didn't open the file — check it and try again.");
+      } else {
+        saveResult(f);
+        setUnlock(null);
       }
     } catch (e) {
       setMsg(errMsg(e));
@@ -347,12 +382,68 @@ export function Transfers() {
             className="text-xs text-[var(--text-secondary)] file:mr-3 file:rounded-[8px] file:border-0 file:bg-[var(--accent)]/15 file:px-3 file:py-1.5 file:text-[var(--accent)] hover:file:bg-[var(--accent)]/25"
           />
         </div>
+        <div className="mt-2 flex flex-wrap items-center gap-2">
+          <label className="text-xs text-[var(--text-muted)]">
+            Password{" "}
+            <input
+              type="password"
+              value={passphrase}
+              onChange={(e) => setPassphrase(e.target.value)}
+              placeholder="optional"
+              disabled={busy || !signedIn}
+              className="w-40 rounded-[8px] border border-[var(--border-strong)] bg-[var(--bg-inset)] px-2 py-1.5 text-xs text-[var(--text-primary)] disabled:opacity-50"
+            />
+          </label>
+          {passphrase.trim() && (
+            <span className="text-[11px] text-[var(--warn)]">
+              A second lock only this password opens — it can’t be recovered, so share it separately
+              and don’t forget it.
+            </span>
+          )}
+        </div>
         <p className="mt-2 text-[11px] text-[var(--text-muted)]">
           {dragOver ? "Drop to send…" : retentionBlurb(retMode, ttlDays)}
         </p>
         {msg && <p className="mt-3 text-xs text-[var(--text-muted)]">{msg}</p>}
        </div>
       </Card>
+
+      {unlock && (
+        <Card className="mb-4 border border-[var(--accent)]/40">
+          <div className="mb-2 text-sm font-medium">Password-protected file</div>
+          <p className="mb-2 text-xs text-[var(--text-secondary)]">
+            The sender locked this transfer with a password. Enter it to decrypt and save.
+          </p>
+          <div className="flex flex-wrap items-center gap-2">
+            <input
+              type="password"
+              autoFocus
+              value={unlock.pw}
+              onChange={(e) => setUnlock({ id: unlock.id, pw: e.target.value })}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") void submitUnlock();
+              }}
+              placeholder="Password"
+              disabled={busy}
+              className="w-52 rounded-[8px] border border-[var(--border-strong)] bg-[var(--bg-inset)] px-2 py-1.5 text-xs text-[var(--text-primary)] disabled:opacity-50"
+            />
+            <button
+              onClick={() => void submitUnlock()}
+              disabled={busy || !unlock.pw.trim()}
+              className={`${btnCls} !py-1 disabled:opacity-50`}
+            >
+              Open
+            </button>
+            <button
+              onClick={() => setUnlock(null)}
+              disabled={busy}
+              className="text-xs text-[var(--text-muted)] hover:underline disabled:opacity-50"
+            >
+              Cancel
+            </button>
+          </div>
+        </Card>
+      )}
 
       {/* Inbox */}
       <Card className="mb-4">

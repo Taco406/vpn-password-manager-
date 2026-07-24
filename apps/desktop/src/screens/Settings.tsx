@@ -715,7 +715,8 @@ function Updates() {
         Updates {ver && <Badge tone="accent">v{ver}</Badge>}
       </div>
       <p className="mb-3 text-xs text-[var(--text-secondary)]">
-        NorthKey checks for signed updates on launch and installs them automatically. You can also check now.
+        NorthKey checks for signed updates on launch and tells you when one is ready. Updates install
+        only when you click below — never automatically on launch.
       </p>
       <div className="flex items-center gap-3">
         <button

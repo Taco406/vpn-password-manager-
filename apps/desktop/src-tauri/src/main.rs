@@ -144,6 +144,7 @@ fn main() {
             sync::sync_password_signin,
             sync::settings_sync_write,
             sync::settings_sync_status,
+            sync::settings_reshare,
             sync::sync_devices,
             sync::sync_device_revoke,
             sync::sync_security_events,

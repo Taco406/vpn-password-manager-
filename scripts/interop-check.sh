@@ -59,12 +59,12 @@ for p in /v1/auth/enroll /v1/auth/bootstrap /v1/auth/refresh /v1/wrapped-keys /v
 done
 echo "ok: every phone API path exists in the server router"
 
-# 6. Byte-format magics live on both sides.
-for m in SNTL SVLT SFIL; do
+# 6. Byte-format magics live on both sides (SFIL file blob, NKAR bundle archive, SPAS passphrase box).
+for m in SNTL SVLT SFIL NKAR SPAS; do
     grep -q "$m" "$SWIFT_CRYPTO" || fail "magic $m missing from Swift"
     grep -rq "\"$m\"\|b\"$m\"" crates/core/src/ || fail "magic $m missing from Rust core"
 done
-echo "ok: SNTL/SVLT/SFIL magics present on both platforms"
+echo "ok: SNTL/SVLT/SFIL/NKAR/SPAS magics present on both platforms"
 
 NMHOST=apps/desktop/src-tauri/src/nmhost.rs
 STATE=apps/desktop/src-tauri/src/state.rs
