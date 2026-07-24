@@ -11,8 +11,9 @@ final class TransfersModel: ObservableObject {
     @Published var devices: [ApiClient.DeviceRow] = []
     @Published var busy = false
     @Published var status: String?
-    /// A decrypted file waiting to be saved/shared (written to a temp URL for the share sheet).
-    @Published var shareURL: URL?
+    /// Decrypted file(s) waiting to be saved/shared (temp URLs for the share sheet). A single-file
+    /// transfer yields one URL; a received bundle yields several.
+    @Published var shareItems: [URL] = []
 
     private static let maxBytes = 25 * 1024 * 1024
 
@@ -64,12 +65,30 @@ final class TransfersModel: ObservableObject {
         do {
             let ct = try await ApiClient.shared.downloadTransfer(id: row.id)
             let (meta, bytes) = try VaultCrypto.openFileBlob(vaultKey: vaultKey, blob: ct)
-            let safeName = (meta.filename as NSString).lastPathComponent
-            let url = FileManager.default.temporaryDirectory
-                .appendingPathComponent(safeName.isEmpty ? "download.bin" : safeName)
-            try bytes.write(to: url, options: .atomic)
-            shareURL = url
-            status = nil
+            if meta.mime == VaultCrypto.bundleMime {
+                // A multi-file bundle: unpack and write each file into a temp folder, then share them
+                // all so the user can save the set at once.
+                let entries = try VaultCrypto.unpackBundle(bytes)
+                let dir = FileManager.default.temporaryDirectory
+                    .appendingPathComponent("bundle-\(UUID().uuidString)", isDirectory: true)
+                try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+                var urls: [URL] = []
+                for e in entries {
+                    let leaf = (e.name as NSString).lastPathComponent
+                    let url = dir.appendingPathComponent(leaf.isEmpty ? "file" : leaf)
+                    try e.data.write(to: url, options: .atomic)
+                    urls.append(url)
+                }
+                shareItems = urls
+                status = "\(entries.count) files ready to save."
+            } else {
+                let safeName = (meta.filename as NSString).lastPathComponent
+                let url = FileManager.default.temporaryDirectory
+                    .appendingPathComponent(safeName.isEmpty ? "download.bin" : safeName)
+                try bytes.write(to: url, options: .atomic)
+                shareItems = [url]
+                status = nil
+            }
         } catch {
             status = ApiError.describe(error)
         }
@@ -165,9 +184,9 @@ struct TransfersView: View {
                         fileURL: url, recipientDeviceId: recipient, retention: ret, vaultKey: key)
                 }
             }
-            .sheet(item: Binding(get: { model.shareURL.map { ShareItem(url: $0) } },
-                                 set: { model.shareURL = $0?.url })) { item in
-                ShareSheet(items: [item.url])
+            .sheet(isPresented: Binding(get: { !model.shareItems.isEmpty },
+                                        set: { if !$0 { model.shareItems = [] } })) {
+                ShareSheet(items: model.shareItems)
             }
         }
     }
@@ -310,13 +329,7 @@ private struct TransferRowView: View {
     }
 }
 
-/// Identifiable wrapper so a temp file URL can drive a `.sheet(item:)`.
-private struct ShareItem: Identifiable {
-    let url: URL
-    var id: String { url.path }
-}
-
-/// A UIKit share sheet (`UIActivityViewController`) for saving a received file to Files/Photos/etc.
+/// A UIKit share sheet (`UIActivityViewController`) for saving received file(s) to Files/Photos/etc.
 private struct ShareSheet: UIViewControllerRepresentable {
     let items: [Any]
     func makeUIViewController(context: Context) -> UIActivityViewController {

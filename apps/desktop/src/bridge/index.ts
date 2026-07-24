@@ -1144,16 +1144,42 @@ export async function transferSend(
   return inv("transfer_send", { recipientDeviceId, filename, dataB64, retention: retention ?? null });
 }
 
+/** Seal SEVERAL files (a multi-select or a dragged folder) into ONE bundle transfer. Files are
+ * already compressed by the seal, so bundling — not re-compressing — is the space win. */
+export async function transferSendBundle(
+  recipientDeviceId: string | null,
+  files: { name: string; dataB64: string }[],
+  retention?: TransferRetention,
+): Promise<{ id: string; filename: string; blobBytes: number }> {
+  if (!inTauri()) throw new Error("File transfer is only available in the desktop app.");
+  return inv("transfer_send_bundle", { recipientDeviceId, files, retention: retention ?? null });
+}
+
 /** The transfers this device can see (incoming + its own outgoing), newest first. */
 export async function transferList(): Promise<TransferItem[]> {
   if (!inTauri()) return [];
   return inv<TransferItem[]>("transfer_list");
 }
 
-/** Download + decrypt one transfer; returns its filename, mime, and bytes (base64) to save. */
-export async function transferDownload(
-  id: string,
-): Promise<{ filename: string; sizeBytes: number; mime: string; dataB64: string }> {
+/** One file inside a downloaded bundle. */
+export interface BundleFile {
+  name: string;
+  sizeBytes: number;
+  dataB64: string;
+}
+
+/** A downloaded transfer: a single file (`dataB64`) or, when `bundle` is present, several files. */
+export interface TransferDownloadResult {
+  filename: string;
+  sizeBytes: number;
+  mime: string;
+  dataB64: string;
+  bundle?: BundleFile[];
+}
+
+/** Download + decrypt one transfer; returns its filename, mime, and bytes (base64) to save. When
+ * the transfer is a multi-file bundle, `bundle` carries the individual files instead. */
+export async function transferDownload(id: string): Promise<TransferDownloadResult> {
   if (!inTauri()) throw new Error("File transfer is only available in the desktop app.");
   return inv("transfer_download", { id });
 }

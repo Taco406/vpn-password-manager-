@@ -19,6 +19,14 @@ private struct Golden: Decodable {
         let bytes_b64: String
         let blob_b64: String
     }
+    struct FileBundle: Decodable {
+        struct Entry: Decodable {
+            let name: String
+            let data_b64: String
+        }
+        let entries: [Entry]
+        let archive_b64: String
+    }
     let items: [Item]
     let password: String
     let vault_blob_b64: String
@@ -27,6 +35,7 @@ private struct Golden: Decodable {
     let wrapped_key_b64: String
     let login_proof_b64: String
     let file_transfer: FileTransfer
+    let file_bundle: FileBundle
 }
 
 final class VaultCryptoTests: XCTestCase {
@@ -147,6 +156,20 @@ final class VaultCryptoTests: XCTestCase {
         XCTAssertEqual(meta.filename, g.file_transfer.filename)
         XCTAssertEqual(meta.mime, g.file_transfer.mime)
         XCTAssertEqual(bytes.base64EncodedString(), g.file_transfer.bytes_b64)
+    }
+
+    /// NKAR bundle decode: the exact archive the desktop (Rust) packed unpacks to the same files on
+    /// the phone. This is the multi-file bundle interop guarantee (the Rust half is in
+    /// ios_golden_vectors::committed_fixture_bundle_matches).
+    func testDecodeGoldenBundle() throws {
+        let g = try golden()
+        let archive = try XCTUnwrap(Data(base64Encoded: g.file_bundle.archive_b64))
+        let entries = try VaultCrypto.unpackBundle(archive)
+        XCTAssertEqual(entries.count, g.file_bundle.entries.count)
+        for (got, want) in zip(entries, g.file_bundle.entries) {
+            XCTAssertEqual(got.name, want.name)
+            XCTAssertEqual(got.data.base64EncodedString(), want.data_b64)
+        }
     }
 
     /// What the phone seals as an SFIL blob, the phone can open again (and the byte format matches

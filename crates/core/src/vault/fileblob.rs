@@ -116,6 +116,97 @@ pub fn open_file(vk: &VaultKey, bytes: &[u8]) -> Result<(FileMeta, Vec<u8>)> {
     Ok((meta, data))
 }
 
+// ---------------------------------------------------------------------------
+// Bundle archive (v0.1.58): pack several files into one byte string that then rides as the
+// payload of a single ordinary SFIL blob (its `FileMeta.mime` = [`BUNDLE_MIME`]). There is NO
+// crypto here — the SFIL seal still provides all confidentiality; this is only a container so that
+// "send these five files" (or a whole folder) is ONE encrypted transfer instead of five. A client
+// that doesn't recognise the mime just sees one opaque file (the ciphertext still opens); a new
+// client unpacks it. Symmetric, self-describing, and unit- + golden-tested so the desktop (Rust)
+// and phone (Swift) agree byte-for-byte.
+//
+// ```text
+// "NKAR"(4) | 0x01 | count(u32 LE) | [ name_len(u32 LE) | name_utf8 | data_len(u64 LE) | data ]*
+// ```
+
+/// Mime marking a sealed file whose plaintext is a [`pack_bundle`] archive of several files.
+pub const BUNDLE_MIME: &str = "application/x-northkey-bundle";
+
+const NKAR_MAGIC: &[u8; 4] = b"NKAR";
+const NKAR_VERSION: u8 = 0x01;
+
+/// One file inside a bundle.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct BundleEntry {
+    pub name: String,
+    pub data: Vec<u8>,
+}
+
+/// Pack several files into one self-describing archive (the plaintext payload of a bundle transfer).
+pub fn pack_bundle(entries: &[BundleEntry]) -> Vec<u8> {
+    let mut out = Vec::new();
+    out.extend_from_slice(NKAR_MAGIC);
+    out.push(NKAR_VERSION);
+    out.extend_from_slice(&(entries.len() as u32).to_le_bytes());
+    for e in entries {
+        let name = e.name.as_bytes();
+        out.extend_from_slice(&(name.len() as u32).to_le_bytes());
+        out.extend_from_slice(name);
+        out.extend_from_slice(&(e.data.len() as u64).to_le_bytes());
+        out.extend_from_slice(&e.data);
+    }
+    out
+}
+
+/// Unpack a bundle archive back into its files, validating every length against the buffer so a
+/// malformed or truncated archive is rejected rather than panicking.
+pub fn unpack_bundle(bytes: &[u8]) -> Result<Vec<BundleEntry>> {
+    let fmt = |detail: &str| CoreError::Format {
+        what: "file bundle",
+        detail: detail.to_string(),
+    };
+    let len = bytes.len();
+    let fits = |pos: usize, n: usize| pos.checked_add(n).map(|end| end <= len).unwrap_or(false);
+    if len < 9 || &bytes[0..4] != NKAR_MAGIC {
+        return Err(fmt("bad magic"));
+    }
+    if bytes[4] != NKAR_VERSION {
+        return Err(fmt("unsupported version"));
+    }
+    let count = u32::from_le_bytes([bytes[5], bytes[6], bytes[7], bytes[8]]) as usize;
+    let mut pos = 9;
+    let mut out = Vec::with_capacity(count.min(1024));
+    for _ in 0..count {
+        if !fits(pos, 4) {
+            return Err(fmt("truncated (name length)"));
+        }
+        let nlen = u32::from_le_bytes([bytes[pos], bytes[pos + 1], bytes[pos + 2], bytes[pos + 3]])
+            as usize;
+        pos += 4;
+        if !fits(pos, nlen) {
+            return Err(fmt("truncated (name)"));
+        }
+        let name = String::from_utf8(bytes[pos..pos + nlen].to_vec())
+            .map_err(|_| fmt("name not utf-8"))?;
+        pos += nlen;
+        if !fits(pos, 8) {
+            return Err(fmt("truncated (data length)"));
+        }
+        let dlen = u64::from_le_bytes(bytes[pos..pos + 8].try_into().unwrap()) as usize;
+        pos += 8;
+        if !fits(pos, dlen) {
+            return Err(fmt("truncated (data)"));
+        }
+        let data = bytes[pos..pos + dlen].to_vec();
+        pos += dlen;
+        out.push(BundleEntry { name, data });
+    }
+    if pos != len {
+        return Err(fmt("trailing bytes"));
+    }
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -125,6 +216,59 @@ mod tests {
             filename: "report.pdf".into(),
             mime: "application/pdf".into(),
         }
+    }
+
+    fn bundle() -> Vec<BundleEntry> {
+        vec![
+            BundleEntry {
+                name: "a.txt".into(),
+                data: b"hello".to_vec(),
+            },
+            BundleEntry {
+                name: "nested/b.bin".into(),
+                data: vec![0u8, 255, 7, 42, 7],
+            },
+            BundleEntry {
+                name: "empty".into(),
+                data: vec![],
+            },
+        ]
+    }
+
+    #[test]
+    fn bundle_round_trip() {
+        let packed = pack_bundle(&bundle());
+        assert_eq!(&packed[0..4], NKAR_MAGIC);
+        assert_eq!(unpack_bundle(&packed).unwrap(), bundle());
+    }
+
+    #[test]
+    fn bundle_rejects_garbage_and_short() {
+        assert!(unpack_bundle(b"not an archive").is_err());
+        assert!(unpack_bundle(b"NKAR").is_err());
+        assert!(unpack_bundle(&[]).is_err());
+    }
+
+    #[test]
+    fn bundle_rejects_truncated_lengths() {
+        let mut packed = pack_bundle(&bundle());
+        packed.truncate(packed.len() - 2); // chop part of the last file's data
+        assert!(unpack_bundle(&packed).is_err());
+    }
+
+    #[test]
+    fn bundle_rides_a_normal_sealed_blob() {
+        // The whole point: a bundle is just the plaintext of an ordinary SFIL blob.
+        let vk = VaultKey::generate();
+        let payload = pack_bundle(&bundle());
+        let m = FileMeta {
+            filename: "3 files.nkbundle".into(),
+            mime: BUNDLE_MIME.into(),
+        };
+        let blob = seal_file(&vk, &m, &payload).unwrap();
+        let (got, back) = open_file(&vk, &blob).unwrap();
+        assert_eq!(got.mime, BUNDLE_MIME);
+        assert_eq!(unpack_bundle(&back).unwrap(), bundle());
     }
 
     #[test]
