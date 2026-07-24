@@ -57,6 +57,10 @@ final class VaultStore: ObservableObject {
     /// so the phone can call Linode/Hetzner/Netdata directly for monitoring (same as the desktop).
     /// Decrypted only here, in-app — the sync server still only ever holds ciphertext.
     @Published var providerTokens = ProviderTokens()
+    /// When the last SUCCESSFUL server sync finished (nil until the first one). Surfaced on the
+    /// Settings screen: without it, a sync that silently stopped working is indistinguishable from
+    /// one that's up to date, which is exactly how a missing provider token goes unnoticed.
+    @Published var lastSyncedAt: Date?
 
     /// The vault key from the live session, exposed so the Transfers tab can seal/open file blobs.
     var currentVaultKey: Data? { vaultKey }
@@ -216,6 +220,7 @@ final class VaultStore: ObservableObject {
                 Self.cacheClearBlob()
             }
             offline = false
+            lastSyncedAt = Date()
         } catch let e where Self.isTransport(e) {
             // Server unreachable — show the snapshot from the last successful sync (read-only).
             guard let (v, ct) = Self.cacheRead() else { throw e }
