@@ -50,7 +50,15 @@ final class ServersModel: ObservableObject {
     }
 
     func netdataCfg(for server: MonitoredServer, tokens: ProviderTokens) -> NetdataEndpointCfg? {
-        NetdataEndpointCfg.map(fromJSON: tokens.netdataConfigJSON)[server.key]
+        guard var cfg = NetdataEndpointCfg.map(fromJSON: tokens.netdataConfigJSON)[server.key] else {
+            return nil
+        }
+        // v0.1.57: attach the synced Authorization header for auth-protected agents, so the phone
+        // loads those dashboards too instead of skipping them.
+        if cfg.hasAuth, let header = tokens.netdataAuthMap[server.key], !header.isEmpty {
+            cfg.authHeader = header
+        }
+        return cfg
     }
 }
 

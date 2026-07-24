@@ -8,6 +8,34 @@ The format follows [Keep a Changelog](https://keepachangelog.com/). Versions are
 [semantic](https://semver.org/). **Add a new `## [x.y.z]` section at the top in the same PR
 that bumps the app version** — that's how "the changelog updates on every merge."
 
+## [0.1.57] — 2026-07-24
+
+### Added
+- **Sign in on a new computer and everything is already there.** Until now a fresh device only got
+  your passwords and provider tokens back — the rest of your setup stayed on the old machine. Now
+  your whole configuration rides your encrypted vault and rehydrates on first sign-in: your VPN
+  preferences (split-tunnel routes, kill-switch default, auto-connect on untrusted Wi-Fi and your
+  trusted-Wi-Fi list), your server monitoring (watchdog CPU/disk alerts **and** the logins for any
+  password-protected Netdata servers), your always-on VPN server (so a new device can see, connect
+  to, and shut it down instead of it being invisible and billing in the background), and the small
+  stuff — theme, auto-lock timeout, clipboard-clear time, default region. Nothing to re-enter.
+- **A new device now asks for your master password.** If you’ve set a master password, a computer
+  you’ve just signed in on will require it on every launch from then on — instead of opening
+  straight into your vault. A device that just downloaded your whole vault should be locked behind
+  your password, and now it is. (If you don’t use a master password, nothing changes — it still
+  opens by default.)
+- **iPhone & iPad: password-protected server dashboards now load.** If a server’s Netdata is behind
+  a username/password, the phone used to skip it; now it uses the login that rides your vault, the
+  same as your computer.
+
+### Notes
+- All of this stays zero-knowledge: every setting travels inside the same end-to-end-encrypted vault
+  item your passwords do — including the secret bits (a Netdata login, the always-on node’s key) —
+  so your server still only ever stores ciphertext. Nothing about the encryption changed.
+- Your recovery-code restore is unchanged and still opens straight in — it’s the one path that
+  never asks for a master password, on purpose, so a forgotten password can’t lock you out of a
+  recovery.
+
 ## [0.1.56] — 2026-07-23
 
 ### Added

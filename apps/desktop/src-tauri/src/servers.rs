@@ -557,6 +557,78 @@ fn netdata_auth_account(provider: &str, id: &str) -> String {
     format!("netdata-auth-{provider}-{id}")
 }
 
+// --- Settings-sync collectors/appliers (v0.1.57) ------------------------------
+// These let the watchdog config and the per-server Netdata *auth credentials* ride the encrypted
+// settings item, so a freshly-signed-in device rehydrates its alerting + can load auth-protected
+// dashboards without the user re-entering anything. All values are end-to-end encrypted in the
+// vault item; the server only ever stores ciphertext.
+
+/// The watchdog config as JSON for the synced settings item — empty when it's still the default
+/// (so an untouched device never seeds a no-op field). Deterministic (fixed struct field order).
+pub(crate) fn watchdog_config_json(dir: &Path) -> String {
+    let cur = serde_json::to_string(&load_cfg(dir).watchdog).unwrap_or_default();
+    let def = serde_json::to_string(&WatchdogFileCfg::default()).unwrap_or_default();
+    if cur == def {
+        String::new()
+    } else {
+        cur
+    }
+}
+
+/// Apply a synced watchdog config to this device.
+pub(crate) fn apply_watchdog_config_json(dir: &Path, json: &str) {
+    if let Ok(wd) = serde_json::from_str::<WatchdogFileCfg>(json) {
+        let mut cfg = load_cfg(dir);
+        cfg.watchdog = wd;
+        let _ = save_cfg(dir, &cfg);
+    }
+}
+
+/// The per-server Netdata auth credentials as a JSON map keyed by `"provider:id"` — SECRET (real
+/// login headers), empty when none are set. Only servers marked `has_auth` contribute. Sorted keys
+/// (BTreeMap) so the string is stable across devices and never thrashes the self-heal.
+pub(crate) fn netdata_auth_json(dir: &Path) -> String {
+    let cfg = load_cfg(dir);
+    let mut out: BTreeMap<String, String> = BTreeMap::new();
+    for (key, nd) in &cfg.netdata {
+        if !nd.has_auth {
+            continue;
+        }
+        if let Some((provider, id)) = key.split_once(':') {
+            if let Some(cred) = keyring::Entry::new(KC_SERVICE, &netdata_auth_account(provider, id))
+                .ok()
+                .and_then(|e| e.get_password().ok())
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+            {
+                out.insert(key.clone(), cred);
+            }
+        }
+    }
+    if out.is_empty() {
+        return String::new();
+    }
+    serde_json::to_string(&out).unwrap_or_default()
+}
+
+/// Store synced Netdata auth credentials into this device's keychain, keyed by `"provider:id"`.
+pub(crate) fn apply_netdata_auth_json(json: &str) {
+    if let Ok(incoming) = serde_json::from_str::<BTreeMap<String, String>>(json) {
+        for (key, cred) in incoming {
+            if cred.trim().is_empty() {
+                continue;
+            }
+            if let Some((provider, id)) = key.split_once(':') {
+                if let Ok(entry) =
+                    keyring::Entry::new(KC_SERVICE, &netdata_auth_account(provider, id))
+                {
+                    let _ = entry.set_password(cred.trim());
+                }
+            }
+        }
+    }
+}
+
 /// Build the endpoint for one server from its stored config (+ keychain auth header).
 fn endpoint_for(
     dir: &Path,

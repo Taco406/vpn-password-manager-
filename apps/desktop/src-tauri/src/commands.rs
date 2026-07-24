@@ -1042,3 +1042,66 @@ pub fn settings_set(state: State<AppState>, patch: serde_json::Value) -> R<()> {
     .map_err(|e| err("io", e.to_string()))?;
     Ok(())
 }
+
+// --- Settings-sync of app preferences (v0.1.57) -------------------------------
+// Preferences (theme, auto-lock, clipboard-clear, default region, split-tunnel mode + routes,
+// kill-switch default, auto-connect + trusted-SSID list, onboarding-done, …) lived only in the
+// local settings.json, so a new device reverted to defaults. We ride the syncable subset on the
+// encrypted settings item. DEVICE-LOCAL keys are deliberately excluded: Windows Hello and the
+// authenticator-app app-lock are per-device (their secret/hardware lives only on this machine —
+// syncing the *flag* without the secret would lock a new device out), and telemetry is forced off.
+
+const DEVICE_LOCAL_PREF_KEYS: &[&str] = &["requireHello", "applockTotpEnabled", "telemetry"];
+
+/// Serialize the syncable subset of settings.json as a compact, key-sorted JSON string for the
+/// encrypted settings item. Empty when nothing (syncable) is set. Sorted keys (BTreeMap) so the
+/// string is identical across devices and never thrashes the settings-item self-heal.
+pub(crate) fn prefs_sync_export(dir: &std::path::Path) -> String {
+    let Ok(text) = std::fs::read_to_string(dir.join("settings.json")) else {
+        return String::new();
+    };
+    let Ok(serde_json::Value::Object(obj)) = serde_json::from_str::<serde_json::Value>(&text)
+    else {
+        return String::new();
+    };
+    let mut out: std::collections::BTreeMap<String, serde_json::Value> =
+        std::collections::BTreeMap::new();
+    for (k, v) in obj {
+        if DEVICE_LOCAL_PREF_KEYS.contains(&k.as_str()) {
+            continue;
+        }
+        out.insert(k, v);
+    }
+    if out.is_empty() {
+        return String::new();
+    }
+    serde_json::to_string(&out).unwrap_or_default()
+}
+
+/// Merge a synced prefs object into local settings.json, preserving device-local keys (and never
+/// letting a synced blob set one). Keeps telemetry off.
+pub(crate) fn apply_prefs_sync(dir: &std::path::Path, json: &str) {
+    let Ok(serde_json::Value::Object(incoming)) = serde_json::from_str::<serde_json::Value>(json)
+    else {
+        return;
+    };
+    let path = dir.join("settings.json");
+    let mut cur = std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
+        .filter(|v| v.is_object())
+        .unwrap_or_else(|| serde_json::json!({}));
+    if let Some(obj) = cur.as_object_mut() {
+        for (k, v) in incoming {
+            if DEVICE_LOCAL_PREF_KEYS.contains(&k.as_str()) {
+                continue;
+            }
+            obj.insert(k, v);
+        }
+        obj.insert("telemetry".into(), serde_json::Value::Bool(false));
+    }
+    let _ = std::fs::write(
+        &path,
+        serde_json::to_string_pretty(&cur).unwrap_or_default(),
+    );
+}

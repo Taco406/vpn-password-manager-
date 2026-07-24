@@ -1728,6 +1728,51 @@ fn persist_wg_key_del() {
     }
 }
 
+// --- Settings-sync of the always-on node (v0.1.57) ----------------------------
+// The always-on node's record + its client WireGuard key were device-local, so a freshly-signed-in
+// device couldn't SEE, connect to, or DESTROY a node that was still running and billing. We ride
+// the (record + client key) on the encrypted settings item so any device rehydrates it. It's a
+// singleton for a single user, and the client key is a genuine secret — so this field is stored
+// `secret: true` and only ever lives in ciphertext on the server.
+
+/// Record + client key bundled for the synced settings item.
+#[derive(Serialize, Deserialize)]
+struct PersistentSyncBundle {
+    record: PersistentVpnRecord,
+    #[serde(default)]
+    client_key: String,
+}
+
+/// Export the always-on node (record + client WG key) for the synced settings item. Empty when no
+/// node is deployed. SECRET — carries the client private key.
+pub(crate) fn persistent_sync_export(dir: &Path) -> String {
+    match load_persistent_record(dir) {
+        Some(record) if !record.instance_id.trim().is_empty() => {
+            let client_key = persist_wg_key_load().unwrap_or_default();
+            serde_json::to_string(&PersistentSyncBundle { record, client_key }).unwrap_or_default()
+        }
+        _ => String::new(),
+    }
+}
+
+/// Seed the always-on node record + client key from a synced bundle. Seed-only: never clobber a
+/// node this device already knows about, so a device that deployed its own node keeps it.
+pub(crate) fn persistent_sync_import(dir: &Path, json: &str) {
+    if load_persistent_record(dir).is_some() {
+        return;
+    }
+    if let Ok(bundle) = serde_json::from_str::<PersistentSyncBundle>(json) {
+        if bundle.record.instance_id.trim().is_empty() {
+            return;
+        }
+        if save_persistent_record(dir, &bundle.record).is_ok()
+            && !bundle.client_key.trim().is_empty()
+        {
+            let _ = persist_wg_key_store(bundle.client_key.trim());
+        }
+    }
+}
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PersistentStatusOut {

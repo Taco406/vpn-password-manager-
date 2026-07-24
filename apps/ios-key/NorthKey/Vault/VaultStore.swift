@@ -15,8 +15,20 @@ struct ProviderTokens: Equatable {
     var hetzner = ""
     /// JSON map of `"provider:id" -> {port, https, hasAuth}` from the desktop's Netdata config.
     var netdataConfigJSON = ""
+    /// JSON map of `"provider:id" -> Authorization header` (v0.1.57) for auth-protected Netdata
+    /// agents, so the phone can load those dashboards too instead of skipping them. SECRET —
+    /// decrypted only in-app; the sync server still only ever holds ciphertext.
+    var netdataAuthJSON = ""
 
     var hasAny: Bool { !linode.isEmpty || !hetzner.isEmpty }
+
+    /// Parsed `"provider:id" -> Authorization header` map (empty when none synced).
+    var netdataAuthMap: [String: String] {
+        guard !netdataAuthJSON.isEmpty, let data = netdataAuthJSON.data(using: .utf8) else {
+            return [:]
+        }
+        return (try? JSONDecoder().decode([String: String].self, from: data)) ?? [:]
+    }
 
     init() {}
 
@@ -29,6 +41,7 @@ struct ProviderTokens: Equatable {
         linode = field("linode_token")
         hetzner = field("hetzner_token")
         netdataConfigJSON = field("netdata_config")
+        netdataAuthJSON = field("netdata_auth")
     }
 }
 
