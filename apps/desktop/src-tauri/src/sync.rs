@@ -1423,7 +1423,9 @@ pub async fn sync_unlock_with_password(
         }
         g.session = VaultSession::unlocked(vk.clone());
     }
-    kc_set(KC_VAULT_KEY, &STANDARD.encode(vk.key().as_bytes()))?;
+    // v0.1.57: this device just proved the master password, so make it require the password on every
+    // launch too (mirror sync_password_signin) rather than persisting a plaintext key.
+    make_password_protected(&data_dir(&state), &blob.bytes, &vk);
 
     let mut restored = 0i64;
     if let Some((v, ct)) = api.get_vault().await? {
@@ -1538,6 +1540,26 @@ pub struct PasswordSigninOut {
     /// True = the account has 2-step sign-in; re-submit with the 6-digit code.
     pub totp_required: bool,
     pub restored: i64,
+}
+
+/// v0.1.57 — make a freshly-adopted device require the master password on every launch when the
+/// account has one. `escrow` is the server's Password-wrapped key: if it's a valid `SNTL` Password
+/// wrapper we write it as this device's local wrapper (so the next boot boots LOCKED and demands the
+/// password) and drop the plaintext keychain key. If the account has NO master password (the escrow
+/// isn't a Password wrapper) — or writing the wrapper fails — we keep the plaintext key so the device
+/// stays usable (unlocked-by-default). Best-effort and infallible: a device is NEVER left with
+/// neither a wrapper nor a key, which would brick it on the next launch.
+fn make_password_protected(dir: &std::path::Path, escrow: &[u8], vk: &VaultKey) {
+    if crate::state::password_protected(dir) {
+        return; // already requires the password on this device — leave its wrapper alone
+    }
+    let is_password_wrap =
+        escrow.len() >= 8 && &escrow[0..4] == b"SNTL" && escrow[5] == WrapperType::Password.code();
+    if is_password_wrap && std::fs::write(crate::state::wrap_path(dir), escrow).is_ok() {
+        let _ = crate::state::delete_key(); // password is now the only way in
+    } else {
+        let _ = kc_set(KC_VAULT_KEY, &STANDARD.encode(vk.key().as_bytes()));
+    }
 }
 
 /// The one login: point this device at a server (pinning the probed cert), prove the master
@@ -1672,7 +1694,12 @@ pub async fn sync_password_signin(
     };
     let mut restored = 0i64;
     if !already_has_vault {
-        kc_set(KC_VAULT_KEY, &STANDARD.encode(vk.key().as_bytes()))?;
+        // The account is password-protected (that's the only way this sign-in path succeeds), so
+        // make THIS new device require the master password on every launch too — otherwise it would
+        // boot UNLOCKED with the whole vault sitting open. The escrow we just unwrapped IS a valid
+        // local wrapper. This run stays unlocked via the in-memory session set above; the next
+        // launch boots locked and demands the password.
+        make_password_protected(&dir, &blob.bytes, &vk);
         if let Some((v, ct)) = api.get_vault().await? {
             let doc = decode_sync_blob(&vk, &ct, v as u64).map_err(estr)?;
             let report = {
@@ -1707,6 +1734,14 @@ const SET_GCLIENT: &str = "google_client_id";
 const SET_GSECRET: &str = "google_client_secret";
 const SET_HETZNER: &str = "hetzner_token";
 const SET_NETDATA: &str = "netdata_config";
+// v0.1.57 — the rest of a device's configuration, so a new device rehydrates fully on first login.
+// All additive (the phone + old desktops ignore fields they don't know). SET_NDAUTH and SET_AOVPN
+// carry secrets (a Netdata login header, the always-on node's client key) but ride the same
+// end-to-end-encrypted item — the server still only ever sees ciphertext.
+const SET_PREFS: &str = "app_prefs";
+const SET_WATCHDOG: &str = "watchdog_cfg";
+const SET_NDAUTH: &str = "netdata_auth";
+const SET_AOVPN: &str = "always_on_vpn";
 
 fn settings_item_id() -> uuid::Uuid {
     uuid::Uuid::parse_str(SETTINGS_ITEM_ID).expect("const uuid")
@@ -1725,6 +1760,10 @@ fn local_settings(state: &State<'_, AppState>) -> Vec<(&'static str, String)> {
             crate::servers::hetzner_get_token().unwrap_or_default(),
         ),
         (SET_NETDATA, crate::servers::netdata_config_json(&dir)),
+        (SET_PREFS, crate::commands::prefs_sync_export(&dir)),
+        (SET_WATCHDOG, crate::servers::watchdog_config_json(&dir)),
+        (SET_NDAUTH, crate::servers::netdata_auth_json(&dir)),
+        (SET_AOVPN, crate::vpn::persistent_sync_export(&dir)),
     ]
 }
 
@@ -1776,6 +1815,18 @@ pub(crate) fn sync_device_settings(state: &State<'_, AppState>) -> bool {
                     }
                     SET_NETDATA => {
                         crate::servers::apply_netdata_config_json(&data_dir(state), v);
+                    }
+                    SET_PREFS => {
+                        crate::commands::apply_prefs_sync(&data_dir(state), v);
+                    }
+                    SET_WATCHDOG => {
+                        crate::servers::apply_watchdog_config_json(&data_dir(state), v);
+                    }
+                    SET_NDAUTH => {
+                        crate::servers::apply_netdata_auth_json(v);
+                    }
+                    SET_AOVPN => {
+                        crate::vpn::persistent_sync_import(&data_dir(state), v);
                     }
                     _ => {}
                 }
@@ -2796,6 +2847,12 @@ pub async fn sync_pair_complete(
             g.vault.merge(&doc).map_err(estr)?
         };
         restored = report.added as i64;
+    }
+    // v0.1.57: if the account has a master password, make this QR-joined device require it on every
+    // launch too (now that we're signed in, fetch the escrow). No master password ⇒ the plaintext
+    // key stored above stays and the device remains unlocked-by-default, exactly as before.
+    if let Ok(escrow) = api.get_wrapped_key(WrapperType::Password.code()).await {
+        make_password_protected(&dir, &escrow, &vk);
     }
     let _ = sync_device_settings(&state);
     Ok(PairCompleteOut {

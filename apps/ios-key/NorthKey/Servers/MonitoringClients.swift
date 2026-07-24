@@ -124,6 +124,9 @@ struct NetdataEndpointCfg: Decodable {
     var port: Int
     var https: Bool
     var hasAuth: Bool
+    /// Full `Authorization` header value for an auth-protected agent (v0.1.57), filled in from the
+    /// synced `netdata_auth` map — NOT part of the `netdata_config` JSON, so it decodes to nil.
+    var authHeader: String? = nil
 
     static func map(fromJSON json: String) -> [String: NetdataEndpointCfg] {
         guard !json.isEmpty, let data = json.data(using: .utf8) else { return [:] }
@@ -253,12 +256,21 @@ final class NetdataClient: NSObject, URLSessionDelegate {
         "\(cfg.https ? "https" : "http")://\(host):\(cfg.port)"
     }
 
+    /// A GET request carrying the synced `Authorization` header when the agent is auth-protected.
+    private func request(_ url: URL, _ cfg: NetdataEndpointCfg) -> URLRequest {
+        var req = URLRequest(url: url)
+        if let auth = cfg.authHeader, !auth.isEmpty {
+            req.setValue(auth, forHTTPHeaderField: "Authorization")
+        }
+        return req
+    }
+
     /// Fetch one chart's raw `{labels, data}`.
     func fetch(host: String, cfg: NetdataEndpointCfg, chart: String, afterSecs: Int = 2, points: Int = 2)
         async throws -> NetdataData
     {
         let url = URL(string: "\(base(host, cfg))/api/v1/data?chart=\(chart)&after=-\(afterSecs)&points=\(points)&format=json&group=average")!
-        let (data, resp) = try await session.data(from: url)
+        let (data, resp) = try await session.data(for: request(url, cfg))
         guard let http = resp as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
             throw MonitoringError.badResponse
         }
@@ -326,7 +338,7 @@ final class NetdataClient: NSObject, URLSessionDelegate {
     /// Active alarms from `/api/v1/alarms?active`.
     func alarms(host: String, cfg: NetdataEndpointCfg) async -> [NetdataAlarm] {
         guard let url = URL(string: "\(base(host, cfg))/api/v1/alarms?active"),
-              let (data, resp) = try? await session.data(from: url),
+              let (data, resp) = try? await session.data(for: request(url, cfg)),
               let http = resp as? HTTPURLResponse, (200..<300).contains(http.statusCode),
               let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let map = obj["alarms"] as? [String: Any]
