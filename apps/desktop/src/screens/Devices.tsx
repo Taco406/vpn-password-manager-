@@ -43,8 +43,8 @@ import {
   syncUnbanIp,
   syncProbeServer,
   syncPasswordSignin,
-  settingsSyncWrite,
   settingsSyncStatus,
+  settingsReshare,
   onSyncApplied,
   type ServerProbe,
   type SyncServerStatus,
@@ -1731,9 +1731,25 @@ function SharedSettings() {
     setBusy(true);
     setMsg("Sharing your settings with your other devices…");
     try {
-      await settingsSyncWrite();
-      await refresh();
-      setMsg("Shared. Your other devices pick these up on their next sync.");
+      // settingsReshare (unlike the old best-effort write) reports whether it actually reached
+      // the server, so a failed push is visible instead of a false "Shared" message.
+      const r = await settingsReshare();
+      setSt(r.status);
+      if (r.pushed) {
+        const shared = [
+          r.status.linode && "Linode",
+          r.status.hetzner && "Hetzner",
+          r.status.google && "Google",
+          r.status.netdata && "Netdata",
+        ]
+          .filter(Boolean)
+          .join(", ");
+        setMsg(
+          `Shared ✓${shared ? ` (${shared})` : ""}. On your phone, pull down to refresh or tap “Sync now” — your servers appear right after.`,
+        );
+      } else {
+        setMsg(r.error ?? "Couldn't share — this computer isn't connected to your sync server.");
+      }
     } catch (e) {
       setMsg(errMsg(e));
     }

@@ -973,6 +973,25 @@ export async function settingsSyncStatus(): Promise<SettingsSyncStatusInfo> {
   return inv<SettingsSyncStatusInfo>("settings_sync_status");
 }
 
+/** The honest result of an explicit "Push to all my devices": whether it actually reached the
+ * server (`pushed`), a message when it didn't (`error`), and what the shared item now carries.
+ * Unlike `settingsSyncWrite` this does NOT swallow a failed push. */
+export interface ReshareResult {
+  pushed: boolean;
+  error: string | null;
+  status: SettingsSyncStatusInfo;
+}
+
+export async function settingsReshare(): Promise<ReshareResult> {
+  if (!inTauri())
+    return {
+      pushed: false,
+      error: "Sharing works in the installed desktop app.",
+      status: { present: false, updatedAt: 0, linode: false, google: false, hetzner: false, netdata: false },
+    };
+  return inv<ReshareResult>("settings_reshare");
+}
+
 /** First contact with a server by address: its version, cert to pin, and trust fingerprint. */
 export interface ServerProbe {
   certPem: string | null;

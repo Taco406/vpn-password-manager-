@@ -2075,14 +2075,21 @@ fn write_settings_item(
 ) -> Result<(), String> {
     let now = chrono_now();
     let g = state.inner.lock().unwrap();
-    let created_at = g
+    let existing = g
         .vault
         .get(settings_item_id())
         .ok()
         .flatten()
-        .and_then(|env| g.session.open(&env).ok())
-        .map(|i| i.created_at)
-        .unwrap_or(now);
+        .and_then(|env| g.session.open(&env).ok());
+    let created_at = existing.as_ref().map(|i| i.created_at).unwrap_or(now);
+    // Monotonic timestamp. The settings item is reconciled whole-item last-writer-wins by
+    // `updated_at` (see `LocalVault::merge`): the copy with the newer timestamp replaces the
+    // other outright — it does NOT merge the fields inside. So if this fresh write doesn't
+    // out-timestamp the copy already on the server / the phone, the merge silently rejects it
+    // and the token we're trying to share never lands. That's one way a Hetzner token can sit
+    // "Connected" on the desktop yet never reach the phone. Never let the timestamp regress.
+    let prev_updated = existing.as_ref().map(|i| i.updated_at).unwrap_or(0);
+    let updated_at = now.max(prev_updated + 1);
     let item = Item {
         id: settings_item_id(),
         item_type: sentinel_core::vault::model::ItemType::Note,
@@ -2103,7 +2110,7 @@ fn write_settings_item(
         identity: None,
         passkey: None,
         created_at,
-        updated_at: now,
+        updated_at,
         password_changed_at: None,
     };
     let env = g.session.seal(&item).map_err(estr)?;
@@ -2188,6 +2195,95 @@ pub async fn settings_sync_status(
         google: set(SET_GCLIENT),
         hetzner: set(SET_HETZNER),
         netdata: set(SET_NETDATA),
+    })
+}
+
+/// The result of an explicit "Re-share to all devices" — unlike the silent auto-push, this
+/// SURFACES whether the settings actually reached the server, so a signed-out session or an
+/// unreachable server stops being invisible (the old `settingsSyncWrite` swallowed the error and
+/// still claimed success, which is how a shared Hetzner token could look sent yet never arrive).
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReshareOut {
+    /// True only when the settings item actually landed on the sync server this call.
+    pushed: bool,
+    /// A human message when it did NOT push (signed out, server unreachable, conflict).
+    error: Option<String>,
+    /// What the shared item now carries (booleans only, never a secret).
+    status: SettingsSyncStatus,
+}
+
+/// Force the shared settings item to include everything this device has (fresh, monotonic
+/// timestamp) and push it — reporting the real outcome. Backs the visible "Push to all my
+/// devices" button so the user can see it worked instead of trusting a silent best-effort.
+#[tauri::command]
+pub async fn settings_reshare(
+    state: State<'_, AppState>,
+    app: AppHandle,
+) -> Result<ReshareOut, String> {
+    // 1) Rewrite the item from this device's settings (union of applied + local) with a fresh,
+    //    always-winning timestamp so the merge on the other devices can't reject it.
+    let locals = local_settings(&state);
+    let has_any = !locals.iter().all(|(_, v)| v.is_empty());
+    write_settings_item(&state, locals)?;
+
+    // 2) Pull → merge → push, and keep the real error this time.
+    let mut pushed = false;
+    let mut error: Option<String> = None;
+    if session_vault_key(&state).is_err() || api_for(&state).is_err() {
+        error = Some(
+            "This computer isn't signed in to your sync server yet — sign in under Account & \
+             Sync, then re-share."
+                .into(),
+        );
+    } else {
+        match sync_once(&state, &app).await {
+            Ok(_) => pushed = true,
+            Err(e) => {
+                error = Some(format!(
+                    "Couldn't reach your sync server, so your other devices won't get these yet: {e}"
+                ))
+            }
+        }
+    }
+
+    // 3) Report exactly what the shared item now carries.
+    let (present, updated_at, linode, google, hetzner, netdata) = {
+        let g = state.inner.lock().unwrap();
+        match g.vault.get(settings_item_id()) {
+            Ok(Some(env)) => match g.session.open(&env) {
+                Ok(item) => {
+                    let set = |name: &str| {
+                        item.custom_fields
+                            .iter()
+                            .any(|f| f.name == name && !f.value.trim().is_empty())
+                    };
+                    (
+                        true,
+                        item.updated_at,
+                        set(SET_LINODE),
+                        set(SET_GCLIENT),
+                        set(SET_HETZNER),
+                        set(SET_NETDATA),
+                    )
+                }
+                Err(_) => (has_any, 0, false, false, false, false),
+            },
+            _ => (has_any, 0, false, false, false, false),
+        }
+    };
+
+    Ok(ReshareOut {
+        pushed,
+        error,
+        status: SettingsSyncStatus {
+            present,
+            updated_at,
+            linode,
+            google,
+            hetzner,
+            netdata,
+        },
     })
 }
 
