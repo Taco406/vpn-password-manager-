@@ -8,6 +8,36 @@ The format follows [Keep a Changelog](https://keepachangelog.com/). Versions are
 [semantic](https://semver.org/). **Add a new `## [x.y.z]` section at the top in the same PR
 that bumps the app version** — that's how "the changelog updates on every merge."
 
+## [0.1.56] — 2026-07-23
+
+### Added
+- **Choose how long a sent file sticks around.** When you send a file to your devices you now pick,
+  right on the Send card, how it’s kept: **for a few days** (with the exact number of days up to
+  you), **until downloaded** (it’s deleted the moment one of your devices grabs it — nothing left
+  behind), or **permanently** (filed on your own server until you delete it). This is the space
+  saver you asked for: keep only what you want to keep, and let the rest clean itself up. The same
+  three choices are on the iPhone and iPad.
+- **Every transfer now shows how it’s being kept.** Each row in Incoming/Sent tells you whether it’s
+  kept, deletes on download, or when it expires — so nothing disappears as a surprise.
+
+### Fixed
+- **Transfers showed the wrong size and no sender.** Sent/received files were displaying “0 B” with
+  a blank sender and time on the computer; they now show the real size, who it’s from, and the age —
+  the same details the phone already showed. (The files themselves always transferred correctly;
+  only these labels were wrong.)
+- **iPhone Servers tab: “Linode: cancelled” and the fleet vanishing after a sync.** The Servers tab
+  re-synced the vault while it was still loading your servers, which cancelled the in-flight request
+  and blanked the list with a scary “cancelled” error. It now lists your servers from the tokens it
+  already has first — so they show immediately and can’t be wiped by a sync — and quietly ignores a
+  cancelled refresh instead of clearing everything. Your Linode was never actually removed; only the
+  on-screen list was clearing.
+
+### Notes
+- Files are still sealed on your device with your vault key before they leave — the server only ever
+  stores ciphertext and a size. “Permanently” kept files count against your account’s transfer
+  storage; if you run out of room, the app tells you to clear some space rather than failing
+  quietly. Nothing about the encryption changed.
+
 ## [0.1.55] — 2026-07-23
 
 ### Added

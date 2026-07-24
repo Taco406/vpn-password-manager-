@@ -14,6 +14,7 @@ import {
   syncStatus,
   TRANSFER_MAX_BYTES,
   type TransferItem,
+  type TransferRetention,
   type SyncDevice,
 } from "../bridge";
 import { Card, SectionTitle, Badge } from "../components/ui";
@@ -65,9 +66,30 @@ function expiresIn(unix: number): string {
   if (!unix) return "";
   const secs = unix - Math.floor(Date.now() / 1000);
   if (secs <= 0) return "expired";
+  const days = Math.floor(secs / 86400);
+  if (days >= 1) return `expires in ${days}d`;
   const hrs = Math.floor(secs / 3600);
   if (hrs >= 1) return `expires in ${hrs}h`;
   return `expires in ${Math.max(1, Math.floor(secs / 60))} min`;
+}
+
+/** How the file is kept on the relay after sending. Maps to a {@link TransferRetention}. */
+type RetentionMode = "days" | "onDownload" | "permanent";
+
+function retentionOf(mode: RetentionMode, ttlDays: number): TransferRetention {
+  if (mode === "permanent") return { permanent: true };
+  if (mode === "onDownload") return { deleteOnDownload: true };
+  return { ttlDays };
+}
+
+/** One-line human summary of the chosen retention, for the Send card. */
+function retentionBlurb(mode: RetentionMode, ttlDays: number): string {
+  if (mode === "permanent")
+    return "Kept on your server until you delete it — counts against your storage quota.";
+  if (mode === "onDownload")
+    return "Deleted the moment one of your devices downloads it.";
+  const d = Math.max(1, ttlDays);
+  return `Deleted automatically after ${d} day${d === 1 ? "" : "s"}, downloaded or not.`;
 }
 
 export function Transfers() {
@@ -75,6 +97,8 @@ export function Transfers() {
   const [items, setItems] = useState<TransferItem[]>([]);
   const [devices, setDevices] = useState<SyncDevice[]>([]);
   const [recipient, setRecipient] = useState<string>(""); // "" = all my devices
+  const [retMode, setRetMode] = useState<RetentionMode>("days");
+  const [ttlDays, setTtlDays] = useState(1);
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState("");
   const [loaded, setLoaded] = useState(false);
@@ -120,7 +144,7 @@ export function Transfers() {
     setMsg(`Encrypting and sending "${file.name}"…`);
     try {
       const b64 = await fileToBase64(file);
-      const r = await transferSend(recipient || null, file.name, b64);
+      const r = await transferSend(recipient || null, file.name, b64, retentionOf(retMode, ttlDays));
       setMsg(
         `Sent "${r.filename}" (${fmtBytes(r.blobBytes)} encrypted) to ${
           recipient ? nameOf(recipient) : "all your devices"
@@ -181,7 +205,7 @@ export function Transfers() {
         </div>
         <p className="mb-3 text-xs text-[var(--text-secondary)]">
           The file is encrypted on this device with your vault key before it leaves. The server
-          stores only ciphertext and deletes it after 24 hours. Up to 25 MB per file.
+          stores only ciphertext and a size. Up to 25 MB per file.
         </p>
         <div className="flex flex-wrap items-center gap-2">
           <label className="text-xs text-[var(--text-muted)]">
@@ -202,6 +226,33 @@ export function Transfers() {
                 ))}
             </select>
           </label>
+          <label className="text-xs text-[var(--text-muted)]">
+            Keep{" "}
+            <select
+              value={retMode}
+              onChange={(e) => setRetMode(e.target.value as RetentionMode)}
+              disabled={busy || !signedIn}
+              className="rounded-[8px] border border-[var(--border-strong)] bg-[var(--bg-inset)] px-2 py-1.5 text-xs text-[var(--text-primary)] disabled:opacity-50"
+            >
+              <option value="days">for a few days</option>
+              <option value="onDownload">until downloaded</option>
+              <option value="permanent">permanently</option>
+            </select>
+          </label>
+          {retMode === "days" && (
+            <label className="flex items-center gap-1 text-xs text-[var(--text-muted)]">
+              <input
+                type="number"
+                min={1}
+                max={365}
+                value={ttlDays}
+                onChange={(e) => setTtlDays(Math.max(1, Math.min(365, Number(e.target.value) || 1)))}
+                disabled={busy || !signedIn}
+                className="w-16 rounded-[8px] border border-[var(--border-strong)] bg-[var(--bg-inset)] px-2 py-1.5 text-xs text-[var(--text-primary)] disabled:opacity-50"
+              />
+              day{ttlDays === 1 ? "" : "s"}
+            </label>
+          )}
           <input
             ref={fileRef}
             type="file"
@@ -213,6 +264,7 @@ export function Transfers() {
             className="text-xs text-[var(--text-secondary)] file:mr-3 file:rounded-[8px] file:border-0 file:bg-[var(--accent)]/15 file:px-3 file:py-1.5 file:text-[var(--accent)] hover:file:bg-[var(--accent)]/25"
           />
         </div>
+        <p className="mt-2 text-[11px] text-[var(--text-muted)]">{retentionBlurb(retMode, ttlDays)}</p>
         {msg && <p className="mt-3 text-xs text-[var(--text-muted)]">{msg}</p>}
       </Card>
 
@@ -302,10 +354,16 @@ function Row({
         <div className="truncate text-xs text-[var(--text-primary)]">
           {title} · <span className="mono">{fmtBytes(it.sizeBytes)}</span>
         </div>
-        <div className="mt-0.5 flex items-center gap-2 text-[10px] text-[var(--text-muted)]">
+        <div className="mt-0.5 flex flex-wrap items-center gap-2 text-[10px] text-[var(--text-muted)]">
           <span>{timeAgo(it.createdAt)}</span>
           {it.state === "delivered" && <Badge tone="ok">delivered</Badge>}
-          {it.state === "pending" && <span>· {expiresIn(it.expiresAt)}</span>}
+          {it.permanent ? (
+            <Badge tone="accent">kept</Badge>
+          ) : it.deleteOnDownload ? (
+            <span>· deletes on download</span>
+          ) : (
+            it.state === "pending" && <span>· {expiresIn(it.expiresAt)}</span>
+          )}
           {expired && <Badge tone="warn">expired</Badge>}
         </div>
       </div>

@@ -403,6 +403,8 @@ actor ApiClient {
     // MARK: - File transfer ("send to my devices") — opaque SFIL ciphertext only
 
     /// One transfer row as the server lists it (the filename stays sealed inside the blob).
+    /// `deleteOnDownload`/`permanent` are optional so an older server (before the retention
+    /// migration) that omits them still decodes — nil is treated as false in the UI.
     struct TransferRow: Decodable, Identifiable {
         let id: String
         let senderDeviceId: String
@@ -411,6 +413,8 @@ actor ApiClient {
         let state: String
         let createdAt: Int64
         let expiresAt: Int64
+        let deleteOnDownload: Bool?
+        let permanent: Bool?
         let outgoing: Bool
         enum CodingKeys: String, CodingKey {
             case id
@@ -420,8 +424,19 @@ actor ApiClient {
             case state
             case createdAt = "created_at"
             case expiresAt = "expires_at"
+            case deleteOnDownload = "delete_on_download"
+            case permanent
             case outgoing
         }
+    }
+
+    /// Per-transfer retention chosen by the sender: delete the moment a device downloads it, keep it
+    /// permanently (no auto-expiry), or expire after `ttlDays` days. Maps to the server's fields.
+    struct Retention {
+        var deleteOnDownload = false
+        var permanent = false
+        var ttlDays: Int?  // nil = server default (1 day) when not permanent
+        static let `default` = Retention()
     }
 
     /// Transfers this phone can see: incoming (addressed to it or "all my devices") + its outgoing.
@@ -431,15 +446,21 @@ actor ApiClient {
         return (try? decoder.decode(L.self, from: data))?.transfers ?? []
     }
 
-    /// Upload an opaque SFIL blob for one device (or all this account's devices when nil).
-    func createTransfer(recipientDeviceId: String?, sizeBytes: Int, ciphertext: Data) async throws
-        -> String
-    {
+    /// Upload an opaque SFIL blob for one device (or all this account's devices when nil), with the
+    /// chosen retention. The retention fields are additive — an older server ignores them and keeps
+    /// the original 24h TTL.
+    func createTransfer(
+        recipientDeviceId: String?, sizeBytes: Int, ciphertext: Data,
+        retention: Retention = .default
+    ) async throws -> String {
         var body: [String: Any] = [
             "size_bytes": sizeBytes,
             "ciphertext_b64": ciphertext.base64EncodedString(),
+            "delete_on_download": retention.deleteOnDownload,
+            "permanent": retention.permanent,
         ]
         body["recipient_device_id"] = recipientDeviceId ?? NSNull()
+        if let ttl = retention.ttlDays { body["ttl_days"] = ttl }
         let data = try await authedJSON("POST", "/v1/transfers", jsonBody: body)
         guard let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let id = obj["id"] as? String

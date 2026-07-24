@@ -27,7 +27,9 @@ final class TransfersModel: ObservableObject {
         }
     }
 
-    func send(fileURL: URL, recipientDeviceId: String?, vaultKey: Data) async {
+    func send(
+        fileURL: URL, recipientDeviceId: String?, retention: ApiClient.Retention, vaultKey: Data
+    ) async {
         busy = true
         status = "Encrypting and sending…"
         defer { busy = false }
@@ -46,7 +48,8 @@ final class TransfersModel: ObservableObject {
                 status = "That file is too large to send once encrypted."; return
             }
             _ = try await ApiClient.shared.createTransfer(
-                recipientDeviceId: recipientDeviceId, sizeBytes: bytes.count, ciphertext: blob)
+                recipientDeviceId: recipientDeviceId, sizeBytes: bytes.count, ciphertext: blob,
+                retention: retention)
             status = "Sent \"\(name)\"."
             await refresh()
         } catch {
@@ -95,11 +98,45 @@ final class TransfersModel: ObservableObject {
     }
 }
 
+/// How a sent file is kept on the relay. Maps to `ApiClient.Retention`.
+private enum RetentionMode: String, CaseIterable, Identifiable {
+    case days, onDownload, permanent
+    var id: String { rawValue }
+    var label: String {
+        switch self {
+        case .days: return "For a few days"
+        case .onDownload: return "Until downloaded"
+        case .permanent: return "Permanently"
+        }
+    }
+}
+
 struct TransfersView: View {
     @ObservedObject var vault: VaultStore
     @StateObject private var model = TransfersModel()
     @State private var picking = false
     @State private var recipient: String? // nil = all my devices
+    @State private var retMode: RetentionMode = .days
+    @State private var ttlDays = 1
+
+    private var retention: ApiClient.Retention {
+        switch retMode {
+        case .permanent: return ApiClient.Retention(permanent: true)
+        case .onDownload: return ApiClient.Retention(deleteOnDownload: true)
+        case .days: return ApiClient.Retention(ttlDays: ttlDays)
+        }
+    }
+
+    private var retentionBlurb: String {
+        switch retMode {
+        case .permanent:
+            return "Kept on your server until you delete it — counts against your storage quota."
+        case .onDownload:
+            return "Deleted the moment one of your devices downloads it."
+        case .days:
+            return "Deleted automatically after \(ttlDays) day\(ttlDays == 1 ? "" : "s"), downloaded or not."
+        }
+    }
 
     var body: some View {
         NavigationStack {
@@ -122,7 +159,11 @@ struct TransfersView: View {
             .refreshable { await model.refresh() }
             .fileImporter(isPresented: $picking, allowedContentTypes: [.data, .item]) { result in
                 guard case .success(let url) = result, let key = vault.currentVaultKey else { return }
-                Task { await model.send(fileURL: url, recipientDeviceId: recipient, vaultKey: key) }
+                let ret = retention
+                Task {
+                    await model.send(
+                        fileURL: url, recipientDeviceId: recipient, retention: ret, vaultKey: key)
+                }
             }
             .sheet(item: Binding(get: { model.shareURL.map { ShareItem(url: $0) } },
                                  set: { model.shareURL = $0?.url })) { item in
@@ -144,6 +185,16 @@ struct TransfersView: View {
                     }
                 }
                 .pickerStyle(.menu)
+                Picker("Keep", selection: $retMode) {
+                    ForEach(RetentionMode.allCases) { m in Text(m.label).tag(m) }
+                }
+                .pickerStyle(.menu)
+                if retMode == .days {
+                    Stepper("Delete after \(ttlDays) day\(ttlDays == 1 ? "" : "s")",
+                            value: $ttlDays, in: 1...365)
+                        .font(.subheadline)
+                }
+                Text(retentionBlurb).font(.caption2).foregroundColor(.secondary)
                 Button {
                     picking = true
                 } label: {
@@ -211,7 +262,7 @@ private struct TransferRowView: View {
         HStack {
             VStack(alignment: .leading, spacing: 2) {
                 Text("\(title) · \(fmtBytes(row.sizeBytes))").font(.subheadline)
-                Text(row.state).font(.caption2).foregroundColor(.secondary)
+                Text(caption).font(.caption2).foregroundColor(.secondary)
             }
             Spacer()
             if let onPrimary, let primaryLabel, row.state != "expired" {
@@ -222,6 +273,32 @@ private struct TransferRowView: View {
             }.disabled(busy)
         }
         .padding(.vertical, 4)
+    }
+
+    /// State + retention, e.g. "delivered", "pending · kept", "pending · deletes on download",
+    /// or "pending · expires in 3d".
+    private var caption: String {
+        if row.state == "expired" { return "expired" }
+        var parts = [row.state]
+        if row.permanent == true {
+            parts.append("kept")
+        } else if row.deleteOnDownload == true {
+            parts.append("deletes on download")
+        } else if row.state == "pending", let exp = expiresIn(row.expiresAt) {
+            parts.append(exp)
+        }
+        return parts.joined(separator: " · ")
+    }
+
+    private func expiresIn(_ unix: Int64) -> String? {
+        guard unix > 0 else { return nil }
+        let secs = unix - Int64(Date().timeIntervalSince1970)
+        if secs <= 0 { return "expired" }
+        let days = secs / 86400
+        if days >= 1 { return "expires in \(days)d" }
+        let hrs = secs / 3600
+        if hrs >= 1 { return "expires in \(hrs)h" }
+        return "expires in \(max(1, secs / 60)) min"
     }
 
     private func fmtBytes(_ n: Int64) -> String {

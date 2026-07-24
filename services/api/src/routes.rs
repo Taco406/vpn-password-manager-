@@ -1264,6 +1264,15 @@ struct TransferCreateReq {
     /// Plaintext size for the inbox display (the ciphertext length already approximates it).
     size_bytes: i64,
     ciphertext_b64: String,
+    /// Retention (all optional/defaulted so an older client keeps the original 24h-TTL behaviour):
+    /// delete the moment a device downloads it.
+    #[serde(default)]
+    delete_on_download: bool,
+    /// Keep forever (no auto-expiry); bounded only by the account storage quota.
+    #[serde(default)]
+    permanent: bool,
+    /// Days until auto-expiry when not permanent (clamped 1..=365; null = 1 day, the old default).
+    ttl_days: Option<i64>,
 }
 
 async fn transfer_create(
@@ -1317,21 +1326,34 @@ async fn transfer_create(
             "storage quota exceeded — delete old transfers".into(),
         ));
     }
+    // Expiry: permanent ⇒ ~100 years out (and flagged, so the lazy-expiry sweep skips it); else
+    // the caller's TTL in days (clamped), defaulting to the original 1 day.
+    let days: f64 = if req.permanent {
+        36500.0
+    } else {
+        req.ttl_days.unwrap_or(1).clamp(1, 365) as f64
+    };
     let id: Uuid = sqlx::query_scalar(
-        "INSERT INTO file_transfers (account_id, sender_device_id, recipient_device_id, size_bytes, ciphertext)
-         VALUES ($1, $2, $3, $4, $5) RETURNING id",
+        "INSERT INTO file_transfers
+           (account_id, sender_device_id, recipient_device_id, size_bytes, ciphertext,
+            expires_at, delete_on_download, permanent)
+         VALUES ($1, $2, $3, $4, $5, now() + ($6 * interval '1 day'), $7, $8) RETURNING id",
     )
     .bind(a.account)
     .bind(a.device)
     .bind(req.recipient_device_id)
     .bind(req.size_bytes)
     .bind(&ct)
+    .bind(days)
+    .bind(req.delete_on_download)
+    .bind(req.permanent)
     .fetch_one(&st.pool)
     .await?;
     Ok(Json(json!({ "id": id })))
 }
 
-/// A transfer row as read for the list: id, sender, recipient, size, state, created, expires.
+/// A transfer row as read for the list: id, sender, recipient, size, state, created, expires,
+/// delete_on_download, permanent.
 type TransferRow = (
     Uuid,
     Uuid,
@@ -1340,19 +1362,22 @@ type TransferRow = (
     String,
     time::OffsetDateTime,
     time::OffsetDateTime,
+    bool,
+    bool,
 );
 
 async fn transfer_list(State(st): State<AppState>, a: Auth) -> ApiResult<Json<serde_json::Value>> {
-    // Lazy TTL: expire this account's overdue transfers before listing.
+    // Lazy TTL: expire this account's overdue transfers before listing — but never a permanent one.
     sqlx::query(
         "UPDATE file_transfers SET state = 'expired'
-         WHERE account_id = $1 AND state <> 'expired' AND expires_at < now()",
+         WHERE account_id = $1 AND state <> 'expired' AND NOT permanent AND expires_at < now()",
     )
     .bind(a.account)
     .execute(&st.pool)
     .await?;
     let rows: Vec<TransferRow> = sqlx::query_as(
-        "SELECT id, sender_device_id, recipient_device_id, size_bytes, state, created_at, expires_at
+        "SELECT id, sender_device_id, recipient_device_id, size_bytes, state, created_at, expires_at,
+                delete_on_download, permanent
          FROM file_transfers
          WHERE account_id = $1 AND state <> 'expired'
            AND (sender_device_id = $2 OR recipient_device_id IS NULL OR recipient_device_id = $2)
@@ -1364,24 +1389,37 @@ async fn transfer_list(State(st): State<AppState>, a: Auth) -> ApiResult<Json<se
     .await?;
     let transfers: Vec<_> = rows
         .into_iter()
-        .map(|(id, sender, recipient, size, state, created, expires)| {
-            json!({
-                "id": id,
-                "sender_device_id": sender,
-                "recipient_device_id": recipient,
-                "size_bytes": size,
-                "state": state,
-                "created_at": created.unix_timestamp(),
-                "expires_at": expires.unix_timestamp(),
-                "outgoing": sender == a.device,
-            })
-        })
+        .map(
+            |(id, sender, recipient, size, state, created, expires, del_on_dl, permanent)| {
+                json!({
+                    "id": id,
+                    "sender_device_id": sender,
+                    "recipient_device_id": recipient,
+                    "size_bytes": size,
+                    "state": state,
+                    "created_at": created.unix_timestamp(),
+                    "expires_at": expires.unix_timestamp(),
+                    "delete_on_download": del_on_dl,
+                    "permanent": permanent,
+                    "outgoing": sender == a.device,
+                })
+            },
+        )
         .collect();
     Ok(Json(json!({ "transfers": transfers })))
 }
 
-/// A transfer row as read for download: sender, recipient, size, ciphertext, expires.
-type TransferBlobRow = (Uuid, Option<Uuid>, i64, Vec<u8>, time::OffsetDateTime);
+/// A transfer row as read for download: sender, recipient, size, ciphertext, expires,
+/// delete_on_download, permanent.
+type TransferBlobRow = (
+    Uuid,
+    Option<Uuid>,
+    i64,
+    Vec<u8>,
+    time::OffsetDateTime,
+    bool,
+    bool,
+);
 
 async fn transfer_download(
     State(st): State<AppState>,
@@ -1389,15 +1427,17 @@ async fn transfer_download(
     Path(id): Path<Uuid>,
 ) -> ApiResult<Json<serde_json::Value>> {
     let row: Option<TransferBlobRow> = sqlx::query_as(
-        "SELECT sender_device_id, recipient_device_id, size_bytes, ciphertext, expires_at
+        "SELECT sender_device_id, recipient_device_id, size_bytes, ciphertext, expires_at,
+                delete_on_download, permanent
          FROM file_transfers WHERE id = $1 AND account_id = $2 AND state <> 'expired'",
     )
     .bind(id)
     .bind(a.account)
     .fetch_optional(&st.pool)
     .await?;
-    let (sender, recipient, size, ct, expires) = row.ok_or(ApiError::NotFound)?;
-    if expires < time::OffsetDateTime::now_utc() {
+    let (sender, recipient, size, ct, expires, delete_on_download, permanent) =
+        row.ok_or(ApiError::NotFound)?;
+    if !permanent && expires < time::OffsetDateTime::now_utc() {
         sqlx::query("UPDATE file_transfers SET state = 'expired' WHERE id = $1")
             .bind(id)
             .execute(&st.pool)
@@ -1409,15 +1449,23 @@ async fn transfer_download(
     if !allowed {
         return Err(ApiError::Forbidden);
     }
-    // A download by a non-sender marks it delivered (informational; the blob stays until TTL or an
-    // explicit delete, so the user's other devices can grab it too).
+    // A recipient download either consumes the transfer (delete-on-download) or marks it delivered
+    // (the blob then stays until TTL / an explicit delete, so the user's other devices can grab it
+    // too). The sender fetching their own transfer never consumes or re-states it.
     if sender != a.device {
-        sqlx::query(
-            "UPDATE file_transfers SET state = 'delivered' WHERE id = $1 AND state = 'pending'",
-        )
-        .bind(id)
-        .execute(&st.pool)
-        .await?;
+        if delete_on_download {
+            sqlx::query("DELETE FROM file_transfers WHERE id = $1")
+                .bind(id)
+                .execute(&st.pool)
+                .await?;
+        } else {
+            sqlx::query(
+                "UPDATE file_transfers SET state = 'delivered' WHERE id = $1 AND state = 'pending'",
+            )
+            .bind(id)
+            .execute(&st.pool)
+            .await?;
+        }
     }
     Ok(Json(json!({
         "sender_device_id": sender,

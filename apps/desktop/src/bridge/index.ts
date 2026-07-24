@@ -1113,21 +1113,35 @@ export interface TransferItem {
   state: string; // pending | delivered | expired
   createdAt: number;
   expiresAt: number;
+  /** Deleted the moment a device downloads it. */
+  deleteOnDownload: boolean;
+  /** Kept forever (no auto-expiry) — the "filed" option. */
+  permanent: boolean;
   /** This device is the sender (vs. an incoming transfer). */
   outgoing: boolean;
+}
+
+/** How long a sent file lives on the relay. `permanent` files it forever; otherwise it expires
+ * after `ttlDays` days (or is deleted the moment a device downloads it). */
+export interface TransferRetention {
+  deleteOnDownload?: boolean;
+  permanent?: boolean;
+  ttlDays?: number | null;
 }
 
 /** ~25 MiB blob ceiling on the server; used to gate the picker before we bother sealing. */
 export const TRANSFER_MAX_BYTES = 25 * 1024 * 1024;
 
-/** Seal a picked file and upload it for one device (or all my devices when recipient is null). */
+/** Seal a picked file and upload it for one device (or all my devices when recipient is null),
+ * with the chosen retention. */
 export async function transferSend(
   recipientDeviceId: string | null,
   filename: string,
   dataB64: string,
+  retention?: TransferRetention,
 ): Promise<{ id: string; filename: string; blobBytes: number }> {
   if (!inTauri()) throw new Error("File transfer is only available in the desktop app.");
-  return inv("transfer_send", { recipientDeviceId, filename, dataB64 });
+  return inv("transfer_send", { recipientDeviceId, filename, dataB64, retention: retention ?? null });
 }
 
 /** The transfers this device can see (incoming + its own outgoing), newest first. */

@@ -12,20 +12,41 @@ final class ServersModel: ObservableObject {
 
     func refresh(tokens: ProviderTokens) async {
         loading = true
-        error = nil
         var all: [MonitoredServer] = []
         var errs: [String] = []
         if !tokens.linode.isEmpty {
             do { all += try await LinodeClient.listServers(token: tokens.linode) }
-            catch { errs.append("Linode: \(error.localizedDescription)") }
+            catch {
+                // A cancelled request means a newer refresh (or the view going away) superseded this
+                // one — never a real failure. Bail WITHOUT blanking the list or surfacing an error,
+                // so a sync mid-load can't wipe the fleet and show "Linode: cancelled".
+                if Self.isCancellation(error) { loading = false; return }
+                errs.append("Linode: \(Self.describe(error))")
+            }
         }
         if !tokens.hetzner.isEmpty {
             do { all += try await HetznerClient.listServers(token: tokens.hetzner) }
-            catch { errs.append("Hetzner: \(error.localizedDescription)") }
+            catch {
+                if Self.isCancellation(error) { loading = false; return }
+                errs.append("Hetzner: \(Self.describe(error))")
+            }
         }
         servers = all.sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
         error = errs.isEmpty ? nil : errs.joined(separator: " · ")
         loading = false
+    }
+
+    /// A cancelled URLSession request (or a cancelled Task) — transient, not a provider failure.
+    private static func isCancellation(_ error: Error) -> Bool {
+        if error is CancellationError { return true }
+        if let u = error as? URLError, u.code == .cancelled { return true }
+        return false
+    }
+
+    /// A human message: LocalizedError (our `MonitoringError`) gives the friendly text; otherwise
+    /// fall back to the NSError description.
+    private static func describe(_ error: Error) -> String {
+        (error as? LocalizedError)?.errorDescription ?? (error as NSError).localizedDescription
     }
 
     func netdataCfg(for server: MonitoredServer, tokens: ProviderTokens) -> NetdataEndpointCfg? {
@@ -82,9 +103,12 @@ struct ServersView: View {
         }
     }
 
-    /// Pull the vault first so a token the desktop just shared (e.g. a back-filled Hetzner token)
-    /// shows up here without visiting the Vault tab, then list the servers.
+    /// List from the tokens we already have FIRST — the unlock already pulled them, so the fleet
+    /// shows immediately and a cancelled sync can't blank it. Then pull best-effort (in case the
+    /// desktop just shared a new token, e.g. a back-filled Hetzner token) and re-list. The re-list
+    /// is cancellation-safe, so if this tab goes away mid-sync the already-shown fleet stays put.
     private func reload() async {
+        await model.refresh(tokens: vault.providerTokens)
         try? await vault.pull()
         await model.refresh(tokens: vault.providerTokens)
     }
