@@ -25,6 +25,12 @@ that bumps the app version** — that's how "the changelog updates on every merg
   a blank sender and time on the computer; they now show the real size, who it’s from, and the age —
   the same details the phone already showed. (The files themselves always transferred correctly;
   only these labels were wrong.)
+- **iPhone Servers tab: “Linode: cancelled” and the fleet vanishing after a sync.** The Servers tab
+  re-synced the vault while it was still loading your servers, which cancelled the in-flight request
+  and blanked the list with a scary “cancelled” error. It now lists your servers from the tokens it
+  already has first — so they show immediately and can’t be wiped by a sync — and quietly ignores a
+  cancelled refresh instead of clearing everything. Your Linode was never actually removed; only the
+  on-screen list was clearing.
 
 ### Notes
 - Files are still sealed on your device with your vault key before they leave — the server only ever
