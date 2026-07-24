@@ -12,7 +12,9 @@ pub mod webauthn;
 
 pub use document::{decode_sync_blob, encode_sync_blob, VaultDocument};
 pub use envelope::{open_item, seal_item, ItemEnvelope};
-pub use fileblob::{open_file, seal_file, FileMeta};
+pub use fileblob::{
+    open_file, pack_bundle, seal_file, unpack_bundle, BundleEntry, FileMeta, BUNDLE_MIME,
+};
 pub use model::{
     Card, CustomField, Identity, Item, ItemId, ItemType, Login, Passkey, UrlMatch, UrlMode,
 };
