@@ -25,7 +25,9 @@ use sentinel_core::keyring::password::PasswordWrapper;
 use sentinel_core::keyring::recovery::RecoveryWrapper;
 use sentinel_core::keyring::{KeyWrapper, VaultKey, WrappedBlob, WrapperType};
 use sentinel_core::recovery_kit::{self, pdf::render_kit_pdf, RecoveryKey};
-use sentinel_core::vault::fileblob::{open_file, seal_file, FileMeta};
+use sentinel_core::vault::fileblob::{
+    open_file, pack_bundle, seal_file, unpack_bundle, BundleEntry, FileMeta, BUNDLE_MIME,
+};
 use sentinel_core::vault::model::Item;
 use sentinel_core::vault::{decode_sync_blob, encode_sync_blob, VaultSession};
 use serde::{Deserialize, Serialize};
@@ -1149,7 +1151,29 @@ pub struct TransferDownloadOut {
     pub size_bytes: i64,
     pub mime: String,
     /// The decrypted file bytes, base64. The UI saves them via a browser download (no filesystem
-    /// path crosses the bridge, so nothing can be written outside the user's chosen location).
+    /// path crosses the bridge, so nothing can be written outside the user's chosen location). Empty
+    /// string when this is a bundle (the files live in `bundle` instead).
+    pub data_b64: String,
+    /// v0.1.58: when the transfer is a multi-file bundle, its individual files (name + base64). The
+    /// UI saves each one. `None` for an ordinary single-file transfer.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bundle: Option<Vec<BundleFile>>,
+}
+
+/// One file inside a downloaded bundle.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BundleFile {
+    pub name: String,
+    pub size_bytes: i64,
+    pub data_b64: String,
+}
+
+/// One file to include in an outgoing bundle (from the UI's multi-file picker / drag-drop).
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BundleInput {
+    pub name: String,
     pub data_b64: String,
 }
 
@@ -1243,6 +1267,82 @@ pub async fn transfer_send(
     })
 }
 
+/// Sanitise a bundle entry's relative path: keep sub-folders (so a folder's shape survives) but
+/// neutralise absolute paths and `..` traversal, and never yield an empty name.
+fn safe_bundle_name(name: &str) -> String {
+    let parts: Vec<&str> = name
+        .split(['/', '\\'])
+        .filter(|s| !s.is_empty() && *s != "." && *s != "..")
+        .collect();
+    let joined = parts.join("/");
+    if joined.is_empty() {
+        "file".to_string()
+    } else {
+        joined
+    }
+}
+
+/// v0.1.58: seal SEVERAL files (a multi-select or a dragged folder) into ONE bundle transfer — a
+/// NKAR archive sealed as a single SFIL blob (mime = bundle). The recipient unpacks it back into the
+/// individual files. Files are already zstd-compressed by the seal, so bundling — not re-compressing
+/// — is the space win. The bytes ride the bridge as base64, same as `transfer_send`.
+#[tauri::command]
+pub async fn transfer_send_bundle(
+    state: State<'_, AppState>,
+    recipient_device_id: Option<String>,
+    files: Vec<BundleInput>,
+    retention: Option<Retention>,
+) -> Result<TransferSendOut, String> {
+    if files.is_empty() {
+        return Err("no files selected".into());
+    }
+    let vk = session_vault_key(&state)?;
+    let api = api_for(&state)?;
+
+    let mut entries = Vec::with_capacity(files.len());
+    let mut total_plaintext = 0i64;
+    for f in &files {
+        let bytes = STANDARD.decode(f.data_b64.trim()).map_err(estr)?;
+        total_plaintext += bytes.len() as i64;
+        entries.push(BundleEntry {
+            name: safe_bundle_name(&f.name),
+            data: bytes,
+        });
+    }
+    if total_plaintext == 0 {
+        return Err("those files are all empty".into());
+    }
+
+    let count = entries.len();
+    let payload = pack_bundle(&entries);
+    let display_name = format!("{count} files");
+    let meta = FileMeta {
+        filename: format!("{display_name}.nkbundle"),
+        mime: BUNDLE_MIME.to_string(),
+    };
+    let blob = seal_file(&vk, &meta, &payload).map_err(estr)?;
+    if blob.len() > TRANSFER_MAX_BLOB_BYTES {
+        return Err(format!(
+            "those files are too large together ({:.1} MiB sealed; 25 MiB max) — send fewer at once",
+            blob.len() as f64 / (1024.0 * 1024.0)
+        ));
+    }
+    let recipient = recipient_device_id.filter(|s| !s.trim().is_empty());
+    let id = api
+        .create_transfer(
+            recipient,
+            total_plaintext,
+            &blob,
+            &retention.unwrap_or_default(),
+        )
+        .await?;
+    Ok(TransferSendOut {
+        id,
+        filename: display_name,
+        blob_bytes: blob.len() as i64,
+    })
+}
+
 /// The transfers this device can see: everything it sent (outgoing) plus anything addressed to it
 /// or to "all my devices" (incoming). Filenames stay sealed — the row shows only size/state/age.
 #[tauri::command]
@@ -1265,11 +1365,35 @@ pub async fn transfer_download(
     let ct = api.download_transfer(&id).await?;
     let (meta, data) = open_file(&vk, &ct).map_err(estr)?;
 
+    // v0.1.58: a bundle's plaintext is a NKAR archive of several files — unpack it so the UI can
+    // save each one. A single-file transfer (the common case, and everything sent before v0.1.58)
+    // returns its bytes in `data_b64` exactly as before.
+    if meta.mime == BUNDLE_MIME {
+        let entries = unpack_bundle(&data).map_err(estr)?;
+        let files: Vec<BundleFile> = entries
+            .into_iter()
+            .map(|e| BundleFile {
+                name: e.name,
+                size_bytes: e.data.len() as i64,
+                data_b64: STANDARD.encode(&e.data),
+            })
+            .collect();
+        let total: i64 = files.iter().map(|f| f.size_bytes).sum();
+        return Ok(TransferDownloadOut {
+            filename: safe_basename(&meta.filename),
+            size_bytes: total,
+            mime: meta.mime,
+            data_b64: String::new(),
+            bundle: Some(files),
+        });
+    }
+
     Ok(TransferDownloadOut {
         filename: safe_basename(&meta.filename),
         size_bytes: data.len() as i64,
         mime: meta.mime,
         data_b64: STANDARD.encode(&data),
+        bundle: None,
     })
 }
 

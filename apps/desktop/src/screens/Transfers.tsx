@@ -8,6 +8,7 @@ import { Send, Download, Trash2, RefreshCw, Upload, ArrowDownToLine } from "luci
 import {
   transferList,
   transferSend,
+  transferSendBundle,
   transferDownload,
   transferDelete,
   syncDevices,
@@ -33,6 +34,50 @@ function fileToBase64(file: File): Promise<string> {
     r.onerror = () => reject(r.error ?? new Error("could not read file"));
     r.readAsDataURL(file);
   });
+}
+
+/** The bare file-name component of a possibly-nested bundle path (browsers flatten on save anyway). */
+function baseName(p: string): string {
+  return p.split(/[/\\]/).pop() || p;
+}
+
+/** All files from a drop, recursing into any dropped folder (best-effort via webkitGetAsEntry) so a
+ *  whole folder becomes one bundle; falls back to the flat FileList when the entry API is absent. */
+async function filesFromDrop(dt: DataTransfer): Promise<File[]> {
+  type Entry = {
+    isFile: boolean;
+    isDirectory: boolean;
+    name: string;
+    file?: (cb: (f: File) => void, err: (e: unknown) => void) => void;
+    createReader?: () => { readEntries: (cb: (e: Entry[]) => void, err: (e: unknown) => void) => void };
+  };
+  const roots = dt.items
+    ? Array.from(dt.items)
+        .map((it) => (it as unknown as { webkitGetAsEntry?: () => Entry | null }).webkitGetAsEntry?.() ?? null)
+        .filter((e): e is Entry => !!e)
+    : [];
+  if (roots.length === 0) return Array.from(dt.files);
+
+  const out: File[] = [];
+  const walk = async (entry: Entry, prefix: string): Promise<void> => {
+    if (entry.isFile && entry.file) {
+      const f = await new Promise<File>((res, rej) => entry.file!(res, rej));
+      const rel = prefix ? `${prefix}/${f.name}` : f.name;
+      out.push(new File([f], rel, { type: f.type, lastModified: f.lastModified }));
+    } else if (entry.isDirectory && entry.createReader) {
+      const reader = entry.createReader();
+      const readBatch = () =>
+        new Promise<Entry[]>((res, rej) => reader.readEntries(res, rej));
+      const sub = prefix ? `${prefix}/${entry.name}` : entry.name;
+      let batch = await readBatch();
+      while (batch.length > 0) {
+        for (const kid of batch) await walk(kid, sub);
+        batch = await readBatch();
+      }
+    }
+  };
+  for (const r of roots) await walk(r, "");
+  return out;
 }
 
 /** Save decrypted bytes (base64) to disk via a browser download — the OS save dialog picks where. */
@@ -102,6 +147,7 @@ export function Transfers() {
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState("");
   const [loaded, setLoaded] = useState(false);
+  const [dragOver, setDragOver] = useState(false);
   const fileRef = useRef<HTMLInputElement>(null);
 
   const refresh = useCallback(async () => {
@@ -135,21 +181,35 @@ export function Transfers() {
     return d ? d.name + (d.current ? " (this device)" : "") : id.slice(0, 8);
   };
 
-  const onPick = async (file: File) => {
-    if (file.size > TRANSFER_MAX_BYTES) {
-      setMsg(`"${file.name}" is ${fmtBytes(file.size)} — the limit is 25 MB per transfer.`);
+  // Send one file as a normal transfer, or several (a multi-select or a dragged folder) as one
+  // bundle. Files are already compressed by the seal, so bundling is the space win, not re-zipping.
+  const onFiles = async (files: File[]) => {
+    if (files.length === 0) return;
+    const total = files.reduce((s, f) => s + f.size, 0);
+    if (total > TRANSFER_MAX_BYTES) {
+      setMsg(
+        files.length === 1
+          ? `"${files[0].name}" is ${fmtBytes(total)} — the limit is 25 MB per transfer.`
+          : `Those ${files.length} files are ${fmtBytes(total)} together — the limit is 25 MB per transfer. Send fewer at once.`,
+      );
       return;
     }
     setBusy(true);
-    setMsg(`Encrypting and sending "${file.name}"…`);
+    const to = recipient ? nameOf(recipient) : "all your devices";
     try {
-      const b64 = await fileToBase64(file);
-      const r = await transferSend(recipient || null, file.name, b64, retentionOf(retMode, ttlDays));
-      setMsg(
-        `Sent "${r.filename}" (${fmtBytes(r.blobBytes)} encrypted) to ${
-          recipient ? nameOf(recipient) : "all your devices"
-        }.`,
-      );
+      if (files.length === 1) {
+        setMsg(`Encrypting and sending "${files[0].name}"…`);
+        const b64 = await fileToBase64(files[0]);
+        const r = await transferSend(recipient || null, files[0].name, b64, retentionOf(retMode, ttlDays));
+        setMsg(`Sent "${r.filename}" (${fmtBytes(r.blobBytes)} encrypted) to ${to}.`);
+      } else {
+        setMsg(`Encrypting and sending ${files.length} files…`);
+        const payload = await Promise.all(
+          files.map(async (f) => ({ name: f.name, dataB64: await fileToBase64(f) })),
+        );
+        const r = await transferSendBundle(recipient || null, payload, retentionOf(retMode, ttlDays));
+        setMsg(`Sent ${files.length} files (${fmtBytes(r.blobBytes)} encrypted) to ${to}.`);
+      }
       await refresh();
     } catch (e) {
       setMsg(errMsg(e));
@@ -158,13 +218,26 @@ export function Transfers() {
     if (fileRef.current) fileRef.current.value = "";
   };
 
+  const onDrop = async (e: React.DragEvent) => {
+    e.preventDefault();
+    setDragOver(false);
+    if (busy || !signedIn) return;
+    const files = await filesFromDrop(e.dataTransfer);
+    if (files.length) void onFiles(files);
+  };
+
   const download = async (it: TransferItem) => {
     setBusy(true);
     setMsg("Downloading and decrypting…");
     try {
       const f = await transferDownload(it.id);
-      saveBase64(f.filename, f.mime, f.dataB64);
-      setMsg(`Saved "${f.filename}" (${fmtBytes(f.sizeBytes)}). Check your Downloads folder.`);
+      if (f.bundle && f.bundle.length > 0) {
+        for (const bf of f.bundle) saveBase64(baseName(bf.name), "application/octet-stream", bf.dataB64);
+        setMsg(`Saved ${f.bundle.length} files (${fmtBytes(f.sizeBytes)}). Check your Downloads folder.`);
+      } else {
+        saveBase64(f.filename, f.mime, f.dataB64);
+        setMsg(`Saved "${f.filename}" (${fmtBytes(f.sizeBytes)}). Check your Downloads folder.`);
+      }
     } catch (e) {
       setMsg(errMsg(e));
     }
@@ -199,13 +272,22 @@ export function Transfers() {
       )}
 
       {/* Send */}
-      <Card className="mb-4">
+      <Card className={`mb-4 transition-shadow ${dragOver ? "ring-2 ring-[var(--accent)]" : ""}`}>
+       <div
+        onDragOver={(e) => {
+          e.preventDefault();
+          if (!busy && signedIn) setDragOver(true);
+        }}
+        onDragLeave={() => setDragOver(false)}
+        onDrop={(e) => void onDrop(e)}
+       >
         <div className="mb-2 flex items-center gap-2 text-sm font-medium">
-          <Upload size={15} /> Send a file to your devices
+          <Upload size={15} /> Send files to your devices
         </div>
         <p className="mb-3 text-xs text-[var(--text-secondary)]">
-          The file is encrypted on this device with your vault key before it leaves. The server
-          stores only ciphertext and a size. Up to 25 MB per file.
+          Files are encrypted on this device with your vault key before they leave. The server stores
+          only ciphertext and a size. Up to 25 MB per transfer — pick several (or drag a whole folder
+          onto this card) and they go together as one bundle.
         </p>
         <div className="flex flex-wrap items-center gap-2">
           <label className="text-xs text-[var(--text-muted)]">
@@ -256,16 +338,20 @@ export function Transfers() {
           <input
             ref={fileRef}
             type="file"
+            multiple
             disabled={busy || !signedIn}
             onChange={(e) => {
-              const f = e.target.files?.[0];
-              if (f) void onPick(f);
+              const fs = e.target.files ? Array.from(e.target.files) : [];
+              if (fs.length) void onFiles(fs);
             }}
             className="text-xs text-[var(--text-secondary)] file:mr-3 file:rounded-[8px] file:border-0 file:bg-[var(--accent)]/15 file:px-3 file:py-1.5 file:text-[var(--accent)] hover:file:bg-[var(--accent)]/25"
           />
         </div>
-        <p className="mt-2 text-[11px] text-[var(--text-muted)]">{retentionBlurb(retMode, ttlDays)}</p>
+        <p className="mt-2 text-[11px] text-[var(--text-muted)]">
+          {dragOver ? "Drop to send…" : retentionBlurb(retMode, ttlDays)}
+        </p>
         {msg && <p className="mt-3 text-xs text-[var(--text-muted)]">{msg}</p>}
+       </div>
       </Card>
 
       {/* Inbox */}

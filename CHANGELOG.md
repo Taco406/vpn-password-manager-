@@ -8,6 +8,26 @@ The format follows [Keep a Changelog](https://keepachangelog.com/). Versions are
 [semantic](https://semver.org/). **Add a new `## [x.y.z]` section at the top in the same PR
 that bumps the app version** — that's how "the changelog updates on every merge."
 
+## [0.1.58] — 2026-07-24
+
+### Added
+- **Send several files — or a whole folder — as one transfer.** Pick more than one file at once, or
+  just drag the files (or a folder) straight onto the Send card, and they travel together as a
+  single encrypted bundle. On the receiving device you save the whole set in one go. (Your files are
+  already compressed automatically before they're sealed, so this is about sending them *together*,
+  not squeezing them smaller — that was already handled.)
+- **Drag and drop.** Drop files onto the Transfers screen instead of hunting through the file picker.
+  Dropped files are sealed with your vault key on this device first, exactly like the picker — no
+  file leaves your computer unencrypted, and no file path is exposed to the app.
+- **iPhone & iPad open bundles.** A multi-file bundle sent from a computer arrives on the phone and
+  unpacks into its individual files, ready to save to Files/Photos.
+
+### Notes
+- Still zero-knowledge, still 25 MB per transfer: the whole bundle is encrypted on your device
+  before it leaves, and your server only ever stores ciphertext and a size. Nothing about the
+  encryption changed — single files use the exact same format as before, so transfers from older
+  versions keep working.
+
 ## [0.1.57] — 2026-07-24
 
 ### Added

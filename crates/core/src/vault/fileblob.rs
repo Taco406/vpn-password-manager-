@@ -186,7 +186,8 @@ pub fn unpack_bundle(bytes: &[u8]) -> Result<Vec<BundleEntry>> {
         if !fits(pos, nlen) {
             return Err(fmt("truncated (name)"));
         }
-        let name = String::from_utf8(bytes[pos..pos + nlen].to_vec()).map_err(|_| fmt("name not utf-8"))?;
+        let name = String::from_utf8(bytes[pos..pos + nlen].to_vec())
+            .map_err(|_| fmt("name not utf-8"))?;
         pos += nlen;
         if !fits(pos, 8) {
             return Err(fmt("truncated (data length)"));

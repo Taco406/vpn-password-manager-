@@ -159,6 +159,7 @@ fn main() {
             sync::sync_pair_complete,
             sync::sync_forget,
             sync::transfer_send,
+            sync::transfer_send_bundle,
             sync::transfer_list,
             sync::transfer_download,
             sync::transfer_delete,

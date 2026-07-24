@@ -283,6 +283,55 @@ enum VaultCrypto {
         return (meta, fileBytes)
     }
 
+    // MARK: - File bundle (NKAR) — matches crates/core/src/vault/fileblob.rs
+    //   "NKAR" | ver=1 | count(u32 LE) | [ name_len(u32 LE) | name_utf8 | data_len(u64 LE) | data ]*
+    // A container so several files ride one transfer: it's the plaintext of an ordinary SFIL blob
+    // whose FileMeta.mime is `bundleMime`. No crypto here — the SFIL seal provides confidentiality.
+
+    /// Mime marking a sealed file whose bytes are a packed bundle of several files.
+    static let bundleMime = "application/x-northkey-bundle"
+
+    /// One file inside a bundle.
+    struct BundleEntry: Equatable {
+        var name: String
+        var data: Data
+    }
+
+    /// Unpack a NKAR archive into its files, validating every length against the buffer.
+    static func unpackBundle(_ bytes: Data) throws -> [BundleEntry] {
+        let b = [UInt8](bytes)
+        func u32(_ i: Int) -> Int {
+            Int(b[i]) | Int(b[i + 1]) << 8 | Int(b[i + 2]) << 16 | Int(b[i + 3]) << 24
+        }
+        func u64(_ i: Int) -> Int {
+            var v = 0
+            for k in 0..<8 { v |= Int(b[i + k]) << (8 * k) }
+            return v
+        }
+        guard b.count >= 9, Array(b[0..<4]) == Array("NKAR".utf8), b[4] == 1 else {
+            throw VaultCryptoError.badFormat("file bundle")
+        }
+        let count = u32(5)
+        var pos = 9
+        var out: [BundleEntry] = []
+        func fits(_ n: Int) -> Bool { pos >= 0 && n >= 0 && pos + n <= b.count }
+        for _ in 0..<count {
+            guard fits(4) else { throw VaultCryptoError.badFormat("file bundle") }
+            let nlen = u32(pos); pos += 4
+            guard fits(nlen), let name = String(bytes: b[pos..<pos + nlen], encoding: .utf8) else {
+                throw VaultCryptoError.badFormat("file bundle")
+            }
+            pos += nlen
+            guard fits(8) else { throw VaultCryptoError.badFormat("file bundle") }
+            let dlen = u64(pos); pos += 8
+            guard fits(dlen) else { throw VaultCryptoError.badFormat("file bundle") }
+            out.append(BundleEntry(name: name, data: Data(b[pos..<pos + dlen])))
+            pos += dlen
+        }
+        guard pos == b.count else { throw VaultCryptoError.badFormat("file bundle") }
+        return out
+    }
+
     /// Seal a file (name + mime + bytes) into a transfer blob for the user's other devices.
     static func sealFileBlob(vaultKey: Data, meta: FileMeta, bytes: Data) throws -> Data {
         var salt = Data(count: 16)
