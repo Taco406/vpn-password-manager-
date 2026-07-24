@@ -2241,8 +2241,8 @@ pub async fn settings_reshare(
             Ok(_) => pushed = true,
             Err(e) => {
                 error = Some(format!(
-                    "Couldn't reach your sync server, so your other devices won't get these yet: {e}"
-                ))
+                "Couldn't reach your sync server, so your other devices won't get these yet: {e}"
+            ))
             }
         }
     }
