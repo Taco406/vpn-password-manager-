@@ -21,11 +21,14 @@ Three apps, three versions, three delivery paths. Most wasted time on this proje
 mixing them up: a symptom on ONE device gets debugged as if it were everywhere. Before
 diagnosing anything, say which device you mean.
 
-| Device | Delivery path | Version (as of 2026-07-24) | Confirmed by the user |
+| Device | Delivery path | Version (as of 2026-07-25) | Confirmed by the user |
 |---|---|---|---|
-| Windows desktop | NSIS `-setup.exe` (per-user, no admin prompt) | **0.1.58** | Servers screen lists **both** Linode and Hetzner. Settings → Hetzner Cloud = "Connected". |
-| iPhone | TestFlight | **0.1.57** | Servers tab lists **only** the Linode `sentinel-sync` box. (Phone has had Hetzner support since 0.1.53 — so this is a data problem, not a missing feature.) |
+| Windows desktop | NSIS `-setup.exe` (per-user, no admin prompt) | **0.1.58** (0.1.60 released, install unconfirmed) | Servers screen lists **both** Linode and Hetzner. Settings → Hetzner Cloud = "Connected". |
+| iPhone | TestFlight | **0.1.57** on device; **0.1.60 uploaded to TestFlight** (run #20 — first successful upload since 1.58; install unconfirmed) | Servers tab lists **only** the Linode `sentinel-sync` box. Additive-merge sync fix ships in 0.1.61. |
 | Mac | `.dmg` | — | not in active use |
+
+The iOS TestFlight workflow now auto-prunes stale **development** certificates (they, not
+distribution certs, fill Apple's cap) — that's what broke every upload from 1.58 to 1.59.
 
 ### Rules that stop the churn (these are lessons, not suggestions)
 

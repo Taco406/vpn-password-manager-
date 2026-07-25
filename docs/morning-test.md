@@ -1,74 +1,58 @@
-# Test script — the v0.1.54 quality-of-life build
+# Test script — the v0.1.61 monitoring build
 
-This release is about making NorthKey easier to get into: a **Getting started checklist**, clearer
-messages when something goes wrong, a friendlier empty vault, a working monthly report, and the
-iPhone app now runs **full-screen on iPad**.
+This release turns the server dashboard into a full monitoring station: **every Docker
+container on your servers gets its own live row**, a **searchable browser over every metric
+Netdata measures**, **Disks / Network interfaces / Services** shortcuts, and a **Recent
+alerts** feed. It also carries the fix that finally lets the **Hetzner server reach your
+phone**, and phone builds upload to TestFlight again.
 
-Total time: ~15 minutes. Do the steps in order. One terminal command per line — copy one line at a
-time.
+Total time: ~15 minutes. Do the steps in order. One terminal command per line — copy one
+line at a time.
 
-## Phase 1 — Windows (or Mac): the setup checklist
+## Phase 1 — Windows: get on 0.1.61
 
-1. Open NorthKey and accept the update to **v0.1.54** (or Settings → Updates → check).
-2. Look at the left sidebar — there's a new **Get started** item near the top with a small counter
-   (like `1/2`). Click it.
-3. You'll see two sections: **Essentials** (protect your vault, add your first login) and
-   **Power-ups** (sync, add a device, autofill, VPN, servers). Each has a **one-click button** on the
-   right that jumps straight to that setup.
-4. Click **Add a login** on the checklist → save a quick test login → come back to **Get started**.
-   That row should now show a green **done**, and the sidebar counter should tick up.
-5. Once both essentials are done, the **Get started** item disappears from the sidebar on its own.
-   (You can still reach it from the command palette — press **Ctrl-K**, type "getting started".)
+1. Open NorthKey. If it offers **0.1.61**, accept it. If it doesn't, download the
+   `NorthKey_0.1.61_x64-setup.exe` from the newest GitHub release and run it — it installs
+   over the old one, no admin prompt.
+2. Check the version badge in Settings says **0.1.61**.
 
-## Phase 2 — Clearer feedback
+## Phase 2 — Windows: the new monitoring
 
-1. Go to **Vault**. If your vault were empty you'd now see an **“Add your first login”** button in the
-   middle instead of “select an item.”
-2. Go to **VPN**. If WireGuard isn't installed or the app isn't running as administrator, pressing
-   **Connect** now shows a small message explaining why (before, it did nothing). If your VPN is set
-   up, connect as usual — that still works.
-3. Press **Ctrl-K** → type "report" → open **Monthly report**. Use the **‹ ›** arrows to change month,
-   then click **Export PNG** — it should save an image of the report to your Downloads.
+1. Go to **Servers** and open your `serverdedi` (Hetzner) box's dashboard — the one with
+   the tiles and charts.
+2. First check from last night's fix: the **Network (in · out)** and **Disk I/O** charts
+   should be drawing lines now, not stuck on "waiting for data…".
+3. Scroll below the alarms line. You should see **Containers (N)** — one row per Docker
+   container running on that server (your Coolify apps each get a row). Each row shows
+   live CPU% and memory.
+4. Click a container row — it expands into full CPU and Memory charts.
+5. Below that: **Disks**, **Network interfaces**, and **Services** — click one open, pick
+   an item from the list, and a live chart appears.
+6. Below that: **All charts (hundreds)**. Click it open and type `docker` in the search
+   box, then click any result — it renders live. Try `postgres` or an app name too.
+7. If any alarm fired in the last day you'll also see **Recent alerts (N in 24h)** — it
+   lists what fired AND what cleared, with times.
+8. Do the same quick check on the **Linode** server's dashboard — the sync server runs in
+   Docker, so it should show containers too.
 
-## Phase 3 — Mac: same checklist
+## Phase 3 — iPhone: 1.61 from TestFlight
 
-1. Update the Mac app to **v0.1.54** (it's signed, so it opens without the “unidentified developer”
-   warning).
-2. Confirm the **Get started** checklist looks and behaves the same as on Windows.
+1. Open **TestFlight** on the phone. You should see NorthKey **0.1.61** (or at least
+   0.1.60 — both are newer than the 0.1.57 you've been stuck on). Install the newest.
+2. Open NorthKey → **Servers**. THE BIG CHECK: after the sync fix, **both** servers —
+   Linode and Hetzner — should be listed. If Hetzner is still missing: on the computer go
+   to Settings → Hetzner Cloud, press **Save** again, then on the phone pull down to
+   refresh. Tell me either way — this is the fix I most need confirmed.
+3. Tap a server → the dashboard. Scroll down: **Containers** rows with live CPU/memory,
+   tap one to expand its charts.
+4. Below it, tap **All charts** → a searchable list of every metric. Search `docker`,
+   tap one, watch it draw.
 
-## Phase 4 — iPad: the app is now full-screen
+## If something's off
 
-If you use TestFlight, update to the newest build and skip the rebuild. Otherwise rebuild once on the
-Mac (one line at a time):
-
-```bash
-cd ~/vpn-password-manager-
-```
-```bash
-git pull
-```
-```bash
-cd apps/ios-key
-```
-```bash
-xcodegen generate
-```
-```bash
-open NorthKey.xcodeproj
-```
-
-Then in Xcode: press **⌘U** first (the crypto self-tests must pass), then pick an **iPad** simulator
-(or your real iPad) at the top and press **▶**. When it opens:
-
-1. The app fills the whole iPad screen — no more little phone-sized window in the middle.
-2. Rotate the iPad to **landscape**; the app should rotate and stay full-screen.
-3. On the **Vault** tab you should see the list on the left and the selected item's details on the
-   right, side by side (on iPhone it stays a single column that pushes to the detail — unchanged).
-
-## Honest notes
-
-- The checklist reads what's already set up on this device; on a brand-new install everything except
-  “add your first login” will start unchecked, which is expected.
-- The iPad layout is a first pass — the Servers and Transfers tabs center their content so cards
-  don't stretch, and the Vault is a proper split view. If anything looks off in landscape, note it and
-  we'll refine.
+- Phone still shows only Linode after step 3.2 → tell me, and note whether the phone's
+  version says 0.1.61 or something older.
+- A dashboard section is missing on one device but present on the other → tell me which
+  device and which section; that's a data-path issue, not a build issue.
+- TestFlight doesn't show 0.1.60/0.1.61 at all → tell me; that's an upload/processing
+  problem on my side, not something you did.
