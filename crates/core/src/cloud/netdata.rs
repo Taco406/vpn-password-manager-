@@ -80,6 +80,123 @@ impl NetdataEndpoint {
     pub async fn alarms_active(&self) -> Result<Vec<NetdataAlarm>> {
         parse_alarms(&self.get_text("/api/v1/alarms?active").await?)
     }
+
+    /// Every chart the agent exposes (id, title, units, family) — the index that makes the rest
+    /// of Netdata reachable: container (cgroup) charts, per-disk, per-interface, per-service,
+    /// apps.* — instead of only the fixed system.* set the dashboard hardcodes.
+    pub async fn charts(&self) -> Result<Vec<ChartMeta>> {
+        parse_charts(&self.get_text("/api/v1/charts").await?)
+    }
+
+    /// The alarm transition log — what fired and cleared recently, not just what's active now.
+    pub async fn alarms_log(&self) -> Result<Vec<AlarmLogEntry>> {
+        parse_alarms_log(&self.get_text("/api/v1/alarm_log").await?)
+    }
+}
+
+/// One alarm state transition from `/api/v1/alarm_log`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct AlarmLogEntry {
+    /// Unix seconds of the transition.
+    pub when: i64,
+    pub name: String,
+    /// Status after the transition (e.g. WARNING, CRITICAL, CLEAR).
+    pub status: String,
+    /// Status before it (UNINITIALIZED for the first evaluation).
+    pub old_status: String,
+    pub value: String,
+}
+
+/// Parse `/api/v1/alarm_log`: an array of transitions, newest first is NOT guaranteed —
+/// callers get them sorted newest-first here.
+pub fn parse_alarms_log(body: &str) -> Result<Vec<AlarmLogEntry>> {
+    let v: serde_json::Value = serde_json::from_str(body)
+        .map_err(|e| CoreError::Network(format!("Netdata: bad alarm_log response ({e})")))?;
+    let mut out: Vec<AlarmLogEntry> = v
+        .as_array()
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|e| {
+                    let s = |k: &str| {
+                        e.get(k)
+                            .and_then(|x| x.as_str())
+                            .unwrap_or_default()
+                            .to_string()
+                    };
+                    Some(AlarmLogEntry {
+                        when: e.get("when")?.as_i64()?,
+                        name: s("name"),
+                        status: s("status"),
+                        old_status: s("old_status"),
+                        value: s("value_string"),
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    out.sort_by(|a, b| b.when.cmp(&a.when));
+    Ok(out)
+}
+
+/// One chart from `/api/v1/charts` — enough to list, group, and fetch it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ChartMeta {
+    pub id: String,
+    pub title: String,
+    pub units: String,
+    pub family: String,
+}
+
+/// Parse `/api/v1/charts`: `{"charts": {"<id>": {"id","title","units","family",...}, ...}}`.
+pub fn parse_charts(body: &str) -> Result<Vec<ChartMeta>> {
+    let v: serde_json::Value = serde_json::from_str(body)
+        .map_err(|e| CoreError::Network(format!("Netdata: bad charts response ({e})")))?;
+    let mut out = Vec::new();
+    if let Some(map) = v.get("charts").and_then(|c| c.as_object()) {
+        for (id, c) in map {
+            let s = |k: &str| {
+                c.get(k)
+                    .and_then(|x| x.as_str())
+                    .unwrap_or_default()
+                    .to_string()
+            };
+            out.push(ChartMeta {
+                id: c
+                    .get("id")
+                    .and_then(|x| x.as_str())
+                    .unwrap_or(id)
+                    .to_string(),
+                title: s("title"),
+                units: s("units"),
+                family: s("family"),
+            });
+        }
+    }
+    out.sort_by(|a, b| a.id.cmp(&b.id));
+    Ok(out)
+}
+
+/// The Docker/cgroup container names visible in a chart list. Netdata exposes each container's
+/// charts as `cgroup_<name>.cpu` / `.mem` / `.throttle_io` / `.net_eth0`…; the `.cpu` chart is
+/// the reliable one-per-container marker.
+pub fn container_names(charts: &[ChartMeta]) -> Vec<String> {
+    let mut names: Vec<String> = charts
+        .iter()
+        .filter_map(|c| {
+            c.id.strip_prefix("cgroup_")
+                .and_then(|rest| rest.strip_suffix(".cpu"))
+                .map(str::to_string)
+        })
+        .collect();
+    names.sort();
+    names.dedup();
+    names
+}
+
+/// Every dimension of a chart as its own labelled series (absolute values) — the generic
+/// "render anything the agent has" primitive behind the container views and the chart browser.
+pub fn chart_all_series(s: &NetdataSeries) -> NamedSeries {
+    all_dims_abs(s)
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -680,6 +797,56 @@ mod tests {
         assert!((n[0].1[0].value - 100.0).abs() < 1e-9);
         assert_eq!(n[1].0, "tx_bytes");
         assert!((n[1].1[0].value - 50.0).abs() < 1e-9); // abs
+    }
+
+    #[test]
+    fn parses_charts_index_and_finds_containers() {
+        let body = r#"{"charts": {
+            "system.cpu": {"id":"system.cpu","title":"Total CPU","units":"percentage","family":"cpu"},
+            "cgroup_coolify.cpu": {"id":"cgroup_coolify.cpu","title":"CPU","units":"percentage","family":"coolify"},
+            "cgroup_coolify.mem": {"id":"cgroup_coolify.mem","title":"Memory","units":"MiB","family":"coolify"},
+            "cgroup_northkey-db.cpu": {"id":"cgroup_northkey-db.cpu","title":"CPU","units":"percentage","family":"northkey-db"},
+            "disk_space._": {"id":"disk_space._","title":"Disk","units":"GiB","family":"/"}
+        }}"#;
+        let charts = parse_charts(body).unwrap();
+        assert_eq!(charts.len(), 5);
+        assert_eq!(charts[0].id, "cgroup_coolify.cpu"); // sorted by id
+        assert_eq!(charts[0].units, "percentage");
+        let names = container_names(&charts);
+        assert_eq!(
+            names,
+            vec!["coolify".to_string(), "northkey-db".to_string()]
+        );
+    }
+
+    #[test]
+    fn chart_all_series_labels_every_dimension() {
+        let s = NetdataSeries {
+            labels: vec!["time".into(), "user".into(), "system".into()],
+            rows: vec![(1, vec![3.0, -2.0]), (2, vec![4.0, 1.0])],
+        };
+        let lines = chart_all_series(&s);
+        assert_eq!(lines.len(), 2);
+        assert_eq!(lines[0].0, "user");
+        assert_eq!(lines[1].0, "system");
+        assert!((lines[0].1[1].value - 4.0).abs() < 1e-9);
+        assert!((lines[1].1[0].value - 2.0).abs() < 1e-9); // abs
+    }
+
+    #[test]
+    fn parses_alarm_log_sorted_newest_first() {
+        let body = r#"[
+            {"when": 100, "name": "cpu_high", "status": "WARNING", "old_status": "CLEAR", "value_string": "82%"},
+            {"when": 300, "name": "cpu_high", "status": "CLEAR", "old_status": "WARNING", "value_string": "40%"},
+            {"when": 200, "name": "disk_full", "status": "CRITICAL", "old_status": "WARNING", "value_string": "95%"},
+            {"bogus": true}
+        ]"#;
+        let log = parse_alarms_log(body).unwrap();
+        assert_eq!(log.len(), 3); // entry without "when" is skipped
+        assert_eq!(log[0].when, 300);
+        assert_eq!(log[0].status, "CLEAR");
+        assert_eq!(log[1].name, "disk_full");
+        assert_eq!(log[2].old_status, "CLEAR");
     }
 
     #[test]

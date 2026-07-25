@@ -856,12 +856,127 @@ pub async fn netdata_series(
         .collect())
 }
 
+/// One chart from the agent's index (id, title, units, family) — drives the Containers section
+/// and the all-charts browser.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChartMetaOut {
+    id: String,
+    title: String,
+    units: String,
+    family: String,
+}
+
+/// The agent's full chart index + the Docker/cgroup container names found in it. One fetch
+/// powers both: the UI groups container charts into per-container cards and offers everything
+/// else through the browser.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChartsIndexOut {
+    charts: Vec<ChartMetaOut>,
+    containers: Vec<String>,
+}
+
+#[tauri::command]
+pub async fn netdata_charts_index(
+    state: State<'_, AppState>,
+    provider: String,
+    id: String,
+    host: String,
+) -> Result<ChartsIndexOut, String> {
+    let dir = data_dir(&state);
+    let (ep, _) = endpoint_for(&dir, &provider, &id, &host);
+    let charts = ep.charts().await.map_err(|e| e.to_string())?;
+    let containers = netdata::container_names(&charts);
+    Ok(ChartsIndexOut {
+        charts: charts
+            .into_iter()
+            .map(|c| ChartMetaOut {
+                id: c.id,
+                title: c.title,
+                units: c.units,
+                family: c.family,
+            })
+            .collect(),
+        containers,
+    })
+}
+
+/// ANY chart by id, every dimension as its own labelled line — the generic primitive behind
+/// per-container CPU/mem/network and the all-charts browser. Values are absolute (charts never
+/// dip negative); the UI labels lines with the agent's own dimension names.
+#[tauri::command]
+pub async fn netdata_chart_data(
+    state: State<'_, AppState>,
+    provider: String,
+    id: String,
+    host: String,
+    chart: String,
+    after_secs: u32,
+    points: u32,
+) -> Result<Vec<SeriesOut>, String> {
+    let dir = data_dir(&state);
+    let (ep, _) = endpoint_for(&dir, &provider, &id, &host);
+    let series = ep
+        .data(&chart, after_secs.clamp(10, 86_400), points.clamp(2, 600))
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(netdata::chart_all_series(&series)
+        .into_iter()
+        .map(|(label, pts)| SeriesOut {
+            label,
+            points: points_out(&pts),
+        })
+        .collect())
+}
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AlarmOut {
     name: String,
     status: String,
     value: String,
+}
+
+/// One alarm transition for the "Recent alerts" feed.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AlarmLogOut {
+    when: i64,
+    name: String,
+    status: String,
+    old_status: String,
+    value: String,
+}
+
+/// The last 24h of alarm transitions, newest first, capped — what fired and cleared, not just
+/// what's active this second.
+#[tauri::command]
+pub async fn netdata_alarm_log(
+    state: State<'_, AppState>,
+    provider: String,
+    id: String,
+    host: String,
+) -> Result<Vec<AlarmLogOut>, String> {
+    let dir = data_dir(&state);
+    let (ep, _) = endpoint_for(&dir, &provider, &id, &host);
+    let log = ep.alarms_log().await.map_err(|e| e.to_string())?;
+    let cutoff = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64 - 86_400)
+        .unwrap_or(0);
+    Ok(log
+        .into_iter()
+        .filter(|e| e.when >= cutoff)
+        .take(30)
+        .map(|e| AlarmLogOut {
+            when: e.when,
+            name: e.name,
+            status: e.status,
+            old_status: e.old_status,
+            value: e.value,
+        })
+        .collect())
 }
 
 #[tauri::command]

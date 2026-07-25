@@ -74,4 +74,34 @@ final class NetdataMathTests: XCTestCase {
         let outSeries = NetdataMath.series(d, "OutOctets", abs: true)
         XCTAssertEqual(outSeries.map { $0.1 }, [50, 300])
     }
+
+    // Same fixture as the Rust test `parses_charts_index_and_finds_containers`.
+    func testChartsIndexParseAndContainerDiscovery() {
+        let body = """
+        {"charts": {
+            "system.cpu": {"id":"system.cpu","title":"Total CPU","units":"percentage","family":"cpu"},
+            "cgroup_coolify.cpu": {"id":"cgroup_coolify.cpu","title":"CPU","units":"percentage","family":"coolify"},
+            "cgroup_coolify.mem": {"id":"cgroup_coolify.mem","title":"Memory","units":"MiB","family":"coolify"},
+            "cgroup_northkey-db.cpu": {"id":"cgroup_northkey-db.cpu","title":"CPU","units":"percentage","family":"northkey-db"},
+            "disk_space._": {"id":"disk_space._","title":"Disk","units":"GiB","family":"/"}
+        }}
+        """
+        let charts = NetdataChartMeta.list(fromResponse: Data(body.utf8))
+        XCTAssertEqual(charts.count, 5)
+        XCTAssertEqual(charts[0].id, "cgroup_coolify.cpu") // sorted by id
+        XCTAssertEqual(charts[0].units, "percentage")
+        XCTAssertEqual(
+            NetdataChartMeta.containerNames(in: charts), ["coolify", "northkey-db"])
+    }
+
+    func testAllSeriesLabelsEveryDimension() {
+        // Mirrors the Rust `chart_all_series_labels_every_dimension` test.
+        let d = data(["time", "user", "system"], [[1, 3, -2], [2, 4, 1]])
+        let lines = NetdataMath.allSeries(d)
+        XCTAssertEqual(lines.count, 2)
+        XCTAssertEqual(lines[0].0, "user")
+        XCTAssertEqual(lines[1].0, "system")
+        XCTAssertEqual(lines[0].1[1].1, 4, accuracy: 0.001)
+        XCTAssertEqual(lines[1].1[0].1, 2, accuracy: 0.001) // abs
+    }
 }

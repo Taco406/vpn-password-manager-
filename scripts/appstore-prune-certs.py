@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Revoke stale Apple *distribution* certificates so a cloud-signed build always has a free slot.
+"""Revoke stale Apple signing certificates so a cloud-signed build always has a free slot.
 
 Why this exists
 ---------------
@@ -40,9 +40,17 @@ except ImportError:  # pragma: no cover - the workflow installs this first
 
 API = "https://api.appstoreconnect.apple.com/v1"
 
-# Certificate types that occupy the distribution cap. Development certs are left alone — they
-# have their own (separate) limit and nothing here creates them.
-DISTRIBUTION_TYPES = {
+# Certificate types the CI pipeline mints and can safely reclaim. DEVELOPMENT is the critical
+# one: `xcodebuild archive` with CODE_SIGN_STYLE=Automatic signs the archive phase with an iOS
+# App DEVELOPMENT certificate (the export re-signs with distribution), so every throwaway runner
+# mints a development cert — which is exactly what filled the user's account to its 16-cert cap
+# (observed live: 16 certificates, 0 distribution). The first version of this script pruned only
+# distribution types, found nothing to revoke, and the build died at the cap anyway. Revoking
+# development certs is safe here: the stale ones belong to runners that no longer exist, and a
+# developer's own Xcode transparently mints a fresh one on the next local build.
+PRUNE_TYPES = {
+    "DEVELOPMENT",
+    "IOS_DEVELOPMENT",
     "DISTRIBUTION",
     "IOS_DISTRIBUTION",
     "MAC_APP_DISTRIBUTION",
@@ -93,17 +101,17 @@ def main() -> int:
         return 0
 
     certs = body.get("data", [])
-    distribution = [
-        c for c in certs if (c.get("attributes") or {}).get("certificateType") in DISTRIBUTION_TYPES
+    prunable = [
+        c for c in certs if (c.get("attributes") or {}).get("certificateType") in PRUNE_TYPES
     ]
-    print(f"prune-certs: {len(certs)} certificate(s) on the account, {len(distribution)} distribution.")
+    print(f"prune-certs: {len(certs)} certificate(s) on the account, {len(prunable)} prunable (dev+dist).")
 
-    if not distribution:
+    if not prunable:
         print("prune-certs: nothing to revoke — cloud signing will mint a fresh certificate.")
         return 0
 
     revoked = 0
-    for cert in distribution:
+    for cert in prunable:
         attrs = cert.get("attributes") or {}
         name = attrs.get("name") or attrs.get("certificateType") or "certificate"
         expires = attrs.get("expirationDate", "?")
@@ -114,7 +122,7 @@ def main() -> int:
         else:
             print(f"prune-certs: could NOT revoke {name} (HTTP {status}): {body.get('error', '')}")
 
-    print(f"prune-certs: revoked {revoked}/{len(distribution)}; a fresh one is minted during archive.")
+    print(f"prune-certs: revoked {revoked}/{len(prunable)}; a fresh one is minted during archive.")
     return 0
 
 

@@ -273,6 +273,42 @@ struct ChartLine: Identifiable {
     let points: [(Date, Double)]
 }
 
+/// One chart from the agent's `/api/v1/charts` index — enough to list, group, and fetch it.
+struct NetdataChartMeta: Identifiable {
+    let id: String
+    let title: String
+    let units: String
+    let family: String
+
+    /// Parse the `/api/v1/charts` body: `{"charts": {"<id>": {"id","title","units","family",…}}}`.
+    /// Mirrors netdata.rs `parse_charts` (sorted by id).
+    static func list(fromResponse data: Data) -> [NetdataChartMeta] {
+        guard let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let map = obj["charts"] as? [String: Any]
+        else { return [] }
+        return map.compactMap { (key, raw) -> NetdataChartMeta? in
+            guard let c = raw as? [String: Any] else { return nil }
+            return NetdataChartMeta(
+                id: c["id"] as? String ?? key,
+                title: c["title"] as? String ?? "",
+                units: c["units"] as? String ?? "",
+                family: c["family"] as? String ?? "")
+        }
+        .sorted { $0.id < $1.id }
+    }
+
+    /// The Docker/cgroup container names in an index: each container's charts appear as
+    /// `cgroup_<name>.cpu` / `.mem` / …; the `.cpu` chart is the one-per-container marker.
+    /// Mirrors netdata.rs `container_names`.
+    static func containerNames(in charts: [NetdataChartMeta]) -> [String] {
+        let names = charts.compactMap { c -> String? in
+            guard c.id.hasPrefix("cgroup_"), c.id.hasSuffix(".cpu") else { return nil }
+            return String(c.id.dropFirst("cgroup_".count).dropLast(".cpu".count))
+        }
+        return Array(Set(names)).sorted()
+    }
+}
+
 /// Reads Netdata's local HTTP API directly. Accepts the server's self-signed certificate for
 /// read-only metrics (same posture as the desktop, which doesn't pin Netdata).
 final class NetdataClient: NSObject, URLSessionDelegate {
@@ -394,6 +430,33 @@ final class NetdataClient: NSObject, URLSessionDelegate {
         }
         if !matched.isEmpty { return matched }
         return NetdataMath.allSeries(d).map { toLine($0.0, $0.1) }
+    }
+
+    /// The agent's full chart index — every metric it exposes (containers, per-disk,
+    /// per-interface, services), not just the fixed `system.*` set the dashboard hardcodes.
+    func charts(host: String, cfg: NetdataEndpointCfg) async -> [NetdataChartMeta] {
+        guard let url = URL(string: "\(base(host, cfg))/api/v1/charts"),
+              let (data, resp) = try? await session.data(for: request(url, cfg)),
+              let http = resp as? HTTPURLResponse, (200..<300).contains(http.statusCode)
+        else { return [] }
+        return NetdataChartMeta.list(fromResponse: data)
+    }
+
+    /// ANY chart by id, every dimension as its own line under the agent's own label (absolute
+    /// values) — the generic primitive behind the container cards and the all-charts browser.
+    func anyChart(
+        host: String, cfg: NetdataEndpointCfg, chartId: String, afterSecs: Int = 300,
+        points: Int = 60
+    ) async -> [ChartLine] {
+        let escaped =
+            chartId.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? chartId
+        guard
+            let d = try? await fetch(
+                host: host, cfg: cfg, chart: escaped, afterSecs: afterSecs, points: points)
+        else { return [] }
+        return NetdataMath.allSeries(d).map { (label, pts) in
+            ChartLine(label: label, points: pts.map { (Date(timeIntervalSince1970: $0.0), $0.1) })
+        }
     }
 
     /// Active alarms from `/api/v1/alarms?active`.

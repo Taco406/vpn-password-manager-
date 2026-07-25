@@ -2110,6 +2110,14 @@ pub(crate) fn sync_device_settings(state: &State<'_, AppState>) -> bool {
 }
 
 /// Build/replace the settings item from the given values and store it in the local vault.
+///
+/// ADDITIVE: a field whose local value is empty keeps the value already in the item. The item is
+/// rebuilt wholesale by several callers (self-heal fires whenever ANY field differs), and before
+/// this rule a device that didn't hold a secret locally would rewrite the shared item WITHOUT it
+/// — the Mac, healing some prefs difference, erased the Hetzner token Windows had shared, and
+/// with Windows offline nothing put it back ("not set" on every other device by morning). The
+/// trade-off is that clearing a token no longer propagates through sync (it clears only the
+/// device you clear it on); tokens are add-only across devices, like every other shipped field.
 fn write_settings_item(
     state: &State<'_, AppState>,
     values: Vec<(&'static str, String)>,
@@ -2122,6 +2130,25 @@ fn write_settings_item(
         .ok()
         .flatten()
         .and_then(|env| g.session.open(&env).ok());
+    let values: Vec<(&'static str, String)> = values
+        .into_iter()
+        .map(|(name, v)| {
+            if v.trim().is_empty() {
+                let kept = existing
+                    .as_ref()
+                    .and_then(|item| {
+                        item.custom_fields
+                            .iter()
+                            .find(|f| f.name == name)
+                            .map(|f| f.value.clone())
+                    })
+                    .unwrap_or_default();
+                (name, kept)
+            } else {
+                (name, v)
+            }
+        })
+        .collect();
     let created_at = existing.as_ref().map(|i| i.created_at).unwrap_or(now);
     // Monotonic timestamp. The settings item is reconciled whole-item last-writer-wins by
     // `updated_at` (see `LocalVault::merge`): the copy with the newer timestamp replaces the

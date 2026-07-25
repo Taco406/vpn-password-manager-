@@ -480,6 +480,69 @@ export async function netdataSeries(
   return inv<NetdataSeriesLine[]>("netdata_series", { provider, id, host, kind, afterSecs, points });
 }
 
+/** One chart from the agent's index — drives the Containers section + all-charts browser. */
+export interface NetdataChartMeta {
+  id: string;
+  title: string;
+  units: string;
+  family: string;
+}
+
+export interface NetdataChartsIndex {
+  charts: NetdataChartMeta[];
+  /** Docker/cgroup container names found in the index (from cgroup_<name>.cpu charts). */
+  containers: string[];
+}
+
+/** The agent's full chart index: every metric it exposes, plus the containers found in it. */
+export async function netdataChartsIndex(
+  provider: string,
+  id: string,
+  host: string,
+): Promise<NetdataChartsIndex> {
+  if (!inTauri()) throw new Error("Netdata monitoring is only available in the desktop app.");
+  return inv<NetdataChartsIndex>("netdata_charts_index", { provider, id, host });
+}
+
+/** ANY chart by id, every dimension as its own labelled line (absolute values). */
+export async function netdataChartData(
+  provider: string,
+  id: string,
+  host: string,
+  chart: string,
+  afterSecs: number,
+  points: number,
+): Promise<NetdataSeriesLine[]> {
+  if (!inTauri()) throw new Error("Netdata monitoring is only available in the desktop app.");
+  return inv<NetdataSeriesLine[]>("netdata_chart_data", {
+    provider,
+    id,
+    host,
+    chart,
+    afterSecs,
+    points,
+  });
+}
+
+/** One alarm state transition from the agent's log. */
+export interface NetdataAlarmLogEntry {
+  when: number;
+  name: string;
+  status: string;
+  oldStatus: string;
+  value: string;
+}
+
+/** Last 24h of alarm transitions (fired AND cleared), newest first. */
+export async function netdataAlarmLog(
+  provider: string,
+  id: string,
+  host: string,
+): Promise<NetdataAlarmLogEntry[]> {
+  if (!inTauri()) throw new Error("Netdata monitoring is only available in the desktop app.");
+  return inv<NetdataAlarmLogEntry[]>("netdata_alarm_log", { provider, id, host });
+}
+
 export async function netdataAlarms(
   provider: string,
   id: string,
