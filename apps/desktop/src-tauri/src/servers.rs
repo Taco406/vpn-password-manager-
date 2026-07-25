@@ -938,6 +938,47 @@ pub struct AlarmOut {
     value: String,
 }
 
+/// One alarm transition for the "Recent alerts" feed.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AlarmLogOut {
+    when: i64,
+    name: String,
+    status: String,
+    old_status: String,
+    value: String,
+}
+
+/// The last 24h of alarm transitions, newest first, capped — what fired and cleared, not just
+/// what's active this second.
+#[tauri::command]
+pub async fn netdata_alarm_log(
+    state: State<'_, AppState>,
+    provider: String,
+    id: String,
+    host: String,
+) -> Result<Vec<AlarmLogOut>, String> {
+    let dir = data_dir(&state);
+    let (ep, _) = endpoint_for(&dir, &provider, &id, &host);
+    let log = ep.alarms_log().await.map_err(|e| e.to_string())?;
+    let cutoff = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64 - 86_400)
+        .unwrap_or(0);
+    Ok(log
+        .into_iter()
+        .filter(|e| e.when >= cutoff)
+        .take(30)
+        .map(|e| AlarmLogOut {
+            when: e.when,
+            name: e.name,
+            status: e.status,
+            old_status: e.old_status,
+            value: e.value,
+        })
+        .collect())
+}
+
 #[tauri::command]
 pub async fn netdata_alarms(
     state: State<'_, AppState>,

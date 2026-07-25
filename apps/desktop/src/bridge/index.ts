@@ -524,6 +524,25 @@ export async function netdataChartData(
   });
 }
 
+/** One alarm state transition from the agent's log. */
+export interface NetdataAlarmLogEntry {
+  when: number;
+  name: string;
+  status: string;
+  oldStatus: string;
+  value: string;
+}
+
+/** Last 24h of alarm transitions (fired AND cleared), newest first. */
+export async function netdataAlarmLog(
+  provider: string,
+  id: string,
+  host: string,
+): Promise<NetdataAlarmLogEntry[]> {
+  if (!inTauri()) throw new Error("Netdata monitoring is only available in the desktop app.");
+  return inv<NetdataAlarmLogEntry[]>("netdata_alarm_log", { provider, id, host });
+}
+
 export async function netdataAlarms(
   provider: string,
   id: string,

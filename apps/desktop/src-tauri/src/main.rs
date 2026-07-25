@@ -197,6 +197,7 @@ fn main() {
             servers::netdata_alarms,
             servers::netdata_charts_index,
             servers::netdata_chart_data,
+            servers::netdata_alarm_log,
             servers::servers_firewall_get,
             servers::servers_firewall_allow_port,
         ])

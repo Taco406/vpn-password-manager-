@@ -38,8 +38,10 @@ import {
   netdataSeries,
   netdataChartsIndex,
   netdataChartData,
+  netdataAlarmLog,
   type NetdataChartMeta,
   type NetdataChartsIndex,
+  type NetdataAlarmLogEntry,
   netdataAlarms,
   serversFirewallGet,
   serversFirewallAllowPort,
@@ -769,6 +771,7 @@ function NetdataLive({ s, onDisable }: { s: ManagedServer; onDisable: () => void
   const [diskio, setDiskio] = useState<NetdataSeriesLine[]>([]);
   const [load, setLoad] = useState<NetdataSeriesLine[]>([]);
   const [alarms, setAlarms] = useState<{ name: string; status: string; value: string }[]>([]);
+  const [alertLog, setAlertLog] = useState<NetdataAlarmLogEntry[]>([]);
   const [err, setErr] = useState("");
   const host = s.ipv4!;
 
@@ -821,6 +824,12 @@ function NetdataLive({ s, onDisable }: { s: ManagedServer; onDisable: () => void
         if (alive) setAlarms(a);
       } catch {
         /* best-effort */
+      }
+      try {
+        const l = await netdataAlarmLog(s.provider, s.id, host);
+        if (alive) setAlertLog(l);
+      } catch {
+        /* best-effort — older agents may not expose the log */
       }
     };
     void cpuTick();
@@ -912,7 +921,43 @@ function NetdataLive({ s, onDisable }: { s: ManagedServer; onDisable: () => void
         )}
       </div>
 
+      {alertLog.length > 0 && <RecentAlerts entries={alertLog} />}
+
       <NetdataExplorer s={s} host={host} />
+    </div>
+  );
+}
+
+/** The last 24h of alarm transitions — what fired AND what cleared, with times. */
+function RecentAlerts({ entries }: { entries: NetdataAlarmLogEntry[] }) {
+  const [open, setOpen] = useState(false);
+  const fmtWhen = (ts: number) =>
+    new Date(ts * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+  const toneOf = (status: string): Tone =>
+    status === "CRITICAL" ? "danger" : status === "WARNING" ? "warn" : "ok";
+  return (
+    <div className="mt-4">
+      <button
+        onClick={() => setOpen(!open)}
+        className="flex items-center gap-1.5 text-[11px] font-medium text-[var(--text-secondary)] hover:text-[var(--text-primary)]"
+      >
+        {open ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
+        Recent alerts ({entries.length} in 24h)
+      </button>
+      {open && (
+        <div className="mt-2 max-h-48 overflow-y-auto rounded-[8px] border border-[var(--border-subtle)]">
+          {entries.map((e, i) => (
+            <div key={i} className="flex items-baseline gap-2 px-2 py-1 text-[11px]">
+              <span className="mono text-[var(--text-muted)]">{fmtWhen(e.when)}</span>
+              <span className="min-w-0 flex-1 truncate">{e.name}</span>
+              <span style={{ color: TONE_COLOR[toneOf(e.status)] }}>
+                {e.oldStatus} → {e.status}
+              </span>
+              {e.value && <span className="mono text-[var(--text-muted)]">{e.value}</span>}
+            </div>
+          ))}
+        </div>
+      )}
     </div>
   );
 }
@@ -967,8 +1012,109 @@ function NetdataExplorer({ s, host }: { s: ManagedServer; host: string }) {
           </div>
         </div>
       )}
+      {CHART_GROUPS.map((g) => {
+        const charts = index.charts.filter(g.match);
+        return charts.length > 0 ? (
+          <ChartGroup key={g.key} s={s} host={host} title={g.label} charts={charts} />
+        ) : null;
+      })}
       <ChartBrowser s={s} host={host} charts={index.charts} />
     </div>
+  );
+}
+
+// Curated slices of the index — the metrics people actually go looking for, one collapsible
+// group each, without having to know Netdata's chart-id naming.
+const CHART_GROUPS: { key: string; label: string; match: (c: NetdataChartMeta) => boolean }[] = [
+  {
+    key: "disks",
+    label: "Disks",
+    match: (c) => c.id.startsWith("disk_space.") || c.id.startsWith("disk."),
+  },
+  { key: "ifaces", label: "Network interfaces", match: (c) => c.id.startsWith("net.") },
+  {
+    key: "services",
+    label: "Services",
+    match: (c) => c.id.startsWith("systemd_service") || c.id.startsWith("services."),
+  },
+];
+
+/** A collapsible curated group: pick a chart from the list, it renders live below. */
+function ChartGroup({
+  s,
+  host,
+  title,
+  charts,
+}: {
+  s: ManagedServer;
+  host: string;
+  title: string;
+  charts: NetdataChartMeta[];
+}) {
+  const [open, setOpen] = useState(false);
+  const [sel, setSel] = useState<NetdataChartMeta | null>(null);
+  return (
+    <div className="mt-4">
+      <button
+        onClick={() => setOpen(!open)}
+        className="flex items-center gap-1.5 text-[11px] font-medium text-[var(--text-secondary)] hover:text-[var(--text-primary)]"
+      >
+        {open ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
+        {title} ({charts.length})
+      </button>
+      {open && (
+        <div className="mt-2">
+          <div className="max-h-40 overflow-y-auto rounded-[8px] border border-[var(--border-subtle)]">
+            {charts.map((c) => (
+              <button
+                key={c.id}
+                onClick={() => setSel(c)}
+                className={`flex w-full items-baseline gap-2 px-2 py-1 text-left text-[11px] hover:bg-[var(--bg-inset)] ${sel?.id === c.id ? "bg-[var(--bg-inset)]" : ""}`}
+              >
+                <span className="mono">{c.id}</span>
+                <span className="min-w-0 flex-1 truncate text-[var(--text-muted)]">{c.title}</span>
+                <span className="text-[var(--text-muted)]">{c.units}</span>
+              </button>
+            ))}
+          </div>
+          {sel && (
+            <div className="mt-3">
+              <LiveChart s={s} host={host} meta={sel} />
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** One chart by id, polled live, every dimension under the agent's own label. */
+function LiveChart({ s, host, meta }: { s: ManagedServer; host: string; meta: NetdataChartMeta }) {
+  const [lines, setLines] = useState<NetdataSeriesLine[]>([]);
+  useEffect(() => {
+    let alive = true;
+    const tick = async () => {
+      try {
+        const l = await netdataChartData(s.provider, s.id, host, meta.id, 300, 90);
+        if (alive) setLines(l);
+      } catch {
+        if (alive) setLines([]);
+      }
+    };
+    setLines([]);
+    void tick();
+    const t = window.setInterval(() => void tick(), 8000);
+    return () => {
+      alive = false;
+      window.clearInterval(t);
+    };
+  }, [s.provider, s.id, host, meta.id]);
+  return (
+    <ChartBlock
+      title={`${meta.id} — ${meta.title}${meta.units ? ` (${meta.units})` : ""}`}
+      series={toSeries(lines, CONTAINER_COLORS)}
+      unit="iops"
+    />
   );
 }
 
@@ -1043,27 +1189,6 @@ function ChartBrowser({
   const [open, setOpen] = useState(false);
   const [q, setQ] = useState("");
   const [sel, setSel] = useState<NetdataChartMeta | null>(null);
-  const [lines, setLines] = useState<NetdataSeriesLine[]>([]);
-
-  useEffect(() => {
-    if (!sel) return;
-    let alive = true;
-    const tick = async () => {
-      try {
-        const l = await netdataChartData(s.provider, s.id, host, sel.id, 300, 90);
-        if (alive) setLines(l);
-      } catch {
-        if (alive) setLines([]);
-      }
-    };
-    setLines([]);
-    void tick();
-    const t = window.setInterval(() => void tick(), 8000);
-    return () => {
-      alive = false;
-      window.clearInterval(t);
-    };
-  }, [s.provider, s.id, host, sel]);
 
   const needle = q.trim().toLowerCase();
   const matches = needle
@@ -1114,11 +1239,7 @@ function ChartBrowser({
           )}
           {sel && (
             <div className="mt-3">
-              <ChartBlock
-                title={`${sel.id} — ${sel.title}${sel.units ? ` (${sel.units})` : ""}`}
-                series={toSeries(lines, CONTAINER_COLORS)}
-                unit="iops"
-              />
+              <LiveChart s={s} host={host} meta={sel} />
             </div>
           )}
         </div>

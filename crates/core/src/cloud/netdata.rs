@@ -87,6 +87,55 @@ impl NetdataEndpoint {
     pub async fn charts(&self) -> Result<Vec<ChartMeta>> {
         parse_charts(&self.get_text("/api/v1/charts").await?)
     }
+
+    /// The alarm transition log — what fired and cleared recently, not just what's active now.
+    pub async fn alarms_log(&self) -> Result<Vec<AlarmLogEntry>> {
+        parse_alarms_log(&self.get_text("/api/v1/alarm_log").await?)
+    }
+}
+
+/// One alarm state transition from `/api/v1/alarm_log`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct AlarmLogEntry {
+    /// Unix seconds of the transition.
+    pub when: i64,
+    pub name: String,
+    /// Status after the transition (e.g. WARNING, CRITICAL, CLEAR).
+    pub status: String,
+    /// Status before it (UNINITIALIZED for the first evaluation).
+    pub old_status: String,
+    pub value: String,
+}
+
+/// Parse `/api/v1/alarm_log`: an array of transitions, newest first is NOT guaranteed —
+/// callers get them sorted newest-first here.
+pub fn parse_alarms_log(body: &str) -> Result<Vec<AlarmLogEntry>> {
+    let v: serde_json::Value = serde_json::from_str(body)
+        .map_err(|e| CoreError::Network(format!("Netdata: bad alarm_log response ({e})")))?;
+    let mut out: Vec<AlarmLogEntry> = v
+        .as_array()
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|e| {
+                    let s = |k: &str| {
+                        e.get(k)
+                            .and_then(|x| x.as_str())
+                            .unwrap_or_default()
+                            .to_string()
+                    };
+                    Some(AlarmLogEntry {
+                        when: e.get("when")?.as_i64()?,
+                        name: s("name"),
+                        status: s("status"),
+                        old_status: s("old_status"),
+                        value: s("value_string"),
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    out.sort_by(|a, b| b.when.cmp(&a.when));
+    Ok(out)
 }
 
 /// One chart from `/api/v1/charts` — enough to list, group, and fetch it.
@@ -782,6 +831,22 @@ mod tests {
         assert_eq!(lines[1].0, "system");
         assert!((lines[0].1[1].value - 4.0).abs() < 1e-9);
         assert!((lines[1].1[0].value - 2.0).abs() < 1e-9); // abs
+    }
+
+    #[test]
+    fn parses_alarm_log_sorted_newest_first() {
+        let body = r#"[
+            {"when": 100, "name": "cpu_high", "status": "WARNING", "old_status": "CLEAR", "value_string": "82%"},
+            {"when": 300, "name": "cpu_high", "status": "CLEAR", "old_status": "WARNING", "value_string": "40%"},
+            {"when": 200, "name": "disk_full", "status": "CRITICAL", "old_status": "WARNING", "value_string": "95%"},
+            {"bogus": true}
+        ]"#;
+        let log = parse_alarms_log(body).unwrap();
+        assert_eq!(log.len(), 3); // entry without "when" is skipped
+        assert_eq!(log[0].when, 300);
+        assert_eq!(log[0].status, "CLEAR");
+        assert_eq!(log[1].name, "disk_full");
+        assert_eq!(log[2].old_status, "CLEAR");
     }
 
     #[test]
