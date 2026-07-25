@@ -12,11 +12,14 @@ final class ServerDetailModel: ObservableObject {
     @Published var diskLines: [ChartLine] = []
     @Published var loadLines: [ChartLine] = []
     @Published var alarms: [NetdataAlarm] = []
+    @Published var chartIndex: [NetdataChartMeta] = []
+    @Published var containers: [String] = []
     @Published var loading = false
     @Published var hasData = false
     @Published var powerMsg: String?
 
-    private let client = NetdataClient()
+    let client = NetdataClient()
+    private var indexFetchedAt: Date?
 
     func refresh(host: String?, cfg: NetdataEndpointCfg?) async {
         // Readable when Netdata is on AND it either needs no login or we hold the synced
@@ -40,6 +43,16 @@ final class ServerDetailModel: ObservableObject {
         loadLines = await l
         alarms = await a
         hasData = t.cpu != nil || !netLines.isEmpty || !loadLines.isEmpty
+        // The chart index is heavy next to the per-second charts — refetch at most once a
+        // minute (containers appear with deploys, not per second).
+        if indexFetchedAt.map({ Date().timeIntervalSince($0) > 60 }) ?? true {
+            let idx = await client.charts(host: host, cfg: cfg)
+            if !idx.isEmpty {
+                chartIndex = idx
+                containers = NetdataChartMeta.containerNames(in: idx)
+                indexFetchedAt = Date()
+            }
+        }
         loading = false
     }
 
@@ -78,6 +91,14 @@ struct ServerDetailView: View {
                         ChartCard(title: "Network", lines: model.netLines, format: .rate)
                         ChartCard(title: "Disk I/O", lines: model.diskLines, format: .rate)
                         alarmsCard
+                        if let host = server.ipv4, let cfg {
+                            if !model.containers.isEmpty {
+                                containersCard(host: host, cfg: cfg)
+                            }
+                            if !model.chartIndex.isEmpty {
+                                allChartsLink(host: host, cfg: cfg)
+                            }
+                        }
                     } else if model.loading {
                         Card { HStack { ProgressView(); Text("Reading Netdata…").font(.footnote).foregroundColor(.secondary) } }
                     } else {
@@ -212,6 +233,174 @@ struct ServerDetailView: View {
 
     private func pct(_ v: Double?, _ digits: Int = 0) -> String {
         v.map { String(format: "%.\(digits)f%%", $0) } ?? "—"
+    }
+
+    // MARK: Containers + all-charts browser (v0.1.61 — desktop parity)
+
+    private func containersCard(host: String, cfg: NetdataEndpointCfg) -> some View {
+        Card {
+            VStack(alignment: .leading, spacing: 8) {
+                Text("Containers (\(model.containers.count))").font(.subheadline.bold())
+                ForEach(model.containers, id: \.self) { name in
+                    ContainerRow(client: model.client, host: host, cfg: cfg, name: name)
+                }
+            }
+        }
+    }
+
+    private func allChartsLink(host: String, cfg: NetdataEndpointCfg) -> some View {
+        NavigationLink {
+            ChartBrowserView(client: model.client, host: host, cfg: cfg, charts: model.chartIndex)
+        } label: {
+            Card {
+                HStack {
+                    Label("All charts (\(model.chartIndex.count))", systemImage: "magnifyingglass")
+                        .font(.subheadline.bold())
+                    Spacer()
+                    Image(systemName: "chevron.right").font(.caption).foregroundColor(.secondary)
+                }
+            }
+        }
+        .buttonStyle(.plain)
+    }
+}
+
+// MARK: - Containers
+
+/// One container's live vitals: current CPU% + memory in the row, full charts on expand.
+/// Chart lines are capped for phone-width readability.
+private struct ContainerRow: View {
+    let client: NetdataClient
+    let host: String
+    let cfg: NetdataEndpointCfg
+    let name: String
+    @State private var open = false
+    @State private var cpuLines: [ChartLine] = []
+    @State private var memLines: [ChartLine] = []
+
+    private func lastSum(_ lines: [ChartLine]) -> Double? {
+        let v = lines.compactMap { $0.points.last?.1 }
+        return v.isEmpty ? nil : v.reduce(0, +)
+    }
+    private var cpuNow: Double? { lastSum(cpuLines) }
+    private var memNow: Double? { lastSum(memLines) }
+    private var cpuColor: Color {
+        switch tone(cpuNow, 75, 90) {
+        case .danger: return Color(hex: 0xF87171)
+        case .warn: return Color(hex: 0xF0A020)
+        case .ok: return Color(hex: 0x2ED47A)
+        case .plain: return Color(hex: 0x22D3EE)
+        }
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Button { open.toggle() } label: {
+                HStack(spacing: 6) {
+                    Image(systemName: open ? "chevron.down" : "chevron.right")
+                        .font(.caption2).foregroundColor(.secondary)
+                    Text(name).font(.caption.monospaced()).lineLimit(1)
+                    Spacer()
+                    Text(cpuNow.map { String(format: "%.1f%%", $0) } ?? "—")
+                        .font(.caption.monospaced()).foregroundColor(cpuColor)
+                    Text(memNow.map(fmtMiB) ?? "—")
+                        .font(.caption.monospaced()).foregroundColor(.secondary)
+                        .frame(width: 70, alignment: .trailing)
+                }
+            }
+            .buttonStyle(.plain)
+            if open {
+                ChartCard(title: "CPU (%)", lines: cpuLines, format: .plain)
+                ChartCard(title: "Memory (MiB)", lines: memLines, format: .plain)
+            }
+        }
+        .task(id: name) {
+            while !Task.isCancelled {
+                async let c = client.anyChart(host: host, cfg: cfg, chartId: "cgroup_\(name).cpu")
+                async let m = client.anyChart(host: host, cfg: cfg, chartId: "cgroup_\(name).mem")
+                let (cl, ml) = await (c, m)
+                if !cl.isEmpty { cpuLines = Array(cl.prefix(5)) }
+                if !ml.isEmpty { memLines = Array(ml.prefix(5)) }
+                try? await Task.sleep(nanoseconds: 10_000_000_000)
+            }
+        }
+    }
+}
+
+/// MiB → a compact human string (Netdata cgroup mem charts report MiB).
+func fmtMiB(_ mib: Double) -> String {
+    mib >= 1024 ? String(format: "%.1f GiB", mib / 1024) : String(format: "%.0f MiB", mib)
+}
+
+// MARK: - All-charts browser
+
+/// Search-and-render over EVERY chart the agent exposes — per-disk, per-interface, services,
+/// apps.* — the phone twin of the desktop's chart browser.
+private struct ChartBrowserView: View {
+    let client: NetdataClient
+    let host: String
+    let cfg: NetdataEndpointCfg
+    let charts: [NetdataChartMeta]
+    @State private var search = ""
+
+    private var filtered: [NetdataChartMeta] {
+        let q = search.trimmingCharacters(in: .whitespaces).lowercased()
+        guard !q.isEmpty else { return charts }
+        return charts.filter {
+            $0.id.lowercased().contains(q) || $0.title.lowercased().contains(q)
+                || $0.family.lowercased().contains(q)
+        }
+    }
+
+    var body: some View {
+        List(filtered) { c in
+            NavigationLink {
+                SingleChartView(client: client, host: host, cfg: cfg, meta: c)
+            } label: {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(c.id).font(.caption.monospaced())
+                    Text("\(c.title)\(c.units.isEmpty ? "" : " · \(c.units)")")
+                        .font(.caption2).foregroundColor(.secondary).lineLimit(1)
+                }
+            }
+        }
+        .scrollContentBackground(.hidden)
+        .background(Color(hex: 0x0A0E14).ignoresSafeArea())
+        .searchable(text: $search, prompt: "Search every metric — docker, disk, app…")
+        .navigationTitle("All charts")
+        .navigationBarTitleDisplayMode(.inline)
+    }
+}
+
+/// One chart, live, with every dimension under the agent's own label.
+private struct SingleChartView: View {
+    let client: NetdataClient
+    let host: String
+    let cfg: NetdataEndpointCfg
+    let meta: NetdataChartMeta
+    @State private var lines: [ChartLine] = []
+
+    var body: some View {
+        ScrollView {
+            VStack(spacing: 14) {
+                ChartCard(
+                    title: "\(meta.title)\(meta.units.isEmpty ? "" : " (\(meta.units))")",
+                    lines: lines, format: .plain)
+            }
+            .padding(16)
+            .readableColumn()
+        }
+        .background(Color(hex: 0x0A0E14).ignoresSafeArea())
+        .navigationTitle(meta.id)
+        .navigationBarTitleDisplayMode(.inline)
+        .task(id: meta.id) {
+            while !Task.isCancelled {
+                let l = await client.anyChart(
+                    host: host, cfg: cfg, chartId: meta.id, afterSecs: 300, points: 90)
+                if !l.isEmpty { lines = Array(l.prefix(5)) }
+                try? await Task.sleep(nanoseconds: 8_000_000_000)
+            }
+        }
     }
 }
 
