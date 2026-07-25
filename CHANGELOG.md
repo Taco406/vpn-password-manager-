@@ -8,6 +8,31 @@ The format follows [Keep a Changelog](https://keepachangelog.com/). Versions are
 [semantic](https://semver.org/). **Add a new `## [x.y.z]` section at the top in the same PR
 that bumps the app version** — that's how "the changelog updates on every merge."
 
+## [0.1.60] — 2026-07-25
+
+### Fixed
+- **Network and Disk I/O charts no longer sit on "waiting for data…".** Newer Netdata agents
+  renamed the measurements those two charts read, and the app only knew the old names — so the
+  tiles and CPU worked while those two charts stayed empty. The app now understands every naming
+  Netdata has shipped, and if it ever meets one it doesn't know, it charts the data under the
+  server's own labels instead of showing nothing. Fixed on the computer and the phone.
+- **iPhone: dashboards for password-protected Netdata servers.** The server list showed "Live" but
+  opening the server claimed the phone "can't hold that credential" — it can, and has since the
+  login started riding your encrypted sync. The dashboard now loads with the synced login.
+- **Windows updates can't loop anymore.** Three-part bulletproofing: updates for the no-admin-prompt
+  installer now come as that same installer (before, an update could silently install a *second*
+  copy of NorthKey, and your shortcut could keep opening the old one — the "opens, tries to update,
+  closes" loop); an update that fails to apply now says so once, plainly, with the manual download
+  link, instead of retrying forever; and Settings → Updates detects a second installed copy and
+  shows exactly where it is and how to remove it.
+- **Mac: an installed WireGuard is now actually found.** Apps opened from Finder don't see the
+  folders Homebrew installs into, so NorthKey showed WireGuard as missing — and couldn't start the
+  tunnel — even right after you installed it. The app now looks in the standard install locations
+  too, on top of the usual search.
+- **Mac: a synced token that can't be saved now says why.** If macOS's keychain refuses to store a
+  token that arrived from your other devices, Account & Sync shows the reason — instead of the
+  Servers screen just staying empty with no explanation.
+
 ## [0.1.59] — 2026-07-24
 
 ### Fixed

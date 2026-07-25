@@ -66,6 +66,14 @@ struct ServersView: View {
     @ObservedObject var vault: VaultStore
     @StateObject private var model = ServersModel()
 
+    /// "Live" = we can actually read this server's Netdata: enabled AND either no login needed or
+    /// the synced credential has arrived. Gating on `enabled` alone promised live data for servers
+    /// the detail dashboard then refused to load.
+    private func isLive(_ s: MonitoredServer) -> Bool {
+        guard let c = model.netdataCfg(for: s, tokens: vault.providerTokens) else { return false }
+        return c.enabled && c.canRead
+    }
+
     var body: some View {
         NavigationStack {
             ScrollView {
@@ -86,7 +94,7 @@ struct ServersView: View {
                         NavigationLink {
                             ServerDetailView(server: s, cfg: model.netdataCfg(for: s, tokens: vault.providerTokens), vault: vault)
                         } label: {
-                            ServerRow(server: s, hasNetdata: model.netdataCfg(for: s, tokens: vault.providerTokens)?.enabled ?? false)
+                            ServerRow(server: s, hasNetdata: isLive(s))
                         }
                         .buttonStyle(.plain)
                     }

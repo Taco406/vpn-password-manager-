@@ -19,7 +19,12 @@ final class ServerDetailModel: ObservableObject {
     private let client = NetdataClient()
 
     func refresh(host: String?, cfg: NetdataEndpointCfg?) async {
-        guard let host, let cfg, cfg.enabled, !cfg.hasAuth else {
+        // Readable when Netdata is on AND it either needs no login or we hold the synced
+        // credential for it. This used to bail out on `hasAuth` outright — written before
+        // v0.1.57 shared Netdata logins through the encrypted settings item. The list view was
+        // updated then and shows such servers as "Live"; this one wasn't, so opening that exact
+        // server claimed the phone "can't hold that credential" while the row said otherwise.
+        guard let host, let cfg, cfg.enabled, cfg.canRead else {
             hasData = false
             return
         }
@@ -66,7 +71,7 @@ struct ServerDetailView: View {
             VStack(spacing: 14) {
                 header
                 powerControls
-                if cfg?.enabled == true && cfg?.hasAuth == false {
+                if cfg?.enabled == true && cfg?.canRead == true {
                     if model.hasData {
                         tileGrid
                         ChartCard(title: "Load average", lines: model.loadLines, format: .plain)
@@ -83,7 +88,7 @@ struct ServerDetailView: View {
                     }
                 } else if cfg?.hasAuth == true {
                     Card {
-                        Text("This server's Netdata needs a username/password. Set it up on the desktop app — the phone can't hold that credential.")
+                        Text("This server's Netdata needs a username and password, and it hasn't reached this phone yet. Add it on your computer under Servers → this server → Netdata, then pull down on Settings → Sync now — it arrives encrypted and this dashboard fills in.")
                             .font(.footnote).foregroundColor(.secondary)
                     }
                 } else {

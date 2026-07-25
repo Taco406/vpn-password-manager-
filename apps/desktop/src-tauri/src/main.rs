@@ -103,6 +103,7 @@ fn main() {
             commands::health_audit_fast,
             commands::settings_get,
             commands::settings_set,
+            commands::update_install_health,
             vpn::vpn_config,
             vpn::vpn_set_token,
             vpn::vpn_regions_real,

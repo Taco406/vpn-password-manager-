@@ -365,41 +365,93 @@ pub fn load_all(s: &NetdataSeries) -> NamedSeries {
         .collect()
 }
 
-/// `system.net` (InOctets/OutOctets, bytes/s) → in/out named series for a two-line chart.
-/// Values are absolute so the chart never dips negative.
-pub fn net_in_out(s: &NetdataSeries) -> NamedSeries {
-    [("in", "InOctets"), ("out", "OutOctets")]
-        .into_iter()
-        .map(|(label, dim)| {
-            let pts = named_dim(s, dim)
-                .into_iter()
-                .map(|p| MetricPoint {
-                    ts: p.ts,
-                    value: p.value.abs(),
+/// The first alias that names a real dimension, as absolute values (charts never dip negative —
+/// Netdata reports outbound/write as negative). Case-insensitive: agents differ even in casing.
+fn dim_by_alias_abs(s: &NetdataSeries, aliases: &[&str]) -> Vec<MetricPoint> {
+    for alias in aliases {
+        let Some(i) = s
+            .labels
+            .iter()
+            .position(|l| l.eq_ignore_ascii_case(alias))
+            .and_then(|i| i.checked_sub(1))
+        else {
+            continue;
+        };
+        return s
+            .rows
+            .iter()
+            .filter_map(|(ts, vals)| {
+                Some(MetricPoint {
+                    ts: *ts,
+                    value: vals.get(i)?.abs(),
+                })
+            })
+            .collect();
+    }
+    Vec::new()
+}
+
+/// Every dimension as its own line under the agent's own label (absolute values). The fallback
+/// when none of our known dimension names match: real data with the agent's names beats an
+/// empty chart stuck on "waiting for data…".
+fn all_dims_abs(s: &NetdataSeries) -> NamedSeries {
+    s.labels
+        .iter()
+        .enumerate()
+        .skip(1) // labels[0] is "time"
+        .map(|(li, label)| {
+            let i = li - 1;
+            let pts = s
+                .rows
+                .iter()
+                .filter_map(|(ts, vals)| {
+                    Some(MetricPoint {
+                        ts: *ts,
+                        value: vals.get(i)?.abs(),
+                    })
                 })
                 .collect::<Vec<_>>();
-            (label.to_string(), pts)
+            (label.clone(), pts)
         })
         .filter(|(_, pts)| !pts.is_empty())
         .collect()
 }
 
-/// `system.io` (in/out, KiB/s) → read/write named series for a two-line chart.
-pub fn disk_io_rw(s: &NetdataSeries) -> NamedSeries {
-    [("read", "in"), ("write", "out")]
+/// Two named lines (e.g. in/out, read/write), matching each side by ANY of its known dimension
+/// names. Netdata has renamed these dimensions across versions — `system.net` has shipped as
+/// InOctets/OutOctets AND received/sent, `system.io` as in/out AND reads/writes — and the old
+/// exact-match left both lines empty on a mismatched agent: tiles and Load rendered while
+/// Network and Disk I/O sat on "waiting for data…" forever. If neither side matches at all,
+/// fall back to charting every dimension under the agent's own labels.
+fn two_lines_by_alias(s: &NetdataSeries, a: (&str, &[&str]), b: (&str, &[&str])) -> NamedSeries {
+    let out: NamedSeries = [a, b]
         .into_iter()
-        .map(|(label, dim)| {
-            let pts = named_dim(s, dim)
-                .into_iter()
-                .map(|p| MetricPoint {
-                    ts: p.ts,
-                    value: p.value.abs(),
-                })
-                .collect::<Vec<_>>();
-            (label.to_string(), pts)
-        })
+        .map(|(label, aliases)| (label.to_string(), dim_by_alias_abs(s, aliases)))
         .filter(|(_, pts)| !pts.is_empty())
-        .collect()
+        .collect();
+    if out.is_empty() {
+        all_dims_abs(s)
+    } else {
+        out
+    }
+}
+
+/// `system.net` → in/out named series for a two-line chart.
+pub fn net_in_out(s: &NetdataSeries) -> NamedSeries {
+    two_lines_by_alias(
+        s,
+        ("in", &["InOctets", "received", "in"]),
+        ("out", &["OutOctets", "sent", "out"]),
+    )
+}
+
+/// `system.io` → read/write named series for a two-line chart.
+pub fn disk_io_rw(s: &NetdataSeries) -> NamedSeries {
+    two_lines_by_alias(
+        s,
+        ("read", &["in", "reads", "read"]),
+        ("write", &["out", "writes", "write"]),
+    )
 }
 
 #[cfg(test)]
@@ -584,6 +636,50 @@ mod tests {
         assert!((d[0].1[0].value - 512.0).abs() < 1e-9);
         assert_eq!(d[1].0, "write");
         assert!((d[1].1[0].value - 300.0).abs() < 1e-9);
+    }
+
+    /// Netdata renamed these dimensions across versions: `system.net` has shipped as
+    /// received/sent (not just InOctets/OutOctets), `system.io` as reads/writes (not just
+    /// in/out). The exact-match version returned ZERO lines on such agents — tiles and Load
+    /// rendered while Network and Disk I/O sat on "waiting for data…" forever.
+    #[test]
+    fn net_and_disk_match_renamed_dimensions() {
+        let net = NetdataSeries {
+            labels: vec!["time".into(), "received".into(), "sent".into()],
+            rows: vec![(1, vec![2048.0, -1024.0])],
+        };
+        let n = net_in_out(&net);
+        assert_eq!(n.len(), 2);
+        assert_eq!(n[0].0, "in");
+        assert!((n[0].1[0].value - 2048.0).abs() < 1e-9);
+        assert_eq!(n[1].0, "out");
+        assert!((n[1].1[0].value - 1024.0).abs() < 1e-9); // abs
+
+        let io = NetdataSeries {
+            labels: vec!["time".into(), "reads".into(), "writes".into()],
+            rows: vec![(1, vec![512.0, -300.0])],
+        };
+        let d = disk_io_rw(&io);
+        assert_eq!(d[0].0, "read");
+        assert!((d[0].1[0].value - 512.0).abs() < 1e-9);
+        assert_eq!(d[1].0, "write");
+        assert!((d[1].1[0].value - 300.0).abs() < 1e-9);
+    }
+
+    /// An agent with labels we've never seen still charts — every dimension under its own
+    /// name — instead of an empty "waiting for data…" card.
+    #[test]
+    fn unknown_dimension_labels_fall_back_to_all_dims() {
+        let s = NetdataSeries {
+            labels: vec!["time".into(), "rx_bytes".into(), "tx_bytes".into()],
+            rows: vec![(1, vec![100.0, -50.0])],
+        };
+        let n = net_in_out(&s);
+        assert_eq!(n.len(), 2);
+        assert_eq!(n[0].0, "rx_bytes");
+        assert!((n[0].1[0].value - 100.0).abs() < 1e-9);
+        assert_eq!(n[1].0, "tx_bytes");
+        assert!((n[1].1[0].value - 50.0).abs() < 1e-9); // abs
     }
 
     #[test]

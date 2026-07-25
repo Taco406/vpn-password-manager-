@@ -1105,3 +1105,48 @@ pub(crate) fn apply_prefs_sync(dir: &std::path::Path, json: &str) {
         serde_json::to_string_pretty(&cur).unwrap_or_default(),
     );
 }
+
+/// Windows: detect a SECOND installed copy of NorthKey. A per-machine MSI and a per-user NSIS
+/// install can coexist (the update feed once pointed NSIS installs at the MSI artifact), and two
+/// copies is exactly how the "opens, updates, closes, still old" loop perpetuates: shortcuts keep
+/// launching the stale copy, which sees an update forever. Returns each stray copy's folder so
+/// Settings → Updates can tell the user to uninstall it. Empty on a healthy machine and on
+/// non-Windows platforms.
+#[tauri::command]
+pub fn update_install_health() -> Vec<String> {
+    #[cfg(target_os = "windows")]
+    {
+        let current_dir = std::env::current_exe()
+            .ok()
+            .and_then(|p| p.parent().map(std::path::Path::canonicalize))
+            .and_then(Result::ok);
+        let mut candidates: Vec<std::path::PathBuf> = Vec::new();
+        if let Ok(lad) = std::env::var("LOCALAPPDATA") {
+            candidates.push(std::path::Path::new(&lad).join("NorthKey"));
+            candidates.push(std::path::Path::new(&lad).join("Programs").join("NorthKey"));
+        }
+        for var in ["ProgramFiles", "ProgramFiles(x86)"] {
+            if let Ok(v) = std::env::var(var) {
+                candidates.push(std::path::Path::new(&v).join("NorthKey"));
+            }
+        }
+        let mut stray = Vec::new();
+        for dir in candidates {
+            if !dir.join("NorthKey.exe").exists() {
+                continue;
+            }
+            let is_current = matches!(
+                (&current_dir, dir.canonicalize().ok()),
+                (Some(c), Some(d)) if *c == d
+            );
+            if !is_current {
+                stray.push(dir.display().to_string());
+            }
+        }
+        stray
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        Vec::new()
+    }
+}

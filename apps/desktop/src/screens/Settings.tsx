@@ -25,6 +25,7 @@ import {
   logDirPath,
   serversConfig,
   serversSetHetznerToken,
+  updateInstallHealth,
   appPlatform,
   type WgStatusInfo,
   type AppLockStatus,
@@ -669,6 +670,15 @@ function Updates() {
   const [status, setStatus] = useState<string>("");
   const [busy, setBusy] = useState(false);
   const [showNotes, setShowNotes] = useState(false);
+  // Windows: folders holding a SECOND installed copy (per-machine MSI next to the per-user
+  // NSIS). Two copies is how the update loop perpetuates — surface it instead of letting the
+  // user chase a ghost.
+  const [strayCopies, setStrayCopies] = useState<string[]>([]);
+  useEffect(() => {
+    updateInstallHealth()
+      .then(setStrayCopies)
+      .catch(() => {});
+  }, []);
   // The RUNNING app's version, read from Tauri at mount — never a hardcoded string, which
   // is how the badge once sat at v0.1.32 for four releases. Browser demo falls back to the
   // newest version in the bundled changelog.
@@ -718,6 +728,25 @@ function Updates() {
         NorthKey checks for signed updates on launch and tells you when one is ready. Updates install
         only when you click below — never automatically on launch.
       </p>
+      {strayCopies.length > 0 && (
+        <div className="mb-3 rounded-[10px] border border-[var(--danger)]/40 bg-[var(--danger)]/10 px-3 py-2.5">
+          <div className="text-xs font-medium text-[var(--danger)]">
+            Two copies of NorthKey are installed on this PC
+          </div>
+          <p className="mt-1 text-xs text-[var(--text-secondary)]">
+            A second copy lives at{" "}
+            {strayCopies.map((p) => (
+              <span key={p} className="mono">
+                {p}{" "}
+              </span>
+            ))}
+            — this is what causes the "opens, tries to update, closes" loop: your shortcut can
+            open the old copy, which updates forever. Fix once: Windows Settings → Apps →
+            Installed apps → uninstall the <span className="font-medium">other</span> NorthKey
+            entry (your vault and settings are kept), then re-pin this one.
+          </p>
+        </div>
+      )}
       <div className="flex items-center gap-3">
         <button
           onClick={check}

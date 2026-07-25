@@ -128,6 +128,12 @@ struct NetdataEndpointCfg: Decodable {
     /// synced `netdata_auth` map — NOT part of the `netdata_config` JSON, so it decodes to nil.
     var authHeader: String? = nil
 
+    /// Whether this phone can actually read the agent: either it needs no login, or the synced
+    /// credential for it has arrived. Both the list and the detail dashboard gate on this, so they
+    /// can never disagree — the detail view once refused every auth-protected server outright
+    /// while the list showed the same server as "Live".
+    var canRead: Bool { !hasAuth || !(authHeader ?? "").isEmpty }
+
     static func map(fromJSON json: String) -> [String: NetdataEndpointCfg] {
         guard !json.isEmpty, let data = json.data(using: .utf8) else { return [:] }
         return (try? JSONDecoder().decode([String: NetdataEndpointCfg].self, from: data)) ?? [:]
@@ -204,6 +210,40 @@ enum NetdataMath {
         return d.ascending.compactMap { row in
             guard let ts = row.first, i < row.count else { return nil }
             return (ts, useAbs ? Swift.abs(row[i]) : row[i])
+        }
+    }
+
+    /// The first alias that names a real dimension, case-insensitively — Netdata has renamed
+    /// dimensions across versions (`system.net`: InOctets/OutOctets vs received/sent;
+    /// `system.io`: in/out vs reads/writes) and an exact single-name match left the Network and
+    /// Disk I/O charts empty ("waiting for data…") on mismatched agents while tiles and Load
+    /// (whose names never changed) rendered fine. Mirrors netdata.rs `dim_by_alias_abs`.
+    static func seriesByAlias(
+        _ d: NetdataData, _ aliases: [String], abs useAbs: Bool = true
+    ) -> [(Double, Double)] {
+        for a in aliases {
+            guard let i = d.labels.firstIndex(where: { $0.caseInsensitiveCompare(a) == .orderedSame }),
+                  i >= 1
+            else { continue }
+            return d.ascending.compactMap { row in
+                guard let ts = row.first, i < row.count else { return nil }
+                return (ts, useAbs ? Swift.abs(row[i]) : row[i])
+            }
+        }
+        return []
+    }
+
+    /// Every dimension as its own line under the agent's own label — the fallback when none of
+    /// our known names match: real data with the agent's names beats an empty chart. Mirrors
+    /// netdata.rs `all_dims_abs`.
+    static func allSeries(_ d: NetdataData) -> [(String, [(Double, Double)])] {
+        guard d.labels.count > 1 else { return [] }
+        return (1..<d.labels.count).compactMap { i in
+            let pts = d.ascending.compactMap { row -> (Double, Double)? in
+                guard let ts = row.first, i < row.count else { return nil }
+                return (ts, Swift.abs(row[i]))
+            }
+            return pts.isEmpty ? nil : (d.labels[i], pts)
         }
     }
 }
@@ -314,25 +354,46 @@ final class NetdataClient: NSObject, URLSessionDelegate {
     }
 
     /// A multi-line chart. `kind`: "net" (in/out bytes/s), "diskio" (read/write KiB/s→bytes/s),
-    /// "load" (1m/5m/15m). Missing dims drop their line.
+    /// "load" (1m/5m/15m). Each line matches its dimension by ANY known Netdata name for it
+    /// (labels changed across agent versions); if nothing matches, every dimension charts under
+    /// the agent's own label rather than sitting on "waiting for data…". Mirrors netdata.rs.
     func chart(host: String, cfg: NetdataEndpointCfg, kind: String) async -> [ChartLine] {
-        let spec: (chart: String, dims: [(String, String)], scale: Double, abs: Bool)
+        let spec: (chart: String, dims: [(String, [String])], scale: Double, abs: Bool)
         switch kind {
-        case "net": spec = ("system.net", [("in", "InOctets"), ("out", "OutOctets")], 1, true)
-        case "diskio": spec = ("system.io", [("read", "in"), ("write", "out")], 1024, true)
-        case "load": spec = ("system.load", [("1m", "load1"), ("5m", "load5"), ("15m", "load15")], 1, false)
+        case "net":
+            spec = (
+                "system.net",
+                [("in", ["InOctets", "received", "in"]), ("out", ["OutOctets", "sent", "out"])],
+                1, true
+            )
+        case "diskio":
+            spec = (
+                "system.io",
+                [("read", ["in", "reads", "read"]), ("write", ["out", "writes", "write"])],
+                1024, true
+            )
+        case "load":
+            spec = (
+                "system.load",
+                [("1m", ["load1"]), ("5m", ["load5"]), ("15m", ["load15"])],
+                1, false
+            )
         default: return []
         }
         guard let d = try? await fetch(host: host, cfg: cfg, chart: spec.chart, afterSecs: 300, points: 90) else {
             return []
         }
-        return spec.dims.compactMap { (label, dim) in
-            let pts = NetdataMath.series(d, dim, abs: spec.abs)
-            guard !pts.isEmpty else { return nil }
-            return ChartLine(
+        let toLine = { (label: String, pts: [(Double, Double)]) -> ChartLine in
+            ChartLine(
                 label: label,
                 points: pts.map { (Date(timeIntervalSince1970: $0.0), $0.1 * spec.scale) })
         }
+        let matched = spec.dims.compactMap { (label, aliases) -> ChartLine? in
+            let pts = NetdataMath.seriesByAlias(d, aliases, abs: spec.abs)
+            return pts.isEmpty ? nil : toLine(label, pts)
+        }
+        if !matched.isEmpty { return matched }
+        return NetdataMath.allSeries(d).map { toLine($0.0, $0.1) }
     }
 
     /// Active alarms from `/api/v1/alarms?active`.
