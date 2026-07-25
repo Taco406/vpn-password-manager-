@@ -25,6 +25,10 @@ that bumps the app version** — that's how "the changelog updates on every merg
   closes" loop); an update that fails to apply now says so once, plainly, with the manual download
   link, instead of retrying forever; and Settings → Updates detects a second installed copy and
   shows exactly where it is and how to remove it.
+- **Mac: an installed WireGuard is now actually found.** Apps opened from Finder don't see the
+  folders Homebrew installs into, so NorthKey showed WireGuard as missing — and couldn't start the
+  tunnel — even right after you installed it. The app now looks in the standard install locations
+  too, on top of the usual search.
 - **Mac: a synced token that can't be saved now says why.** If macOS's keychain refuses to store a
   token that arrived from your other devices, Account & Sync shows the reason — instead of the
   Servers screen just staying empty with no explanation.

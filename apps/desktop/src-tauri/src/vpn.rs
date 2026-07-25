@@ -273,7 +273,7 @@ fn wg_bin() -> String {
         if cfg!(windows) {
             r"C:\Program Files\WireGuard\wg.exe".to_string()
         } else {
-            "wg".to_string()
+            find_bin("wg").unwrap_or_else(|| "wg".to_string())
         }
     })
 }
@@ -297,6 +297,26 @@ fn which_on_path(bin: &str) -> Option<String> {
     None
 }
 
+/// `bin` on PATH — or in the package-manager dirs a Finder-launched app can't see. macOS GUI
+/// apps inherit a minimal PATH (/usr/bin:/bin:/usr/sbin:/sbin), so Homebrew's /opt/homebrew/bin
+/// (Apple Silicon) and /usr/local/bin (Intel) — where `brew install wireguard-tools` puts
+/// wg/wg-quick — are invisible to the PATH search alone. That made a genuinely installed
+/// WireGuard show as "not installed" AND broke the wg-quick/wg spawns at connect time.
+fn find_bin(bin: &str) -> Option<String> {
+    if let Some(p) = which_on_path(bin) {
+        return Some(p);
+    }
+    if !cfg!(windows) {
+        for dir in ["/opt/homebrew/bin", "/usr/local/bin", "/opt/local/bin"] {
+            let cand = std::path::Path::new(dir).join(bin);
+            if cand.is_file() {
+                return Some(cand.to_string_lossy().to_string());
+            }
+        }
+    }
+    None
+}
+
 /// Whether the OS WireGuard tooling is installed, and the path/command we found (for display).
 /// Honors the `SENTINEL_WIREGUARD_EXE` / `SENTINEL_WG_EXE` overrides used in dev/tests.
 fn wireguard_installed() -> (bool, Option<String>) {
@@ -313,7 +333,7 @@ fn wireguard_installed() -> (bool, Option<String>) {
             return (true, Some(wg));
         }
         for bin in ["wg-quick", "wg"] {
-            if let Some(p) = which_on_path(bin) {
+            if let Some(p) = find_bin(bin) {
                 return (true, Some(p));
             }
         }
@@ -502,7 +522,8 @@ impl WgController for SystemWgController {
                 return Err(e);
             }
         } else {
-            run("wg-quick", &["up", &path]).await?;
+            let wgq = find_bin("wg-quick").unwrap_or_else(|| "wg-quick".to_string());
+            run(&wgq, &["up", &path]).await?;
         }
 
         // Consider the tunnel "up" only once a real handshake lands (so "Connected" never lies).
@@ -554,7 +575,8 @@ impl WgController for SystemWgController {
         let res = if cfg!(windows) {
             run(&wireguard_bin(), &["/uninstalltunnelservice", TUNNEL]).await
         } else {
-            run("wg-quick", &["down", &path]).await
+            let wgq = find_bin("wg-quick").unwrap_or_else(|| "wg-quick".to_string());
+            run(&wgq, &["down", &path]).await
         };
         let _ = std::fs::remove_file(&self.conf_path);
         // Scrub any routes/DNS the tunnel could leave behind so tearing it down can never strand
