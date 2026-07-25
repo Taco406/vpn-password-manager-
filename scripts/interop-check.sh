@@ -142,4 +142,22 @@ else
     echo "skip: repo identity unknown (no GITHUB_REPOSITORY, no origin remote)"
 fi
 
+# 14. Every command name the desktop bridge invokes (stringly: inv("…") / core.invoke("…"))
+#     must be registered in main.rs's generate_handler![…]. No compiler crosses this TS↔Rust
+#     boundary — a typo or a forgotten registration only fails at CLICK time in the shipped app.
+#     (Arg-key casing is still unguarded; this covers the names.)
+bridge_cmds=$(cat apps/desktop/src/bridge/*.ts | tr '\n' ' ' \
+    | grep -oE '\b(inv(<[^(]{0,80})?|invoke)\( *"[a-z0-9_]+"' \
+    | grep -oE '"[a-z0-9_]+"' | tr -d '"' | sort -u)
+reg_cmds=$(sed -n '/generate_handler!\[/,/\])/p' apps/desktop/src-tauri/src/main.rs \
+    | grep -oE '[a-z0-9_:]+' | sed 's/.*:://' | grep -v '^tauri$\|^generate_handler$' | sort -u)
+[ -n "$bridge_cmds" ] || fail "bridge command extraction found nothing (pattern drift?)"
+[ -n "$reg_cmds" ] || fail "generate_handler extraction found nothing (main.rs moved?)"
+missing=""
+for c in $bridge_cmds; do
+    echo "$reg_cmds" | grep -qx "$c" || missing="$missing $c"
+done
+[ -z "$missing" ] || fail "bridge invokes unregistered command(s):$missing"
+echo "ok: all $(echo "$bridge_cmds" | wc -l) bridge-invoked commands are registered in main.rs"
+
 echo "All interop checks passed."

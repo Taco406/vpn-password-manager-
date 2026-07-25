@@ -81,7 +81,7 @@ fails, fix the other side of the contract — **never loosen the check**.
 | ghcr image owner + updater endpoint (hardcoded repo identity) | `sync.rs`/`tauri.conf.json` ↔ this repo's owner/name | interop-check (repo-aware) |
 | VPN callback HMAC (`pubkey‖ip`, hex, JSON keys) | embedded Python in `cloudinit.rs` ↔ `callback.rs::verify_callback` | cloudinit template test |
 | Shipped SQL migrations (byte-frozen) | `services/api/migrations/*.sql` ↔ every deployed server's `_sqlx_migrations` checksums | `scripts/migrations-check.sh` + manifest |
-| Desktop bridge command names + arg keys (~120 commands, camelCase↔snake_case) | `apps/desktop/src/bridge` ↔ `src-tauri` `#[tauri::command]` registrations | **no guard yet** — verify by hand when touching; a generator/parser check is open backlog |
+| Desktop bridge command names + arg keys (~120 commands, camelCase↔snake_case) | `apps/desktop/src/bridge` ↔ `src-tauri` `#[tauri::command]` registrations | interop-check (names, since 0.1.61); arg-key casing still by hand |
 
 **Wire-format policy (unguardable by grep, so it's a rule)**: server JSON field names
 (`ciphertext_b64`, `blob_b64`, `access_token`, …) are read stringly by Swift and re-declared by
