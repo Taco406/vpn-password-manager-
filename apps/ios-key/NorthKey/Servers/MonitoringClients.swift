@@ -128,6 +128,12 @@ struct NetdataEndpointCfg: Decodable {
     /// synced `netdata_auth` map — NOT part of the `netdata_config` JSON, so it decodes to nil.
     var authHeader: String? = nil
 
+    /// Whether this phone can actually read the agent: either it needs no login, or the synced
+    /// credential for it has arrived. Both the list and the detail dashboard gate on this, so they
+    /// can never disagree — the detail view once refused every auth-protected server outright
+    /// while the list showed the same server as "Live".
+    var canRead: Bool { !hasAuth || !(authHeader ?? "").isEmpty }
+
     static func map(fromJSON json: String) -> [String: NetdataEndpointCfg] {
         guard !json.isEmpty, let data = json.data(using: .utf8) else { return [:] }
         return (try? JSONDecoder().decode([String: NetdataEndpointCfg].self, from: data)) ?? [:]
