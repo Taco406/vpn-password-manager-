@@ -965,11 +965,14 @@ export interface SettingsSyncStatusInfo {
   google: boolean;
   hetzner: boolean;
   netdata: boolean;
+  /** Settings that arrived from another device but this one couldn't store (typically a failed
+   * OS keychain write). Empty normally — when not, this is why a provider shows no servers. */
+  applyErrors: string[];
 }
 
 export async function settingsSyncStatus(): Promise<SettingsSyncStatusInfo> {
   if (!inTauri())
-    return { present: false, updatedAt: 0, linode: false, google: false, hetzner: false, netdata: false };
+    return { present: false, updatedAt: 0, linode: false, google: false, hetzner: false, netdata: false, applyErrors: [] };
   return inv<SettingsSyncStatusInfo>("settings_sync_status");
 }
 
@@ -987,7 +990,7 @@ export async function settingsReshare(): Promise<ReshareResult> {
     return {
       pushed: false,
       error: "Sharing works in the installed desktop app.",
-      status: { present: false, updatedAt: 0, linode: false, google: false, hetzner: false, netdata: false },
+      status: { present: false, updatedAt: 0, linode: false, google: false, hetzner: false, netdata: false, applyErrors: [] },
     };
   return inv<ReshareResult>("settings_reshare");
 }

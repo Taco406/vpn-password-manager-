@@ -1948,6 +1948,11 @@ fn settings_item_id() -> uuid::Uuid {
     uuid::Uuid::parse_str(SETTINGS_ITEM_ID).expect("const uuid")
 }
 
+/// Failures from the most recent settings apply (`sync_device_settings`), surfaced through
+/// `settings_sync_status` so the UI can say "the token arrived but this device couldn't store it"
+/// instead of silently showing an empty Servers screen.
+static APPLY_ERRORS: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
 /// Current local values (empty string = unset), in stable field order.
 fn local_settings(state: &State<'_, AppState>) -> Vec<(&'static str, String)> {
     let dir = data_dir(state);
@@ -1985,52 +1990,88 @@ pub(crate) fn sync_device_settings(state: &State<'_, AppState>) -> bool {
         Some(item) => {
             // Vault → device. The vault copy is authoritative: local edits go through
             // `settings_sync_write`, which updates the item first.
-            for f in &item.custom_fields {
-                let v = f.value.trim();
-                if v.is_empty() {
-                    continue;
+            //
+            // Every failure here is RECORDED, never swallowed. These writes go to the OS keychain,
+            // which really can fail (a locked or permission-denied macOS login keychain is the
+            // common one) — and when it did, the token arrived in the vault, vanished on the way
+            // to the keychain, and the Servers screen rendered an empty "add a token" state with
+            // no error anywhere. That is how a Mac showed no Hetzner servers while the same
+            // account's Windows box showed all four settings synced.
+            let mut apply_errors: Vec<String> = Vec::new();
+            {
+                let mut note = |label: &str, e: String| {
+                    let msg = format!("{label}: {e}");
+                    crate::applog::info("sync.settings", &format!("apply failed — {msg}"));
+                    apply_errors.push(msg);
+                };
+                for f in &item.custom_fields {
+                    let v = f.value.trim();
+                    if v.is_empty() {
+                        continue;
+                    }
+                    match f.name.as_str() {
+                        SET_LINODE => {
+                            if crate::vpn::get_token().as_deref() != Some(v) {
+                                if let Err(e) = crate::vpn::set_token(v) {
+                                    note("Linode token", e.to_string());
+                                }
+                            }
+                        }
+                        SET_GCLIENT => {
+                            let dir = data_dir(state);
+                            let mut cfg = load_config(&dir);
+                            if cfg.google_client_id.as_deref() != Some(v) {
+                                cfg.google_client_id = Some(v.to_string());
+                                let _ = save_config(&dir, &cfg);
+                            }
+                        }
+                        SET_GSECRET => {
+                            if kc_get(KC_GSECRET).as_deref() != Some(v) {
+                                if let Err(e) = kc_set(KC_GSECRET, v) {
+                                    note("Google client secret", e);
+                                }
+                            }
+                        }
+                        SET_HETZNER => {
+                            if crate::servers::hetzner_get_token().as_deref() != Some(v) {
+                                if let Err(e) = crate::servers::hetzner_set_token(v) {
+                                    note("Hetzner token", e);
+                                } else if crate::servers::hetzner_get_token().as_deref() != Some(v)
+                                {
+                                    // Wrote without an error but reading it straight back doesn't
+                                    // return it — a silently-rejected keychain write. Catch it here
+                                    // rather than let the Servers screen render an empty list.
+                                    note(
+                                        "Hetzner token",
+                                        "saved to this device's keychain but couldn't be read back"
+                                            .into(),
+                                    );
+                                }
+                            }
+                        }
+                        SET_NETDATA => {
+                            crate::servers::apply_netdata_config_json(&data_dir(state), v);
+                        }
+                        SET_PREFS => {
+                            crate::commands::apply_prefs_sync(&data_dir(state), v);
+                        }
+                        SET_WATCHDOG => {
+                            crate::servers::apply_watchdog_config_json(&data_dir(state), v);
+                        }
+                        SET_NDAUTH => {
+                            crate::servers::apply_netdata_auth_json(v);
+                        }
+                        SET_AOVPN => {
+                            crate::vpn::persistent_sync_import(&data_dir(state), v);
+                        }
+                        _ => {}
+                    }
                 }
-                match f.name.as_str() {
-                    SET_LINODE => {
-                        if crate::vpn::get_token().as_deref() != Some(v) {
-                            let _ = crate::vpn::set_token(v);
-                        }
-                    }
-                    SET_GCLIENT => {
-                        let dir = data_dir(state);
-                        let mut cfg = load_config(&dir);
-                        if cfg.google_client_id.as_deref() != Some(v) {
-                            cfg.google_client_id = Some(v.to_string());
-                            let _ = save_config(&dir, &cfg);
-                        }
-                    }
-                    SET_GSECRET => {
-                        if kc_get(KC_GSECRET).as_deref() != Some(v) {
-                            let _ = kc_set(KC_GSECRET, v);
-                        }
-                    }
-                    SET_HETZNER => {
-                        if crate::servers::hetzner_get_token().as_deref() != Some(v) {
-                            let _ = crate::servers::hetzner_set_token(v);
-                        }
-                    }
-                    SET_NETDATA => {
-                        crate::servers::apply_netdata_config_json(&data_dir(state), v);
-                    }
-                    SET_PREFS => {
-                        crate::commands::apply_prefs_sync(&data_dir(state), v);
-                    }
-                    SET_WATCHDOG => {
-                        crate::servers::apply_watchdog_config_json(&data_dir(state), v);
-                    }
-                    SET_NDAUTH => {
-                        crate::servers::apply_netdata_auth_json(v);
-                    }
-                    SET_AOVPN => {
-                        crate::vpn::persistent_sync_import(&data_dir(state), v);
-                    }
-                    _ => {}
-                }
+            }
+
+            // Publish whatever failed above (empty on a clean apply, which clears a stale warning).
+            if let Ok(mut slot) = APPLY_ERRORS.lock() {
+                *slot = apply_errors;
             }
 
             // Self-heal (device → vault). The apply loop above NEVER fills a field the synced item
@@ -2159,6 +2200,13 @@ pub struct SettingsSyncStatus {
     pub google: bool,
     pub hetzner: bool,
     pub netdata: bool,
+    /// Settings that arrived from another device but this one couldn't store (usually an OS
+    /// keychain write that failed). Empty normally; shown verbatim in the UI when not.
+    pub apply_errors: Vec<String>,
+}
+
+fn apply_errors_snapshot() -> Vec<String> {
+    APPLY_ERRORS.lock().map(|g| g.clone()).unwrap_or_default()
 }
 
 #[tauri::command]
@@ -2181,6 +2229,7 @@ pub async fn settings_sync_status(
             google: false,
             hetzner: false,
             netdata: false,
+            apply_errors: apply_errors_snapshot(),
         });
     };
     let set = |name: &str| {
@@ -2195,6 +2244,7 @@ pub async fn settings_sync_status(
         google: set(SET_GCLIENT),
         hetzner: set(SET_HETZNER),
         netdata: set(SET_NETDATA),
+        apply_errors: apply_errors_snapshot(),
     })
 }
 
@@ -2283,6 +2333,7 @@ pub async fn settings_reshare(
             google,
             hetzner,
             netdata,
+            apply_errors: apply_errors_snapshot(),
         },
     })
 }

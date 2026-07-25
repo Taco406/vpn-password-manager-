@@ -1792,6 +1792,25 @@ function SharedSettings() {
           </div>
         ))}
       </div>
+      {/* A setting that arrived but couldn't be stored locally (a failed OS keychain write is the
+          usual cause) used to be invisible: the token showed as synced here while the Servers
+          screen sat empty with no explanation. Say it plainly instead. */}
+      {st?.applyErrors && st.applyErrors.length > 0 && (
+        <div className="mt-2 rounded-[8px] border border-[var(--danger)]/40 bg-[var(--danger)]/10 px-2.5 py-2">
+          <div className="text-xs font-medium text-[var(--danger)]">
+            This device received these settings but couldn't save them:
+          </div>
+          <ul className="mt-1 list-inside list-disc text-xs text-[var(--text-secondary)]">
+            {st.applyErrors.map((e) => (
+              <li key={e}>{e}</li>
+            ))}
+          </ul>
+          <div className="mt-1 text-xs text-[var(--text-muted)]">
+            That's why the matching servers don't appear here. It's usually the system keychain
+            refusing the write — unlock your keychain (or allow NorthKey access) and sync again.
+          </div>
+        </div>
+      )}
       <button onClick={() => void push()} disabled={busy} className={`${btnCls} mt-2`}>
         {busy ? "Sharing…" : "Push to all my devices"}
       </button>
