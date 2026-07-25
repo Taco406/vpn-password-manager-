@@ -976,6 +976,14 @@ export async function settingsSyncStatus(): Promise<SettingsSyncStatusInfo> {
   return inv<SettingsSyncStatusInfo>("settings_sync_status");
 }
 
+/** Windows: folders holding a SECOND installed copy of NorthKey (per-machine MSI next to the
+ * per-user NSIS). Two copies is how the update loop perpetuates — shortcuts keep opening the
+ * stale one. Empty on a healthy machine and on other platforms. */
+export async function updateInstallHealth(): Promise<string[]> {
+  if (!inTauri()) return [];
+  return inv<string[]>("update_install_health");
+}
+
 /** The honest result of an explicit "Push to all my devices": whether it actually reached the
  * server (`pushed`), a message when it didn't (`error`), and what the shared item now carries.
  * Unlike `settingsSyncWrite` this does NOT swallow a failed push. */

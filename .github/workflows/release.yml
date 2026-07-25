@@ -306,6 +306,12 @@ jobs:
           # apps on that platform would silently stop updating.
           releaseDraft: true
           prerelease: false
+          # The generic windows-x86_64 key in latest.json must point at the per-user NSIS
+          # -setup.exe, NOT the MSI (the default when both are built). An NSIS-installed app
+          # updating via the MSI installs a SECOND per-machine copy alongside itself — two
+          # NorthKeys, mismatched versions, shortcuts pointing at either — which is exactly the
+          # "opens, tries to update, closes, still old" loop the user kept hitting.
+          updaterJsonPreferNsis: true
           args: ${{ matrix.args }}
 
   # Verify the draft is complete, then publish it atomically. If anything here fails, the draft

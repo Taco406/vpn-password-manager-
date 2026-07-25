@@ -1,7 +1,7 @@
 import { useEffect } from "react";
 import { HashRouter, Routes, Route, Navigate } from "react-router-dom";
 import { useApp } from "./stores/app";
-import { checkForUpdate } from "./updater";
+import { checkForUpdate, failedInstallAttempt } from "./updater";
 import { Layout } from "./components/Layout";
 import { CommandPalette } from "./components/palette/CommandPalette";
 import { Toaster, toast } from "./components/Toast";
@@ -31,11 +31,25 @@ export function App() {
     // Auto-installing here caused a close-and-relaunch loop on Windows when the install couldn't
     // apply: the app would keep quitting to "update" and never finish. Notify-only instead — the
     // user installs from Settings → Updates when they choose to. (autoInstall=false)
-    void checkForUpdate((s) => {
-      if (s.state === "ready" && s.version) {
-        toast(`Update ${s.version} is available — install it in Settings → Updates.`, "info");
+    //
+    // And if the LAST install attempt demonstrably didn't apply (installer ran, version
+    // unchanged), say that instead of re-advertising the same doomed update — the difference
+    // between a loop and a fixable one-line error message.
+    void failedInstallAttempt().then((failedTo) => {
+      if (failedTo) {
+        toast(
+          `The update to ${failedTo} didn't apply. Download the installer once from ` +
+            `github.com/Taco406/vpn-password-manager-/releases/latest and run it — your data is kept.`,
+          "error",
+        );
+        return;
       }
-    }, false);
+      void checkForUpdate((s) => {
+        if (s.state === "ready" && s.version) {
+          toast(`Update ${s.version} is available — install it in Settings → Updates.`, "info");
+        }
+      }, false);
+    });
   }, [init, refreshSettings]);
 
   return (
