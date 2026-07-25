@@ -57,6 +57,23 @@ jobs:
           mkdir -p ~/private_keys
           printf '%s' "$P8" > ~/private_keys/AuthKey_${KEY_ID}.p8
 
+      # Cloud signing mints a NEW distribution certificate on every run (each runner is a fresh
+      # machine with no access to the previous private key), and Apple caps how many an account
+      # may hold. Once the cap is hit, every later build dies at Archive with "Choose a certificate
+      # to revoke" — while the release itself publishes fine, so the desktop updates and the phone
+      # silently stops receiving builds. Revoking one by hand buys exactly one build. Prune first
+      # instead. Safe: builds already on TestFlight stay valid; a distribution cert is only needed
+      # to sign a NEW upload.
+      - name: Free a signing slot (revoke stale distribution certificates)
+        env:
+          KEY_ID: ${{ secrets.APPSTORE_API_KEY_ID }}
+          ISSUER: ${{ secrets.APPSTORE_API_ISSUER_ID }}
+          P8: ${{ secrets.APPSTORE_API_PRIVATE_KEY }}
+        run: |
+          python3 -m pip install --quiet --break-system-packages 'pyjwt[crypto]' \
+            || python3 -m pip install --quiet 'pyjwt[crypto]'
+          python3 scripts/appstore-prune-certs.py
+
       - name: Archive (cloud signing)
         env:
           KEY_ID: ${{ secrets.APPSTORE_API_KEY_ID }}
