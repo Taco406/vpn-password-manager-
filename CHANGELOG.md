@@ -8,6 +8,29 @@ The format follows [Keep a Changelog](https://keepachangelog.com/). Versions are
 [semantic](https://semver.org/). **Add a new `## [x.y.z]` section at the top in the same PR
 that bumps the app version** — that's how "the changelog updates on every merge."
 
+## [0.1.61] — 2026-07-25
+
+### Added
+- **See every Docker container on your servers.** The server dashboard (computer *and*
+  phone) now has a Containers section: each container gets its own row with live CPU and
+  memory, and tapping it opens full charts. New containers appear on their own — nothing
+  to configure.
+- **Browse every metric Netdata measures.** A searchable "All charts" browser on both
+  platforms: type "docker", "disk", or an app's name and render any of the hundreds of
+  charts the agent exposes — not just the fixed set the dashboard shows.
+- **Disks, Network interfaces, and Services groups** on the computer's dashboard: the
+  metrics you actually go looking for, one click each, without knowing Netdata's naming.
+- **Recent alerts (24h).** The dashboard now shows what fired *and* cleared in the last
+  day with times — not just what's alarming this second.
+
+### Fixed
+- **Your Hetzner login now reliably reaches the phone.** Devices merge their shared
+  settings additively — a device that only knows some of your tokens can no longer erase
+  the others while syncing. This was why the phone kept showing only the Linode server.
+- **iPhone builds upload again.** The build system now clears Apple's signing-certificate
+  cap automatically (it was full of stale development certificates), which had silently
+  kept every phone update since 1.58 from reaching TestFlight.
+
 ## [0.1.60] — 2026-07-25
 
 ### Fixed
