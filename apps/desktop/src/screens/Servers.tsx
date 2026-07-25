@@ -36,6 +36,10 @@ import {
   netdataProbe,
   netdataMetric,
   netdataSeries,
+  netdataChartsIndex,
+  netdataChartData,
+  type NetdataChartMeta,
+  type NetdataChartsIndex,
   netdataAlarms,
   serversFirewallGet,
   serversFirewallAllowPort,
@@ -907,6 +911,218 @@ function NetdataLive({ s, onDisable }: { s: ManagedServer; onDisable: () => void
           ))
         )}
       </div>
+
+      <NetdataExplorer s={s} host={host} />
+    </div>
+  );
+}
+
+// --- Containers + the all-charts browser (v0.1.61) --------------------------
+// One index fetch powers both: every Docker/cgroup container gets its own live card, and the
+// browser makes EVERY chart the agent exposes reachable — per-disk, per-interface, per-service,
+// apps.* — instead of only the fixed system.* set above.
+
+const CONTAINER_COLORS = ["#22d3ee", "#f472b6", "#a78bfa", "#34d399", "#fbbf24"];
+
+function NetdataExplorer({ s, host }: { s: ManagedServer; host: string }) {
+  const [index, setIndex] = useState<NetdataChartsIndex | null>(null);
+  const [err, setErr] = useState("");
+
+  useEffect(() => {
+    let alive = true;
+    const tick = async () => {
+      try {
+        const idx = await netdataChartsIndex(s.provider, s.id, host);
+        if (alive) {
+          setIndex(idx);
+          setErr("");
+        }
+      } catch (e) {
+        if (alive) setErr(errMsg(e));
+      }
+    };
+    void tick();
+    const t = window.setInterval(() => void tick(), 60_000); // containers come and go with deploys
+    return () => {
+      alive = false;
+      window.clearInterval(t);
+    };
+  }, [s.provider, s.id, host]);
+
+  if (err) {
+    return <p className="mt-3 text-[11px] text-[var(--text-muted)]">Chart index unavailable: {err}</p>;
+  }
+  if (!index) return null;
+  return (
+    <div>
+      {index.containers.length > 0 && (
+        <div className="mt-4">
+          <div className="mb-2 text-[11px] font-medium text-[var(--text-secondary)]">
+            Containers ({index.containers.length})
+          </div>
+          <div className="space-y-2">
+            {index.containers.map((name) => (
+              <ContainerRow key={name} s={s} host={host} name={name} />
+            ))}
+          </div>
+        </div>
+      )}
+      <ChartBrowser s={s} host={host} charts={index.charts} />
+    </div>
+  );
+}
+
+/** One container's live vitals: current CPU + memory, expandable to full charts. */
+function ContainerRow({ s, host, name }: { s: ManagedServer; host: string; name: string }) {
+  const [open, setOpen] = useState(false);
+  const [cpu, setCpu] = useState<NetdataSeriesLine[]>([]);
+  const [mem, setMem] = useState<NetdataSeriesLine[]>([]);
+
+  useEffect(() => {
+    let alive = true;
+    const tick = async () => {
+      const [c, m] = await Promise.allSettled([
+        netdataChartData(s.provider, s.id, host, `cgroup_${name}.cpu`, 300, 60),
+        netdataChartData(s.provider, s.id, host, `cgroup_${name}.mem`, 300, 60),
+      ]);
+      if (!alive) return;
+      if (c.status === "fulfilled") setCpu(c.value);
+      if (m.status === "fulfilled") setMem(m.value);
+    };
+    void tick();
+    const t = window.setInterval(() => void tick(), 10_000);
+    return () => {
+      alive = false;
+      window.clearInterval(t);
+    };
+  }, [s.provider, s.id, host, name]);
+
+  // Current CPU % = sum of the chart's dimensions' latest values; memory = summed MiB.
+  const lastSum = (lines: NetdataSeriesLine[]) =>
+    lines.reduce((acc, l) => acc + (l.points.at(-1)?.[1] ?? 0), 0);
+  const cpuNow = cpu.length ? lastSum(cpu) : undefined;
+  const memNow = mem.length ? lastSum(mem) : undefined;
+
+  return (
+    <div className="rounded-[8px] bg-[var(--bg-inset)] px-2.5 py-1.5">
+      <button onClick={() => setOpen(!open)} className="flex w-full items-center gap-2 text-left">
+        {open ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
+        <span className="mono min-w-0 flex-1 truncate text-xs">{name}</span>
+        <span className="mono text-[11px]" style={{ color: TONE_COLOR[toneFor(cpuNow, 75, 90)] }}>
+          {cpuNow === undefined ? "—" : `${cpuNow.toFixed(1)}%`}
+        </span>
+        <span className="mono w-20 text-right text-[11px] text-[var(--text-muted)]">
+          {memNow === undefined ? "—" : fmtMiB(memNow)}
+        </span>
+      </button>
+      {open && (
+        <div className="mt-2 grid gap-4 lg:grid-cols-2">
+          <ChartBlock title="CPU (%)" series={toSeries(cpu, CONTAINER_COLORS)} unit="pct" />
+          <ChartBlock title="Memory (MiB)" series={toSeries(mem, CONTAINER_COLORS)} unit="iops" />
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** MiB → a compact human string (Netdata cgroup mem charts report MiB). */
+function fmtMiB(mib: number): string {
+  return mib >= 1024 ? `${(mib / 1024).toFixed(1)} GiB` : `${mib.toFixed(0)} MiB`;
+}
+
+/** Search-and-render for EVERY chart the agent exposes. */
+function ChartBrowser({
+  s,
+  host,
+  charts,
+}: {
+  s: ManagedServer;
+  host: string;
+  charts: NetdataChartMeta[];
+}) {
+  const [open, setOpen] = useState(false);
+  const [q, setQ] = useState("");
+  const [sel, setSel] = useState<NetdataChartMeta | null>(null);
+  const [lines, setLines] = useState<NetdataSeriesLine[]>([]);
+
+  useEffect(() => {
+    if (!sel) return;
+    let alive = true;
+    const tick = async () => {
+      try {
+        const l = await netdataChartData(s.provider, s.id, host, sel.id, 300, 90);
+        if (alive) setLines(l);
+      } catch {
+        if (alive) setLines([]);
+      }
+    };
+    setLines([]);
+    void tick();
+    const t = window.setInterval(() => void tick(), 8000);
+    return () => {
+      alive = false;
+      window.clearInterval(t);
+    };
+  }, [s.provider, s.id, host, sel]);
+
+  const needle = q.trim().toLowerCase();
+  const matches = needle
+    ? charts
+        .filter(
+          (c) =>
+            c.id.toLowerCase().includes(needle) ||
+            c.title.toLowerCase().includes(needle) ||
+            c.family.toLowerCase().includes(needle),
+        )
+        .slice(0, 12)
+    : [];
+
+  return (
+    <div className="mt-4">
+      <button
+        onClick={() => setOpen(!open)}
+        className="flex items-center gap-1.5 text-[11px] font-medium text-[var(--text-secondary)] hover:text-[var(--text-primary)]"
+      >
+        {open ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
+        All charts ({charts.length})
+      </button>
+      {open && (
+        <div className="mt-2">
+          <input
+            value={q}
+            onChange={(e) => setQ(e.target.value)}
+            placeholder="Search every metric this agent has — disk, docker, systemd, app…"
+            className={`${inputCls} w-full text-xs`}
+          />
+          {matches.length > 0 && (
+            <div className="mt-1 max-h-48 overflow-y-auto rounded-[8px] border border-[var(--border-subtle)]">
+              {matches.map((c) => (
+                <button
+                  key={c.id}
+                  onClick={() => {
+                    setSel(c);
+                    setQ("");
+                  }}
+                  className="flex w-full items-baseline gap-2 px-2 py-1 text-left text-[11px] hover:bg-[var(--bg-inset)]"
+                >
+                  <span className="mono">{c.id}</span>
+                  <span className="min-w-0 flex-1 truncate text-[var(--text-muted)]">{c.title}</span>
+                  <span className="text-[var(--text-muted)]">{c.units}</span>
+                </button>
+              ))}
+            </div>
+          )}
+          {sel && (
+            <div className="mt-3">
+              <ChartBlock
+                title={`${sel.id} — ${sel.title}${sel.units ? ` (${sel.units})` : ""}`}
+                series={toSeries(lines, CONTAINER_COLORS)}
+                unit="iops"
+              />
+            </div>
+          )}
+        </div>
+      )}
     </div>
   );
 }
