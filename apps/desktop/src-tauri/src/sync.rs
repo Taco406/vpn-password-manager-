@@ -1756,7 +1756,8 @@ fn make_password_protected(dir: &std::path::Path, escrow: &[u8], vk: &VaultKey) 
     }
     let is_password_wrap =
         escrow.len() >= 8 && &escrow[0..4] == b"SNTL" && escrow[5] == WrapperType::Password.code();
-    if is_password_wrap && std::fs::write(crate::state::wrap_path(dir), escrow).is_ok() {
+    if is_password_wrap && crate::state::write_atomic(&crate::state::wrap_path(dir), escrow).is_ok()
+    {
         let _ = crate::state::delete_key(); // password is now the only way in
     } else {
         let _ = kc_set(KC_VAULT_KEY, &STANDARD.encode(vk.key().as_bytes()));

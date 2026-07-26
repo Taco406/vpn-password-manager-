@@ -65,11 +65,16 @@ export function TimeSeriesChart({
     }
     const tMin = Math.min(...all.map((p) => p[0]));
     const tMax = Math.max(...all.map((p) => p[0]));
-    const vMax = unit === "pct" ? 100 : Math.max(...all.map((p) => p[1]), 1) * 1.15;
+    // Percent charts anchor to a full 0-100 axis so idle servers don't look busy, but they
+    // must still GROW past it: a percent series can legitimately exceed 100 (a CPU burst, a
+    // container summing several cores). Clamping to 100 drew a flat line at the top and hid a
+    // real scale bug for weeks — the axis stretches to the data instead.
+    const observedMax = Math.max(...all.map((p) => p[1]), 1);
+    const vMax = unit === "pct" ? Math.max(100, observedMax * 1.15) : observedMax * 1.15;
     const tSpan = Math.max(1, tMax - tMin);
 
     const x = (t: number) => padL + ((t - tMin) / tSpan) * plotW;
-    const y = (v: number) => 6 + plotH - (Math.min(v, vMax) / vMax) * plotH;
+    const y = (v: number) => 6 + plotH - (v / vMax) * plotH;
 
     // Grid + value labels (4 lines).
     ctx.strokeStyle = cssVar("--border-subtle", "#1c2531");

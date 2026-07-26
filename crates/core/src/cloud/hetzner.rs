@@ -684,6 +684,8 @@ mod tests {
         assert!((s.monthly - 4.99).abs() < 1e-9);
         assert_eq!(s.currency, "EUR");
         assert_eq!(s.memory_mb, 4096);
+        // vCPU count drives CPU normalization — it must survive parsing.
+        assert_eq!(s.vcpus, 2);
         assert_eq!(s.tags, vec!["env=prod".to_string(), "netdata".to_string()]);
         assert!(s.created_at.is_some());
 
@@ -691,6 +693,31 @@ mod tests {
         assert_eq!(next2, None);
         assert_eq!(s2[0].state, InstanceState::Stopped);
         assert_eq!(s2[0].hourly, 0.0);
+    }
+
+    #[test]
+    fn cpu_normalizes_to_whole_machine_and_never_clamps() {
+        // Hetzner gives each vCPU its own 100%, so a 2-vCPU box at ~69% of the machine reports
+        // ~138. That out-of-range value is what the chart used to flatten into a line at 100.
+        let body = r#"{"metrics": {"start": "x", "end": "y", "step": 60, "time_series": {
+            "cpu": {"values": [[1700000000, "137.4"], [1700000060, "210.0"]]}
+        }}}"#;
+        let mut m = parse_metrics(body).unwrap();
+        // Parsing stays provider-native — normalization is a separate, explicit step.
+        assert!((m.cpu_pct[0].value - 137.4).abs() < 1e-9);
+
+        crate::cloud::normalize_cpu_to_whole_machine(&mut m, 2);
+        assert!((m.cpu_pct[0].value - 68.7).abs() < 1e-9);
+        // 210 on 2 vCPU is 105% of the machine — kept, not clamped, so the chart can show it.
+        assert!((m.cpu_pct[1].value - 105.0).abs() < 1e-9);
+
+        // 1-vCPU (and unknown) servers are untouched.
+        let mut one = parse_metrics(body).unwrap();
+        crate::cloud::normalize_cpu_to_whole_machine(&mut one, 1);
+        assert!((one.cpu_pct[0].value - 137.4).abs() < 1e-9);
+        let mut unknown = parse_metrics(body).unwrap();
+        crate::cloud::normalize_cpu_to_whole_machine(&mut unknown, 0);
+        assert!((unknown.cpu_pct[0].value - 137.4).abs() < 1e-9);
     }
 
     #[test]

@@ -107,6 +107,31 @@ pub fn wrap_path(data_dir: &std::path::Path) -> PathBuf {
     data_dir.join("vault-key.wrap")
 }
 
+/// Write a file the vault cannot afford to lose, atomically: write a sibling temp file, flush
+/// it to disk, then rename over the target.
+///
+/// `vault-key.wrap` is the ONLY copy of the master-password-wrapped vault key — a crash or
+/// power cut during a plain `fs::write` (which truncates first) leaves a half-written blob and
+/// an unopenable vault. Rename within the same directory is atomic on every platform we ship,
+/// so a reader sees either the old blob or the new one, never a torn one.
+pub fn write_atomic(path: &std::path::Path, bytes: &[u8]) -> Result<(), String> {
+    use std::io::Write as _;
+    let tmp = path.with_extension("tmp");
+    {
+        let mut f = std::fs::File::create(&tmp).map_err(|e| format!("write temp: {e}"))?;
+        f.write_all(bytes).map_err(|e| format!("write temp: {e}"))?;
+        // Without the fsync the rename can land before the bytes do.
+        f.sync_all().map_err(|e| format!("flush temp: {e}"))?;
+    }
+    // Windows won't rename onto an existing file on some filesystems; remove first there.
+    #[cfg(windows)]
+    let _ = std::fs::remove_file(path);
+    std::fs::rename(&tmp, path).map_err(|e| {
+        let _ = std::fs::remove_file(&tmp);
+        format!("replace file: {e}")
+    })
+}
+
 /// Whether a master password is set (the wrapped-key blob exists on disk). When true, the
 /// plaintext keychain key has been removed and the vault only opens via the password.
 pub fn password_protected(data_dir: &std::path::Path) -> bool {

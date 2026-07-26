@@ -319,7 +319,7 @@ function ServerCharts({ s }: { s: ManagedServer }) {
     alive.current = true;
     const load = async () => {
       try {
-        const m = await serversMetrics(s.provider, s.id, windowSecs);
+        const m = await serversMetrics(s.provider, s.id, windowSecs, s.vcpus ?? 0);
         if (alive.current) {
           setMetrics(m);
           setErr("");
@@ -357,7 +357,7 @@ function ServerCharts({ s }: { s: ManagedServer }) {
       {metrics && (
         <div className="grid gap-4 md:grid-cols-2">
           <div>
-            <div className="mb-1 text-[11px] text-[var(--text-muted)]">CPU</div>
+            <div className="mb-1 text-[11px] text-[var(--text-muted)]">CPU (% of all cores)</div>
             <TimeSeriesChart
               unit="pct"
               height={140}

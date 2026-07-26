@@ -1,6 +1,7 @@
 import { useEffect } from "react";
 import { HashRouter, Routes, Route, Navigate } from "react-router-dom";
 import { useApp } from "./stores/app";
+import { useAutoLock } from "./hooks/useAutoLock";
 import { checkForUpdate, failedInstallAttempt } from "./updater";
 import { Layout } from "./components/Layout";
 import { CommandPalette } from "./components/palette/CommandPalette";
@@ -24,6 +25,9 @@ import { Report } from "./screens/Report";
 export function App() {
   const init = useApp((s) => s.init);
   const refreshSettings = useApp((s) => s.refreshSettings);
+  // Honour Settings → "Auto-lock after N minutes". Until now that slider changed a number in
+  // settings.json that nothing read.
+  useAutoLock(useApp((s) => s.settings?.autoLockMinutes));
   useEffect(() => {
     init();
     void refreshSettings();

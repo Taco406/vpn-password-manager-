@@ -268,6 +268,40 @@ impl SystemWgController {
     }
 }
 
+/// Write a file that contains a WireGuard `PrivateKey` line, readable ONLY by this user.
+///
+/// The tunnel config lands in the shared temp dir (that's where `wg-quick` / the Windows
+/// tunnel service expect it), so default permissions would leave a live private key
+/// world-readable on a multi-user box. Unix gets 0600 via the open mode — set BEFORE any
+/// bytes are written, so there is no window where the key exists at 0644. Windows temp is
+/// per-user (`%LOCALAPPDATA%\Temp`), so the default ACL is already user-only.
+fn write_private_conf(path: &std::path::Path, text: &str) -> CoreResult<()> {
+    #[cfg(unix)]
+    {
+        use std::io::Write as _;
+        use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
+        let mut f = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(path)
+            .map_err(|e| wg_err(format!("write conf: {e}")))?;
+        // `mode` only applies when the file is created, so a leftover 0644 file from an older
+        // build would keep its permissions. It is empty at this point (truncate), so tighten
+        // it before the key bytes go in.
+        f.set_permissions(std::fs::Permissions::from_mode(0o600))
+            .map_err(|e| wg_err(format!("secure conf: {e}")))?;
+        f.write_all(text.as_bytes())
+            .map_err(|e| wg_err(format!("write conf: {e}")))?;
+    }
+    #[cfg(not(unix))]
+    {
+        std::fs::write(path, text).map_err(|e| wg_err(format!("write conf: {e}")))?;
+    }
+    Ok(())
+}
+
 fn wg_bin() -> String {
     std::env::var("SENTINEL_WG_EXE").unwrap_or_else(|_| {
         if cfg!(windows) {
@@ -505,7 +539,7 @@ impl SystemWgController {
 impl WgController for SystemWgController {
     async fn up(&self, conf: &ClientConf) -> CoreResult<()> {
         let text = render_client_conf(conf);
-        std::fs::write(&self.conf_path, text).map_err(|e| wg_err(format!("write conf: {e}")))?;
+        write_private_conf(&self.conf_path, &text)?;
         let path = self.conf_path.to_string_lossy().to_string();
 
         if cfg!(windows) {
@@ -2899,4 +2933,30 @@ pub async fn vpn_nodes_destroy_all(
         .map_err(|e| e.to_string())?;
     write_kept(&data_dir, &HashSet::new());
     Ok(reaped.len())
+}
+
+#[cfg(test)]
+mod conf_perm_tests {
+    use super::*;
+
+    /// A tunnel config carries a live WireGuard private key and lands in the SHARED temp dir,
+    /// so it must never be group/world readable. Regression test for the 0644 default.
+    #[cfg(unix)]
+    #[test]
+    fn tunnel_conf_is_owner_only() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = std::env::temp_dir().join(format!("nk-conf-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("tunnel.conf");
+
+        // Even when a world-readable file is already there, the write must tighten it.
+        std::fs::write(&path, "stale").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+        write_private_conf(&path, "[Interface]\nPrivateKey = secret\n").unwrap();
+
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "tunnel conf must be owner-only, got {mode:o}");
+        std::fs::remove_dir_all(&dir).ok();
+    }
 }

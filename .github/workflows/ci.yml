@@ -31,8 +31,11 @@ jobs:
       # present on the runner. The desktop crate is glue over the tested core.
       - name: clippy
         run: cargo clippy --all-targets -- -D warnings
+      # The live-* features gate the real Linode/Hetzner/HIBP clients — the desktop app ships
+      # with them ON (src-tauri/Cargo.toml), so their parser tests must run here too. Without
+      # them every provider fixture test silently compiled out of CI.
       - name: test (core + cli + nm-host)
-        run: cargo test -p sentinel-core -p sentinel-cli -p sentinel-nm-host
+        run: cargo test -p sentinel-core --features live-linode,live-hetzner,live-hibp -p sentinel-cli -p sentinel-nm-host
       - name: production Argon2 profile smoke test
         run: cargo test -p sentinel-core --release argon2_production_profile -- --ignored --test-threads=1
       # The committed iOS golden fixture must unwrap with the CURRENT Rust crypto at production

@@ -95,7 +95,8 @@ fn seal_new(dir: &std::path::Path, password: &str, vk: &VaultKey) -> R<()> {
     rand::rngs::OsRng.fill_bytes(&mut salt);
     let kek = argon2id_kek(password.as_bytes(), &salt, Argon2Profile::Production);
     let blob = WrappedBlob::seal(WrapperType::Password, &kek, &salt, vk);
-    std::fs::write(state::wrap_path(dir), &blob.bytes).map_err(|e| format!("write wrapper: {e}"))
+    // Atomic: this blob is the only way back into the vault once a master password is set.
+    state::write_atomic(&state::wrap_path(dir), &blob.bytes)
 }
 
 fn set_session(state: &State<AppState>, vk: VaultKey) {

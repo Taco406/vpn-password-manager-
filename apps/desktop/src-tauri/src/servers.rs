@@ -273,17 +273,23 @@ pub async fn servers_list() -> Result<ServersListOut, String> {
 
 /// Utilization time series for one server (~`window_secs` back; Linode always returns ~24h
 /// and is trimmed client-side).
+///
+/// `vcpus` converts the provider's core-SUMMED CPU percent to whole-machine percent so the
+/// chart reads on the same scale as Netdata's all-cores number (both providers give each vCPU
+/// its own 100%). Pass the count from the server list; `0` means unknown and skips it.
 #[tauri::command]
 pub async fn servers_metrics(
     provider: String,
     id: String,
     window_secs: u32,
+    vcpus: u32,
 ) -> Result<MetricsOut, String> {
     let mgr = manager_for(&provider)?;
-    let m = mgr
+    let mut m = mgr
         .metrics(&id, window_secs)
         .await
         .map_err(|e| e.to_string())?;
+    sentinel_core::cloud::normalize_cpu_to_whole_machine(&mut m, vcpus);
     // Trim to the requested window (Linode over-returns).
     let cutoff = m
         .cpu_pct

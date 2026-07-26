@@ -68,10 +68,33 @@ pub struct MetricPoint {
 /// on Hetzner) — the UI labels it generically.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct ServerMetrics {
+    /// **Provider-native, core-SUMMED percent.** Both Linode and Hetzner give each vCPU its
+    /// own 100%, so an N-vCPU server ranges 0..=100*N. Call
+    /// [`normalize_cpu_to_whole_machine`] before charting it against anything whole-machine
+    /// (e.g. Netdata's all-cores number) — that is the ONLY place the conversion happens.
     pub cpu_pct: Vec<MetricPoint>,
     pub net_in_bps: Vec<MetricPoint>,
     pub net_out_bps: Vec<MetricPoint>,
     pub disk_io: Vec<MetricPoint>,
+}
+
+/// Convert provider CPU samples from core-summed percent to whole-machine percent.
+///
+/// Both supported providers report CPU with 100 = one fully-busy vCPU (a 2-vCPU box at 69%
+/// of the whole machine reports ~138), which is why the chart used to pin at 100 — the
+/// renderer clamped an out-of-range value into a flat line.
+///
+/// `vcpus == 0` (unknown) and `vcpus == 1` are no-ops, so single-core servers are unaffected.
+/// Values are NEVER clamped: a normalized sample above 100 (a burst, or steal accounting) is
+/// left intact so the chart can grow its axis instead of hiding it.
+pub fn normalize_cpu_to_whole_machine(m: &mut ServerMetrics, vcpus: u32) {
+    if vcpus < 2 {
+        return;
+    }
+    let n = f64::from(vcpus);
+    for p in &mut m.cpu_pct {
+        p.value /= n;
+    }
 }
 
 /// A point-in-time snapshot/image of a server, normalized across providers.
