@@ -308,13 +308,19 @@ export async function serversList(): Promise<ServersList> {
 }
 
 /** Utilization time series for one server, ~windowSecs back. */
+/**
+ * Utilization series for one server. `vcpus` converts the provider's core-summed CPU percent
+ * to whole-machine percent (both Linode and Hetzner report 100 = one busy vCPU); pass the
+ * count from the server list, 0 if unknown.
+ */
 export async function serversMetrics(
   provider: string,
   id: string,
   windowSecs: number,
+  vcpus: number,
 ): Promise<ServerMetricsOut> {
   if (!inTauri()) throw new Error("Server management is only available in the desktop app.");
-  return inv<ServerMetricsOut>("servers_metrics", { provider, id, windowSecs });
+  return inv<ServerMetricsOut>("servers_metrics", { provider, id, windowSecs, vcpus });
 }
 
 /** Power a server: "start" | "stop" | "reboot". */

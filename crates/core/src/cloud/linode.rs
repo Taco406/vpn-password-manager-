@@ -656,6 +656,21 @@ mod manager_tests {
     }
 
     #[test]
+    fn cpu_normalizes_to_whole_machine_on_multicore() {
+        // Linode's /stats CPU is core-summed exactly like Hetzner's: each vCPU gets its own
+        // 100%, so a 4-vCPU instance ranges 0..=400. A 1-vCPU Nanode is unaffected.
+        let body = r#"{"data": {"cpu": [[1700000000000, 250.0]]}, "title": "stats"}"#;
+        let mut m = parse_stats(body).unwrap();
+        assert!((m.cpu_pct[0].value - 250.0).abs() < 1e-9); // parsed provider-native
+        crate::cloud::normalize_cpu_to_whole_machine(&mut m, 4);
+        assert!((m.cpu_pct[0].value - 62.5).abs() < 1e-9);
+
+        let mut nanode = parse_stats(body).unwrap();
+        crate::cloud::normalize_cpu_to_whole_machine(&mut nanode, 1);
+        assert!((nanode.cpu_pct[0].value - 250.0).abs() < 1e-9);
+    }
+
+    #[test]
     fn stats_normalize_ms_timestamps_and_bits() {
         let body = r#"{"data": {
             "cpu": [[1700000000000, 7.5]],
