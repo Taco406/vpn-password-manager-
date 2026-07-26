@@ -21,14 +21,23 @@ Three apps, three versions, three delivery paths. Most wasted time on this proje
 mixing them up: a symptom on ONE device gets debugged as if it were everywhere. Before
 diagnosing anything, say which device you mean.
 
-| Device | Delivery path | Version (as of 2026-07-25) | Confirmed by the user |
+| Device | Delivery path | Version (as of 2026-07-26) | Confirmed by the user |
 |---|---|---|---|
-| Windows desktop | NSIS `-setup.exe` (per-user, no admin prompt) | **0.1.58** (0.1.60 released, install unconfirmed) | Servers screen lists **both** Linode and Hetzner. Settings → Hetzner Cloud = "Connected". |
-| iPhone | TestFlight | **0.1.57** on device; **0.1.60 uploaded to TestFlight** (run #20 — first successful upload since 1.58; install unconfirmed) | Servers tab lists **only** the Linode `sentinel-sync` box. Additive-merge sync fix ships in 0.1.61. |
+| Windows desktop | NSIS `-setup.exe` (per-user, no admin prompt) | **0.1.58** confirmed on device; **0.1.62 released** (0.1.60/61/62 installs all unconfirmed) | Servers screen lists **both** Linode and Hetzner. Settings → Hetzner Cloud = "Connected". |
+| iPhone | TestFlight | **0.1.57** confirmed on device; **0.1.60, 0.1.61 and the 0.1.62 fix build uploaded** (runs #20, #21, #23) | Servers tab lists **only** the Linode `sentinel-sync` box. Additive-merge sync fix shipped in 0.1.61 — unverified on hardware. |
 | Mac | `.dmg` | — | not in active use |
 
-The iOS TestFlight workflow now auto-prunes stale **development** certificates (they, not
+**Three releases are stacked up unconfirmed on both devices.** Nothing in 0.1.60–0.1.62 has been
+seen working by the user; treat all of it as "built and delivered to the store", not "shipped".
+
+The iOS TestFlight workflow auto-prunes stale **development** certificates (they, not
 distribution certs, fill Apple's cap) — that's what broke every upload from 1.58 to 1.59.
+
+**The phone build compiles only in the TestFlight job** (no Swift toolchain in CI), and the
+Release workflow dispatches that job *after* publishing — so a Swift error ships a green desktop
+release with a broken phone build (exactly what 0.1.62 did with an iOS-17-only `onChange`).
+`scripts/interop-check.sh` now guards the iOS-16 API surface; extend that guard rather than
+relying on the TestFlight job to catch API-availability mistakes.
 
 ### Rules that stop the churn (these are lessons, not suggestions)
 
