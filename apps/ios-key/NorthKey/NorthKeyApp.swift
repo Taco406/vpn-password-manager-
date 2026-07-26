@@ -27,7 +27,9 @@ struct NorthKeyApp: App {
                     if shielded { PrivacyShield() }
                 }
         }
-        .onChange(of: scenePhase) { _, phase in
+        // Single-parameter closure: the app targets iOS 16, where the two-parameter
+        // onChange(of:initial:_:) doesn't exist yet.
+        .onChange(of: scenePhase) { phase in
             // .inactive fires BEFORE the switcher snapshot is taken — cover it there, not in
             // .background, or the snapshot still captures the vault.
             shielded = phase != .active

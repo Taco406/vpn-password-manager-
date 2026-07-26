@@ -160,4 +160,20 @@ done
 [ -z "$missing" ] || fail "bridge invokes unregistered command(s):$missing"
 echo "ok: all $(echo "$bridge_cmds" | wc -l) bridge-invoked commands are registered in main.rs"
 
+# 15. The iPhone app targets iOS 16 (project.yml), but there is no Swift toolchain in CI — a
+#     compile error only surfaces later, in the TestFlight job, AFTER a release has published.
+#     The two-parameter onChange(of:initial:_:) is iOS 17+ and is the exact API that broke the
+#     0.1.62 phone build; the iOS-16 form takes ONE closure parameter.
+ios_target=$(grep -A1 'deploymentTarget:' apps/ios-key/project.yml | grep -oE '"[0-9]+\.[0-9]+"' | tr -d '"' | head -1)
+case "$ios_target" in
+    16.*)
+        if grep -rnE '\.onChange\(of:[^)]*\)[[:space:]]*\{[[:space:]]*[A-Za-z_][A-Za-z0-9_]*[[:space:]]*,' \
+             apps/ios-key/NorthKey/ 2>/dev/null; then
+            fail "two-parameter onChange (iOS 17+) used while deploymentTarget is $ios_target"
+        fi
+        echo "ok: no iOS 17-only onChange while targeting iOS $ios_target"
+        ;;
+    *) echo "skip: iOS deployment target is '$ios_target' (guard covers 16.x)" ;;
+esac
+
 echo "All interop checks passed."
