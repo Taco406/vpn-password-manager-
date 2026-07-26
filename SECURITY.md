@@ -14,7 +14,10 @@ and the invariants that make those guarantees hold — each mapped to an automat
 ## Trust boundaries
 
 - **The vault key exists in plaintext only in RAM**, inside `VaultSession`, and only
-  while unlocked. On lock / idle / OS-sleep it is zeroized (`zeroize`).
+  while unlocked. It is zeroized (`zeroize`) when the session locks: manually, or after the
+  Settings → Auto-lock idle timer expires (desktop, since 0.1.62), or when the iPhone returns
+  from more than a minute in the background. There is **no** OS-sleep/session-lock hook yet —
+  an earlier version of this file claimed one; see `docs/security-review-v0.1.61.md` (4.2).
 - **The desktop is the crypto authority.** The Chrome extension and iOS app never hold
   the vault key; they receive decrypted fields per-use (extension) or a wrapped key
   share (phone), and only after the desktop authorizes.

@@ -87,3 +87,42 @@ async fn wrapped_blobs_are_opaque_at_rest() {
         "vault key leaked into wrapped blob"
     );
 }
+
+/// T-tamper: the vault file that actually travels between devices (the SVLT sync blob) must
+/// FAIL CLOSED on any modification — no partial decrypt, no garbage document. Exercised at
+/// every byte region: the header, the nonce, and the ciphertext body.
+#[test]
+fn tampered_sync_blob_fails_to_open() {
+    use sentinel_core::vault::document::{decode_sync_blob, encode_sync_blob, VaultDocument};
+
+    let vk = VaultKey::generate();
+    let session = VaultSession::unlocked(vk.clone());
+    let mut item = Item::new_login("Bank", 1);
+    item.login = Some(Login {
+        username: Some("me@example.com".into()),
+        password: Some(CANARY.into()),
+        totp: None,
+    });
+    let env = session.seal(&item).expect("seal");
+    let doc = VaultDocument::from_envelopes(&[env], vec![]);
+    let blob = encode_sync_blob(&vk, &doc, 7).expect("encode");
+
+    // Sanity: the untampered blob opens.
+    assert!(decode_sync_blob(&vk, &blob, 7).is_ok());
+
+    // Single-bit flips sampled across header / nonce / ciphertext must all be rejected.
+    for pos in [0, 4, 8, 20, 31, blob.len() / 2, blob.len() - 1] {
+        let mut bad = blob.clone();
+        bad[pos] ^= 0x01;
+        assert!(
+            decode_sync_blob(&vk, &bad, 7).is_err(),
+            "tampered byte {pos} was accepted — AEAD must fail closed"
+        );
+    }
+
+    // Truncation must fail too, not decode a shorter "valid" document.
+    assert!(decode_sync_blob(&vk, &blob[..blob.len() - 4], 7).is_err());
+
+    // A blob sealed for another version must not open as this one (rollback protection).
+    assert!(decode_sync_blob(&vk, &blob, 8).is_err());
+}

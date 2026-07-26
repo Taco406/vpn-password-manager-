@@ -38,6 +38,11 @@ struct ContentView: View {
                 }
             }
         }
+        // Auto-lock: NorthKeyApp posts this when the app comes back after being away past the
+        // grace period, so a phone left on a table doesn't stay in an unlocked vault.
+        .onReceive(NotificationCenter.default.publisher(for: .northKeyAutoLock)) { _ in
+            if vault.isUnlocked { vault.lock() }
+        }
         .accentColor(Color(hex: 0x22D3EE))
     }
 

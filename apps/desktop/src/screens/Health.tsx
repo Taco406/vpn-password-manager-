@@ -13,6 +13,7 @@ import {
 } from "lucide-react";
 import type { AuditReport, GeneratedPassword, ItemSummary } from "@sentinel/shared";
 import { bridge, healthAuditFast, openUrl } from "../bridge";
+import { copySecret } from "../lib/clipboardSecret";
 import { Card, SectionTitle, Button, Badge } from "../components/ui";
 
 export function Health() {
@@ -48,7 +49,7 @@ export function Health() {
       symbols: true,
       excludeAmbiguous: false,
     });
-    await navigator.clipboard?.writeText(pw.value);
+    await copySecret(pw.value);
     const domain = domainOf(id);
     if (domain) await openUrl(`https://${domain}/.well-known/change-password`);
   };
@@ -247,7 +248,7 @@ function Generator() {
       </div>
       <div className="flex items-center gap-2 rounded-[10px] border border-[var(--border-strong)] bg-[var(--bg-inset)] px-3 py-3">
         <span className="mono flex-1 break-all text-sm text-accent">{pw?.value}</span>
-        <button onClick={() => navigator.clipboard?.writeText(pw?.value ?? "")} className="text-[var(--text-muted)] hover:text-[var(--accent)]"><CopyIcon size={16} /></button>
+        <button onClick={() => void copySecret(pw?.value ?? "")} className="text-[var(--text-muted)] hover:text-[var(--accent)]"><CopyIcon size={16} /></button>
         <button onClick={gen} className="text-[var(--text-muted)] hover:text-[var(--accent)]"><RefreshCw size={16} /></button>
       </div>
       <div className="mt-3 flex items-center justify-between">
