@@ -8,6 +8,36 @@ The format follows [Keep a Changelog](https://keepachangelog.com/). Versions are
 [semantic](https://semver.org/). **Add a new `## [x.y.z]` section at the top in the same PR
 that bumps the app version** — that's how "the changelog updates on every merge."
 
+## [0.1.62] — 2026-07-26
+
+### Fixed
+- **The CPU graph now matches the live one.** On a server with more than one processor
+  core the hourly CPU graph sat pinned at a flat 100% — it was showing "percent of one
+  core" (a 2-core server busy at 69% reports 138) and then clipping anything over 100
+  into a flat line. It now reads percent of the whole machine, the same number the live
+  chart shows, and the graph can go above 100 instead of hiding it.
+
+### Security
+A full security review of the vault, VPN, and server monitoring across all three apps —
+the write-up is in `docs/security-review-v0.1.61.md`. No flaws were found in the
+encryption itself. What the review did find were protections that were *advertised but
+missing*, now fixed:
+
+- **Auto-lock actually locks now.** The "Auto-lock after N minutes" setting had never
+  been wired to anything — the vault stayed open indefinitely.
+- **Your iPhone no longer shows the vault in the app switcher.** iOS saves a picture of
+  the screen when you swipe away; that picture had your passwords in it. The phone also
+  re-asks for your master password after it's been in the background for a minute.
+- **Every "copy password" button now auto-clears the clipboard.** Copies from the
+  Password Health screen previously stayed on the clipboard forever.
+- **The VPN's temporary config file is now private to your account** (it contains a live
+  key and was readable by other accounts on the same computer).
+- **Your master-password key file can't be corrupted by a crash mid-save.**
+
+Also added automatic checks so these can't quietly come back: the build now fails if any
+log line could print a secret, if a new place skips certificate checking, or if a tampered
+vault file would be accepted.
+
 ## [0.1.61] — 2026-07-25
 
 ### Added
