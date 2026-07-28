@@ -20,9 +20,19 @@ on:
     types: [published]
   workflow_dispatch:
 
+# Two upload paths exist (the `release: published` trigger and release.yml's explicit
+# `gh workflow run`), and both submit the same build to App Store Connect. Serialize them so a
+# future change that lets both fire can't run two macOS archives at once.
+concurrency:
+  group: ios-testflight
+  cancel-in-progress: false
+
 jobs:
   testflight:
     runs-on: macos-latest
+    # Observed runtime ~2-3 min. A job hung on an Apple signing or upload prompt would otherwise
+    # sit for the 360-minute default before GitHub kills it.
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
 
