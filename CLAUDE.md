@@ -21,14 +21,22 @@ Three apps, three versions, three delivery paths. Most wasted time on this proje
 mixing them up: a symptom on ONE device gets debugged as if it were everywhere. Before
 diagnosing anything, say which device you mean.
 
-| Device | Delivery path | Version (as of 2026-07-26) | Confirmed by the user |
+| Device | Delivery path | Version (as of 2026-07-27) | Confirmed by the user |
 |---|---|---|---|
-| Windows desktop | NSIS `-setup.exe` (per-user, no admin prompt) | **0.1.58** confirmed on device; **0.1.62 released** (0.1.60/61/62 installs all unconfirmed) | Servers screen lists **both** Linode and Hetzner. Settings → Hetzner Cloud = "Connected". |
-| iPhone | TestFlight | **0.1.57** confirmed on device; **0.1.60, 0.1.61 and the 0.1.62 fix build uploaded** (runs #20, #21, #23) | Servers tab lists **only** the Linode `sentinel-sync` box. Additive-merge sync fix shipped in 0.1.61 — unverified on hardware. |
-| Mac | `.dmg` | — | not in active use |
+| Windows desktop | NSIS `-setup.exe` (per-user, no admin prompt) | **0.1.58** confirmed on device; **0.1.62 released** (0.1.60/61/62 installs still unconfirmed — user is checking) | Servers screen lists **both** Linode and Hetzner. Settings → Hetzner Cloud = "Connected". |
+| iPhone | TestFlight | **0.1.62 confirmed on device** (2026-07-27) | Version confirmed present; per-feature behaviour on 0.1.60–0.1.62 not yet exercised. Servers tab previously listed **only** the Linode `sentinel-sync` box. |
+| Mac | `.dmg` | **0.1.62 confirmed on device** (2026-07-27) | Previously "not in active use" — it is now running the current build. |
 
-**Three releases are stacked up unconfirmed on both devices.** Nothing in 0.1.60–0.1.62 has been
-seen working by the user; treat all of it as "built and delivered to the store", not "shipped".
+**Two of the three devices are current.** The iPhone and Mac reached 0.1.62 on 2026-07-27;
+only the Windows desktop is still behind (last seen on 0.1.58). Note the distinction that
+matters here: a confirmed *version* means delivery worked, NOT that the features in
+0.1.60–0.1.62 have been exercised — keep treating individual fixes as unverified until the
+user reports the actual behaviour.
+
+**The iOS delivery path is proven working end to end.** The phone landing on 0.1.62 confirms the
+fix build (TestFlight run #23) reached hardware after the iOS-17-only `onChange` broke the
+0.1.62 phone build. That closes the delivery gap this ledger was created to track — the
+remaining risk is the desktop updater, not TestFlight.
 
 The iOS TestFlight workflow auto-prunes stale **development** certificates (they, not
 distribution certs, fill Apple's cap) — that's what broke every upload from 1.58 to 1.59.
