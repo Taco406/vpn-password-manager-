@@ -23,9 +23,10 @@ poke around.
   later connect checks it. If the fingerprint changes, NorthKey **refuses** and
   warns you — that's how it catches someone trying to sit in the middle and
   impersonate your server. The old "open a terminal" button never checked this.
-- **It only opens when you allow it.** Your vault must be unlocked, and if this
-  computer has a fingerprint reader / Windows Hello, NorthKey asks for it right
-  before opening the shell.
+- **It only opens when you allow it.** Your vault must be unlocked. On Windows,
+  NorthKey also asks for Windows Hello right before opening the shell. (On Mac the
+  extra Touch ID prompt isn't wired up yet, so it opens once the vault is
+  unlocked — coming in a follow-up.)
 - **Locking closes it.** Lock your vault and every open terminal closes at once.
 - **A local record.** Each session (which server, when) is written to a history
   that stays on this computer and never syncs.
@@ -54,8 +55,8 @@ Do these in order. Copy one line at a time.
 
 ### 3 — Connect
 
-1. Click **Connect**. If your computer has a fingerprint reader / Windows Hello,
-   confirm the prompt.
+1. Click **Connect**. On Windows, confirm the Windows Hello prompt. (On Mac it
+   connects straight away once your vault is unlocked.)
 2. First time only: a highlighted box shows the server's fingerprint
    (`SHA256:…`). This is expected — it's NorthKey pinning the key.
 3. You should land at a `root@…:~#` prompt. Type:

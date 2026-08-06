@@ -13,9 +13,12 @@
 //!    fingerprint (in `servers-config.json`); every later connect refuses if the
 //!    fingerprint changed. The old pop-out terminal trusted `root@ip` blindly —
 //!    this is the biggest upgrade over that.
-//!  * **Open gate.** The vault must be unlocked, and — when a biometric is
-//!    available — a fresh Windows Hello / Touch ID confirmation is required
-//!    before a root shell opens. A shell should never open on a stray click.
+//!  * **Open gate.** The vault must be unlocked. On Windows, a fresh Windows
+//!    Hello confirmation is also required before a root shell opens (via
+//!    `hello::verify`, which is Windows-only — `hello::available()` is false on
+//!    macOS/Linux, so those platforms currently gate on the vault unlock alone;
+//!    a macOS Touch ID gate is future work). A shell should never open on a
+//!    stray click.
 //!  * **Kill on lock.** `close_all` terminates every live session the instant
 //!    the vault locks (wired into `commands::lock`), so no root shell outlives
 //!    the unlock that authorised it.
@@ -258,8 +261,11 @@ pub async fn ssh_open(
         return Err("No server address.".into());
     }
 
-    // Gate 2 — a fresh biometric confirmation, when the device has one. Opening a
-    // root shell should take a deliberate second step, not a single click.
+    // Gate 2 — a fresh Windows Hello confirmation, so opening a root shell takes a
+    // deliberate second step rather than a single click. `hello` is Windows-only
+    // today (`available()` is false on macOS/Linux), so on those platforms this is
+    // a no-op and the vault-unlock gate above stands alone. A macOS Touch ID gate
+    // would slot in here.
     if crate::hello::available() {
         match crate::hello::verify(&format!("Confirm to open a root terminal on {host}")) {
             Ok(true) => {}

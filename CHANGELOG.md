@@ -24,9 +24,10 @@ that bumps the app version** — that's how "the changelog updates on every merg
     changes, it refuses to connect and warns you — that's how it catches someone trying
     to impersonate your server. (Rebuilt the server on purpose? There's a one-click
     "reset pinned key" under Advanced.)
-  - **It only opens when you say so.** Your vault has to be unlocked, and on a computer
-    with a fingerprint reader / Windows Hello it asks for that before opening a root
-    shell. Locking your vault closes every open terminal instantly.
+  - **It only opens when you say so.** Your vault has to be unlocked. On Windows it also
+    asks for Windows Hello before opening a root shell (a Mac Touch ID prompt is still to
+    come — on Mac it opens once the vault is unlocked). Locking your vault closes every
+    open terminal instantly.
   - **You can see what it did.** Every terminal session is recorded in a local history
     (which server, when) that stays on this computer and never syncs.
 

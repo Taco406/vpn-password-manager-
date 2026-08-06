@@ -302,7 +302,11 @@ export function SshTerminal({ s }: { s: ManagedServer }) {
             {connecting ? "Connecting…" : "Connect"}
           </button>
         )}
-        {connecting && <span className="text-[11px] text-[var(--text-muted)]">check your device for a confirmation…</span>}
+        {connecting && (
+          <span className="text-[11px] text-[var(--text-muted)]">
+            connecting… (on Windows, confirm the Hello prompt)
+          </span>
+        )}
       </div>
 
       {/* xterm mount — shown from the moment we start connecting so xterm sizes
