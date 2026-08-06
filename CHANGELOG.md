@@ -8,6 +8,27 @@ The format follows [Keep a Changelog](https://keepachangelog.com/). Versions are
 [semantic](https://semver.org/). **Add a new `## [x.y.z]` section at the top in the same PR
 that bumps the app version** — that's how "the changelog updates on every merge."
 
+## [0.1.63] — 2026-08-06
+
+### Changed
+- **The Servers screen now uses your whole window.** Servers tile into a grid (two, three,
+  or four across depending on how wide the window is) instead of a single narrow column,
+  so every server is visible at once. Each card shows the essentials — state, IP, cost,
+  and live CPU/RAM bars when monitoring is set up.
+- **Server details open in a side panel.** Clicking a server (or "Details →") slides in a
+  panel with tabs — Overview (graphs + power), Monitoring (the live dashboard), Manage
+  (snapshots, reverse DNS, activity), and Access — instead of expanding in place and
+  pushing every other server off the screen.
+
+### Added
+- **Layout controls on the Servers screen**: Roomy/Dense card size and a column picker
+  (Auto/1/2/3), both remembered between launches, plus a filter box that appears once
+  you have more than three servers.
+- **"Can I reach a port?" checker** (server side panel → Access). Tests a port from your
+  computer and tells the difference between "nothing is listening" and "a firewall is
+  silently dropping the traffic" — the two look identical in a browser but need opposite
+  fixes. Presets for SSH, HTTP, HTTPS, and Netdata.
+
 ## [0.1.62] — 2026-07-26
 
 ### Fixed
