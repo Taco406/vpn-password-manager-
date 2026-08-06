@@ -187,6 +187,7 @@ fn main() {
             servers::servers_set_rdns,
             servers::servers_set_protection,
             servers::servers_open_terminal,
+            servers::servers_port_check,
             servers::servers_watchdog_get,
             servers::servers_watchdog_set,
             servers::netdata_get,
