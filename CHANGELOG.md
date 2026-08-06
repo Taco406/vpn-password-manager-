@@ -8,6 +8,29 @@ The format follows [Keep a Changelog](https://keepachangelog.com/). Versions are
 [semantic](https://semver.org/). **Add a new `## [x.y.z]` section at the top in the same PR
 that bumps the app version** — that's how "the changelog updates on every merge."
 
+## [0.1.64] — 2026-08-06
+
+### Added
+- **A terminal, built into the app.** Open a full root command line on any of your
+  servers right inside NorthKey — server side panel → **Access** → **Connect**. It's a
+  real interactive shell (arrow keys, editors, `htop`, all of it), so you can restart a
+  service, open a firewall port, or read a log without leaving the app or setting up SSH
+  keys yourself.
+  - **It sets itself up.** NorthKey makes its own SSH key and shows you a single line to
+    paste onto the server once; after that it signs in on its own. The key never leaves
+    this computer and is never sent to your phone.
+  - **It checks it's really your server.** The first time you connect, NorthKey records
+    the server's identity fingerprint and shows it to you. If that fingerprint ever
+    changes, it refuses to connect and warns you — that's how it catches someone trying
+    to impersonate your server. (Rebuilt the server on purpose? There's a one-click
+    "reset pinned key" under Advanced.)
+  - **It only opens when you say so.** Your vault has to be unlocked. On Windows it also
+    asks for Windows Hello before opening a root shell (a Mac Touch ID prompt is still to
+    come — on Mac it opens once the vault is unlocked). Locking your vault closes every
+    open terminal instantly.
+  - **You can see what it did.** Every terminal session is recorded in a local history
+    (which server, when) that stays on this computer and never syncs.
+
 ## [0.1.63] — 2026-08-06
 
 ### Changed

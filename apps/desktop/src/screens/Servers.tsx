@@ -63,6 +63,7 @@ import {
 import { Card, SectionTitle, Badge } from "../components/ui";
 import { errMsg, inputCls, btnCls, Toggle } from "../components/kit";
 import { toastError } from "../components/Toast";
+import { SshTerminal } from "../components/SshTerminal";
 import { TimeSeriesChart, type TimeSeries } from "../components/charts/TimeSeriesChart";
 import { ThroughputChart } from "../components/charts/ThroughputChart";
 
@@ -718,12 +719,14 @@ function AccessTab({ s }: { s: ManagedServer }) {
 
   return (
     <div className="space-y-4">
-      <div>
+      <SshTerminal s={s} />
+
+      <div className="border-t border-[var(--border)] pt-3">
         <div className="mb-1 flex items-center gap-2 text-sm font-medium">
-          <TerminalSquare size={14} /> Open a terminal
+          <TerminalSquare size={14} /> Open a separate terminal
         </div>
         <p className="mb-2 text-xs text-[var(--text-secondary)]">
-          Opens your system terminal already connected to this server.
+          Prefer your own terminal app? This opens your system terminal connected to this server.
         </p>
         <button className={btnCls} onClick={() => void serversOpenTerminal(host)}>
           SSH to {host}

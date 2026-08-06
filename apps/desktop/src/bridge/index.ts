@@ -403,6 +403,107 @@ export async function serversPortCheck(host: string, port: number): Promise<Port
   return inv<PortCheckOut>("servers_port_check", { host, port });
 }
 
+// --- Embedded SSH root terminal (v0.1.64) -----------------------------------
+// The private key lives only in the OS keychain (desktop-only; never synced to the
+// phone). Host keys are pinned on first connect. All of these are standalone
+// (not part of the SentinelBridge contract) and throw / no-op in the browser.
+
+export interface SshOpenOut {
+  sessionId: string;
+  /** Server host-key fingerprint (SHA256:…), for display. */
+  fingerprint: string;
+  /** True when this connect just pinned the key — show the fingerprint prominently. */
+  firstConnect: boolean;
+}
+
+export interface SshStatus {
+  /** Pinned host-key fingerprint, or "" if not connected yet. */
+  fingerprint: string;
+  /** Whether the user confirmed NorthKey's public key is installed. */
+  installed: boolean;
+}
+
+/** NorthKey's SSH public key line, to install in a server's authorized_keys. */
+export async function sshPubkey(): Promise<string> {
+  if (!inTauri()) throw new Error("The terminal is only available in the desktop app.");
+  return inv<string>("ssh_pubkey");
+}
+
+/** Open a root PTY on a server. Gated on vault-unlocked + biometric + host-key pin. */
+export async function sshOpen(provider: string, id: string, host: string): Promise<SshOpenOut> {
+  if (!inTauri()) throw new Error("The terminal is only available in the desktop app.");
+  return inv<SshOpenOut>("ssh_open", { provider, id, host });
+}
+
+/** Send keystrokes (raw UTF-8 bytes, base64-encoded) to a live session. */
+export async function sshWrite(sessionId: string, dataB64: string): Promise<void> {
+  if (!inTauri()) return;
+  await inv("ssh_write", { sessionId, dataB64 });
+}
+
+/** Tell the remote PTY the terminal was resized. */
+export async function sshResize(sessionId: string, cols: number, rows: number): Promise<void> {
+  if (!inTauri()) return;
+  await inv("ssh_resize", { sessionId, cols, rows });
+}
+
+/** Close a live session. */
+export async function sshClose(sessionId: string): Promise<void> {
+  if (!inTauri()) return;
+  await inv("ssh_close", { sessionId });
+}
+
+/** Stream terminal output (base64 bytes) for a session; returns an unsubscribe fn. */
+export async function onSshData(
+  sessionId: string,
+  cb: (b64: string) => void,
+): Promise<() => void> {
+  if (!inTauri()) return () => {};
+  const { listen } = await import("@tauri-apps/api/event");
+  return listen<string>(`ssh:data:${sessionId}`, (ev) => cb(ev.payload));
+}
+
+/** Fires once when a session ends (remote closed, or killed by vault lock). */
+export async function onSshClosed(sessionId: string, cb: () => void): Promise<() => void> {
+  if (!inTauri()) return () => {};
+  const { listen } = await import("@tauri-apps/api/event");
+  return listen(`ssh:closed:${sessionId}`, () => cb());
+}
+
+/** Per-server SSH state (pinned fingerprint + install flag). */
+export async function serversSshStatus(provider: string, id: string): Promise<SshStatus> {
+  if (!inTauri()) return { fingerprint: "", installed: false };
+  return inv<SshStatus>("servers_ssh_status", { provider, id });
+}
+
+/** Remember that the user installed NorthKey's key on this server. */
+export async function serversSshMarkInstalled(
+  provider: string,
+  id: string,
+  installed: boolean,
+): Promise<void> {
+  if (!inTauri()) return;
+  await inv("servers_ssh_mark_installed", { provider, id, installed });
+}
+
+/** Forget a server's pinned host key (use after deliberately rebuilding it). */
+export async function serversSshHostkeyReset(provider: string, id: string): Promise<void> {
+  if (!inTauri()) return;
+  await inv("servers_ssh_hostkey_reset", { provider, id });
+}
+
+/** Read the local, never-synced SSH audit log (JSON lines). */
+export async function sshAuditRead(): Promise<string> {
+  if (!inTauri()) return "";
+  return inv<string>("ssh_audit_read");
+}
+
+/** Clear the local SSH audit log. */
+export async function sshAuditClear(): Promise<void> {
+  if (!inTauri()) return;
+  await inv("ssh_audit_clear");
+}
+
 // --- Server watchdog + Netdata (stage 2) -------------------------------------
 
 export interface WatchdogCfg {
