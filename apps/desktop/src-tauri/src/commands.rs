@@ -139,8 +139,12 @@ pub fn keyring_status(state: State<AppState>) -> KeyringStatus {
 }
 
 #[tauri::command]
-pub fn lock(app: AppHandle, state: State<AppState>) -> R<()> {
+pub fn lock(app: AppHandle, state: State<AppState>, ssh: State<crate::ssh::SshState>) -> R<()> {
     state.inner.lock().unwrap().session.lock();
+    // Tear down any live root-shell sessions: a locked vault must not leave an
+    // open SSH terminal behind (covers manual lock and the auto-lock timer,
+    // which calls this same command).
+    crate::ssh::close_all(&ssh);
     let _ = app.emit("vault:locked", ());
     Ok(())
 }

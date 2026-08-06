@@ -23,6 +23,7 @@ pub mod platform;
 pub mod provision;
 pub mod recovery_kit;
 pub mod seed;
+pub mod ssh;
 pub mod totp;
 pub mod vault;
 pub mod vpn;

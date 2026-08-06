@@ -508,6 +508,23 @@ struct ServersFileCfg {
     watchdog: WatchdogFileCfg,
     /// Keyed by `"provider:id"`.
     netdata: BTreeMap<String, NetdataFileCfg>,
+    /// Per-server SSH terminal state (host-key pin + install flag), keyed by
+    /// `"provider:id"`. Added in v0.1.64.
+    #[serde(default)]
+    ssh: BTreeMap<String, SshServerCfg>,
+}
+
+/// Per-server SSH state for the embedded terminal. The host-key fingerprint is
+/// pinned on first connect and refused if it ever changes (see `ssh.rs`).
+#[derive(Serialize, Deserialize, Clone, Default)]
+#[serde(rename_all = "camelCase", default)]
+pub struct SshServerCfg {
+    /// OpenSSH SHA256 fingerprint (`SHA256:…`) pinned on first connect; empty
+    /// until then.
+    pub host_key_fingerprint: String,
+    /// Whether the user has confirmed NorthKey's public key is installed on this
+    /// server (a UX hint only — the real check is whether auth succeeds).
+    pub installed: bool,
 }
 
 fn cfg_path(dir: &Path) -> PathBuf {
@@ -536,6 +553,98 @@ fn data_dir(state: &State<'_, AppState>) -> PathBuf {
 
 fn netdata_key(provider: &str, id: &str) -> String {
     format!("{provider}:{id}")
+}
+
+// ---------------------------------------------------------------------------
+// SSH host-key pins (v0.1.64). The pin is the source of truth for the embedded
+// terminal's man-in-the-middle protection, so it lives in the backend config —
+// never passed in from the frontend.
+// ---------------------------------------------------------------------------
+
+/// The pinned host-key fingerprint for a server, or "" if none pinned yet.
+pub(crate) fn ssh_hostkey_get(dir: &Path, provider: &str, id: &str) -> String {
+    load_cfg(dir)
+        .ssh
+        .get(&netdata_key(provider, id))
+        .map(|c| c.host_key_fingerprint.clone())
+        .unwrap_or_default()
+}
+
+/// Pin (or overwrite) a server's host-key fingerprint.
+pub(crate) fn ssh_hostkey_set(
+    dir: &Path,
+    provider: &str,
+    id: &str,
+    fp: &str,
+) -> Result<(), String> {
+    let mut cfg = load_cfg(dir);
+    cfg.ssh
+        .entry(netdata_key(provider, id))
+        .or_default()
+        .host_key_fingerprint = fp.to_string();
+    save_cfg(dir, &cfg)
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SshStatusOut {
+    pub fingerprint: String,
+    pub installed: bool,
+}
+
+/// Current SSH state for a server (pinned fingerprint + install flag) — drives
+/// the Access-tab UI.
+#[tauri::command]
+pub fn servers_ssh_status(
+    state: State<AppState>,
+    provider: String,
+    id: String,
+) -> Result<SshStatusOut, String> {
+    let dir = data_dir(&state);
+    let cfg = load_cfg(&dir);
+    let entry = cfg
+        .ssh
+        .get(&netdata_key(&provider, &id))
+        .cloned()
+        .unwrap_or_default();
+    Ok(SshStatusOut {
+        fingerprint: entry.host_key_fingerprint,
+        installed: entry.installed,
+    })
+}
+
+/// Remember that the user installed NorthKey's public key on this server.
+#[tauri::command]
+pub fn servers_ssh_mark_installed(
+    state: State<AppState>,
+    provider: String,
+    id: String,
+    installed: bool,
+) -> Result<(), String> {
+    let dir = data_dir(&state);
+    let mut cfg = load_cfg(&dir);
+    cfg.ssh
+        .entry(netdata_key(&provider, &id))
+        .or_default()
+        .installed = installed;
+    save_cfg(&dir, &cfg)
+}
+
+/// Forget a server's pinned host key. Use after deliberately rebuilding a server
+/// so the next connect re-pins the new key (trust-on-first-use) instead of
+/// refusing on the mismatch.
+#[tauri::command]
+pub fn servers_ssh_hostkey_reset(
+    state: State<AppState>,
+    provider: String,
+    id: String,
+) -> Result<(), String> {
+    let dir = data_dir(&state);
+    let mut cfg = load_cfg(&dir);
+    if let Some(entry) = cfg.ssh.get_mut(&netdata_key(&provider, &id)) {
+        entry.host_key_fingerprint.clear();
+    }
+    save_cfg(&dir, &cfg)
 }
 
 /// The per-server Netdata config map as JSON (empty string when nothing is configured), so it

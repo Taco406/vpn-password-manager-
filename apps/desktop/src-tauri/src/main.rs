@@ -12,6 +12,7 @@ mod hello;
 mod net;
 mod nmhost;
 mod servers;
+mod ssh;
 mod state;
 mod sync;
 mod vpn;
@@ -69,6 +70,8 @@ fn main() {
             // Background auto-sync: pull synced tokens + vault every ~90s (opt-in; self-gating).
             // Makes a freshly-signed-in device populate Servers/VPN on its own — no "Sync now".
             sync::spawn_sync_poller(app.handle().clone());
+            // Registry of live SSH terminal sessions (v0.1.64); torn down on vault lock.
+            app.manage(ssh::SshState::default());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -188,6 +191,16 @@ fn main() {
             servers::servers_set_protection,
             servers::servers_open_terminal,
             servers::servers_port_check,
+            servers::servers_ssh_status,
+            servers::servers_ssh_mark_installed,
+            servers::servers_ssh_hostkey_reset,
+            ssh::ssh_pubkey,
+            ssh::ssh_open,
+            ssh::ssh_write,
+            ssh::ssh_resize,
+            ssh::ssh_close,
+            ssh::ssh_audit_read,
+            ssh::ssh_audit_clear,
             servers::servers_watchdog_get,
             servers::servers_watchdog_set,
             servers::netdata_get,

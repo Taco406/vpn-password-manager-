@@ -44,6 +44,9 @@ base64 = "0.22"
 uuid = "1"
 # Random salt for the optional master-password KEK.
 rand = { workspace = true }
+# Embedded SSH client for the in-app root terminal (v0.1.64). Default features pull the
+# aws-lc-rs backend, which is already in our build graph via rustls/reqwest.
+russh = "0.62"
 # Render the authenticator-app enrollment secret as a scannable QR (SVG only — no image deps).
 qrcode = { version = "0.14", default-features = false, features = ["svg"] }
 # Generate the self-signed TLS cert for a deployed sync server (ring backend — already in the
