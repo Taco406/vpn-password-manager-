@@ -1273,3 +1273,62 @@ pub fn spawn_servers_watchdog(app: AppHandle) {
         }
     });
 }
+
+/// Result of a TCP reachability probe.
+#[derive(serde::Serialize)]
+pub struct PortCheckOut {
+    pub open: bool,
+    /// Human-readable sentence for the UI — deliberately names the *likely cause*,
+    /// because "refused" vs "timed out" is the whole diagnostic value here.
+    pub detail: String,
+}
+
+/// Test whether a TCP port on a server accepts a connection FROM THIS COMPUTER.
+///
+/// This exists because the provider's cloud firewall is only half the story: a
+/// host-side firewall (ufw/nftables) drops packets invisibly from the provider
+/// console, and the two failure modes are distinguishable from the client side:
+///   * connection refused  -> we reached the host; nothing is listening on that port
+///   * timeout             -> a firewall is silently dropping (host-side or cloud)
+/// Nothing is sent on the socket; it connects and immediately drops.
+#[tauri::command]
+pub async fn servers_port_check(host: String, port: u16) -> Result<PortCheckOut, String> {
+    let host = host.trim().to_string();
+    if host.is_empty() {
+        return Err("no host address".into());
+    }
+    // Async resolver, same as net.rs's reachability probe.
+    let sockaddr = tokio::net::lookup_host((host.as_str(), port))
+        .await
+        .map_err(|e| format!("could not resolve {host}: {e}"))?
+        .next()
+        .ok_or_else(|| format!("could not resolve {host}"))?;
+
+    const TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+    match tokio::time::timeout(TIMEOUT, tokio::net::TcpStream::connect(sockaddr)).await {
+        Ok(Ok(_stream)) => Ok(PortCheckOut {
+            open: true,
+            detail: format!("Port {port} is open — {host} accepted the connection."),
+        }),
+        Ok(Err(e)) if e.kind() == std::io::ErrorKind::ConnectionRefused => Ok(PortCheckOut {
+            open: false,
+            detail: format!(
+                "Connection refused on port {port}. The server is reachable, but nothing is \
+                 listening on that port — the service is stopped, or it is bound to 127.0.0.1 \
+                 instead of all interfaces."
+            ),
+        }),
+        Ok(Err(e)) => Ok(PortCheckOut {
+            open: false,
+            detail: format!("Port {port} is not reachable: {e}"),
+        }),
+        Err(_) => Ok(PortCheckOut {
+            open: false,
+            detail: format!(
+                "Timed out connecting to port {port}. Something is silently dropping the \
+                 traffic — usually a firewall ON the server (check `ufw status`), or the \
+                 provider's cloud firewall missing an inbound rule for this port."
+            ),
+        }),
+    }
+}

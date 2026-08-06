@@ -1,0 +1,78 @@
+name: CI (macOS desktop)
+
+# Split out of ci.yml so it can be PATH-GATED. This repo is PUBLIC, so GitHub-hosted runners
+# are free — the win here is wall-clock and clutter, not money. macOS is the slowest leg of CI
+# and ran on every change, including docs-only ones. GitHub's `paths:` filter only works
+# per-workflow, so giving the macOS job its own file is what lets an unrelated change skip it
+# entirely (no third-party changed-files action needed, which also keeps the supply chain small).
+#
+# It still runs on everything that could plausibly break a macOS build: the desktop app, any
+# Rust crate it depends on, the extension it bundles, and this workflow itself.
+#
+# (The two paths lists are duplicated on purpose — GitHub's workflow parser does not support
+# YAML anchors/aliases, so they must be spelled out. Keep them in sync.)
+on:
+  push:
+    branches: ["main"]
+    paths:
+      - "apps/desktop/**"
+      - "apps/extension/**"
+      - "crates/**"
+      - "packages/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - ".github/workflows/ci-macos.yml"
+  pull_request:
+    branches: ["main"]
+    paths:
+      - "apps/desktop/**"
+      - "apps/extension/**"
+      - "crates/**"
+      - "packages/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - ".github/workflows/ci-macos.yml"
+
+concurrency:
+  group: ci-macos-${{ github.head_ref || github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+  SENTINEL_ARGON2_PROFILE: test
+
+jobs:
+  desktop-macos:
+    name: Desktop — macOS build
+    runs-on: macos-latest
+    # Observed runtime ~2 min; 25 is generous headroom. Without a timeout a hung job sits for
+    # the 360-minute default, blocking everything queued behind its concurrency group.
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - uses: dtolnay/rust-toolchain@1.94.1
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: pnpm install --frozen-lockfile
+      # `tauri::generate_context!` embeds the frontend at compile time, and tauri-build validates
+      # the bundled `resources/extension` path — so both the frontend dist and the staged
+      # extension must exist before the desktop crate compiles (mirrors the app's
+      # beforeBuildCommand). macOS uses the system WebKit (no webkit2gtk needed), so unlike the
+      # Linux `rust` job this can build sentinel-desktop — which is how the macOS-specific code
+      # (Touch ID, VPN platform gating) gets verified before merge. Keeping this coverage is
+      # deliberate: the 0.1.62 phone break happened precisely because a platform wasn't compiled
+      # in CI.
+      - run: pnpm --filter @sentinel/desktop build
+      - run: pnpm --filter @sentinel/extension build
+      - run: node apps/desktop/scripts/stage-extension.mjs
+      - name: clippy (desktop, macOS)
+        run: cargo clippy -p sentinel-desktop --all-targets -- -D warnings
+      - name: test (desktop, macOS)
+        run: cargo test -p sentinel-desktop

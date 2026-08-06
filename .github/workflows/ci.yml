@@ -1,13 +1,33 @@
 name: CI
 
+# Work branches are validated by the `pull_request` run ONLY. Listing `claude/**` under `push`
+# as well made every pushed commit run this whole workflow TWICE — measured at 40% of all CI
+# runs, since `concurrency` can't collapse them (`github.ref` is refs/heads/… on push but
+# refs/pull/N/merge on pull_request, so they land in different groups). `main` keeps its push
+# trigger: that's the post-merge signal the release gate relies on.
+#
+# (The two paths-ignore lists are duplicated on purpose — GitHub's workflow parser does not
+# support YAML anchors/aliases, so they must be spelled out. Keep them in sync.)
 on:
   push:
-    branches: ["main", "claude/**"]
+    branches: ["main"]
+    paths-ignore:
+      - "**/*.md"
+      - "docs/**"
+      - "LICENSE"
+      - ".github/ISSUE_TEMPLATE/**"
   pull_request:
     branches: ["main"]
+    paths-ignore:
+      - "**/*.md"
+      - "docs/**"
+      - "LICENSE"
+      - ".github/ISSUE_TEMPLATE/**"
 
+# head_ref on a PR, ref otherwise — so a rapid second push to a PR branch cancels the first
+# run instead of both running to completion.
 concurrency:
-  group: ci-${{ github.ref }}
+  group: ci-${{ github.head_ref || github.ref }}
   cancel-in-progress: true
 
 env:
@@ -19,6 +39,9 @@ jobs:
   rust:
     name: Rust — fmt, clippy, test
     runs-on: ubuntu-24.04
+    # Observed ~2 min. Every job here carries a timeout so a hung run can't sit for the
+    # 360-minute default, holding its concurrency group and delaying feedback on later pushes.
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.94.1
@@ -29,8 +52,10 @@ jobs:
         run: cargo fmt --all -- --check
       # Default members exclude sentinel-desktop (Tauri), which needs webkit2gtk not
       # present on the runner. The desktop crate is glue over the tested core.
+      # Same feature set as the test step below — mismatched features make Cargo re-unify and
+      # rebuild the whole dependency graph a second time inside this one job.
       - name: clippy
-        run: cargo clippy --all-targets -- -D warnings
+        run: cargo clippy --all-targets --features live-linode,live-hetzner,live-hibp -- -D warnings
       # The live-* features gate the real Linode/Hetzner/HIBP clients — the desktop app ships
       # with them ON (src-tauri/Cargo.toml), so their parser tests must run here too. Without
       # them every provider fixture test silently compiled out of CI.
@@ -47,6 +72,7 @@ jobs:
   api:
     name: API — Postgres integration
     runs-on: ubuntu-24.04
+    timeout-minutes: 20
     services:
       postgres:
         image: postgres:16
@@ -75,8 +101,9 @@ jobs:
         run: cargo test -p sentinel-api
 
   web:
-    name: Web — typecheck, lint, build, e2e
+    name: Web — typecheck, build, e2e
     runs-on: ubuntu-24.04
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
@@ -85,43 +112,30 @@ jobs:
           node-version: 22
           cache: pnpm
       - run: pnpm install --frozen-lockfile
+      # `lint` is byte-identical to `typecheck` (`tsc --noEmit`) in all three packages, so
+      # running both was a second full type-check for no extra signal. `test` IS real in
+      # packages/shared and apps/extension (node --test) — that one stays.
       - run: pnpm -r typecheck
-      - run: pnpm -r lint
       - run: pnpm -r test
       - run: pnpm --filter @sentinel/desktop build
+      # Chromium is ~150 MB and was re-downloaded on every run. Key on the pinned
+      # @playwright/test version so a version bump busts the cache automatically.
+      - name: cache Playwright browsers
+        id: pw-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-1.55.0
       - name: install Playwright browsers
+        if: steps.pw-cache.outputs.cache-hit != 'true'
         run: pnpm --filter @sentinel/desktop exec playwright install --with-deps chromium
+      # The browser binary is cached but its OS-level shared libraries are not — install just
+      # those on a cache hit (fast, apt-only, no download of Chromium itself).
+      - name: Playwright system deps (cache hit)
+        if: steps.pw-cache.outputs.cache-hit == 'true'
+        run: pnpm --filter @sentinel/desktop exec playwright install-deps chromium
       - name: e2e + screenshots
         run: pnpm --filter @sentinel/desktop e2e
-
-  desktop-macos:
-    name: Desktop — macOS build
-    runs-on: macos-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-          cache: pnpm
-      - uses: dtolnay/rust-toolchain@1.94.1
-        with:
-          components: clippy
-      - uses: Swatinem/rust-cache@v2
-      - run: pnpm install --frozen-lockfile
-      # `tauri::generate_context!` embeds the frontend at compile time, and tauri-build validates
-      # the bundled `resources/extension` path — so both the frontend dist and the staged
-      # extension must exist before the desktop crate compiles (mirrors the app's
-      # beforeBuildCommand). macOS uses the system WebKit (no webkit2gtk needed), so unlike the
-      # Linux `rust` job this can build sentinel-desktop — which is how the macOS-specific code
-      # (Touch ID, VPN platform gating) gets verified before merge.
-      - run: pnpm --filter @sentinel/desktop build
-      - run: pnpm --filter @sentinel/extension build
-      - run: node apps/desktop/scripts/stage-extension.mjs
-      - name: clippy (desktop, macOS)
-        run: cargo clippy -p sentinel-desktop --all-targets -- -D warnings
-      - name: test (desktop, macOS)
-        run: cargo test -p sentinel-desktop
 
   # Cross-component tripwires: Rust↔Swift protocol constants, QR payload shape, phone API paths
   # vs the server router, and version/changelog consistency. Pure greps — fails in seconds when
@@ -129,6 +143,7 @@ jobs:
   guards:
     name: Interop & version guards
     runs-on: ubuntu-24.04
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
       - name: interop contracts (Rust ↔ Swift ↔ server ↔ extension)
@@ -141,13 +156,24 @@ jobs:
   audit:
     name: Security audit
     runs-on: ubuntu-24.04
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.94.1
+      # cargo-audit was compiled FROM SOURCE on every run (~3 min, the slowest Linux job here)
+      # and then had its result swallowed by `|| true`. Cache the binary so it's built once per
+      # version bump instead of once per CI run.
+      - name: cache cargo-audit binary
+        id: audit-bin
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/bin/cargo-audit
+          key: cargo-audit-${{ runner.os }}-v0.21
+      - name: install cargo-audit (cache miss only)
+        if: steps.audit-bin.outputs.cache-hit != 'true'
+        run: cargo install cargo-audit --locked
       - name: cargo audit
-        run: |
-          cargo install cargo-audit --locked || true
-          cargo audit || true
+        run: cargo audit || true
       - uses: pnpm/action-setup@v4
       - uses: actions/setup-node@v4
         with:

@@ -29,6 +29,7 @@ import {
   serversSetRdns,
   serversSetProtection,
   serversOpenTerminal,
+  serversPortCheck,
   serversWatchdogGet,
   serversWatchdogSet,
   netdataGet,
@@ -68,6 +69,45 @@ import { ThroughputChart } from "../components/charts/ThroughputChart";
 const LIST_REFRESH_MS = 60_000;
 const METRICS_REFRESH_MS = 60_000;
 
+// --- Layout preferences -----------------------------------------------------
+// The screen used to be a single `max-w-4xl` column of full-width cards, each of
+// which expanded inline to reveal charts + Netdata + the whole lifecycle panel.
+// On a 1440px+ window that wasted most of the horizontal space and pushed the
+// second server below the fold. Servers now tile into a responsive grid and the
+// heavy per-server panels live in a slide-over drawer instead of inline.
+type Density = "comfortable" | "compact";
+const DENSITY_KEY = "northkey.servers.density";
+const COLS_KEY = "northkey.servers.cols";
+
+/** Column count: "auto" tracks the window width; 1-3 pins it. */
+type ColsPref = "auto" | 1 | 2 | 3;
+
+function loadPref<T extends string | number>(key: string, fallback: T): T {
+  try {
+    const raw = window.localStorage.getItem(key);
+    if (raw === null) return fallback;
+    const n = Number(raw);
+    return (Number.isFinite(n) && raw.trim() !== "" ? (n as T) : (raw as T)) ?? fallback;
+  } catch {
+    return fallback; // private mode / storage disabled — preferences are cosmetic
+  }
+}
+
+function savePref(key: string, value: string | number) {
+  try {
+    window.localStorage.setItem(key, String(value));
+  } catch {
+    /* cosmetic only */
+  }
+}
+
+function gridCls(cols: ColsPref): string {
+  if (cols === 1) return "grid grid-cols-1 gap-3";
+  if (cols === 2) return "grid grid-cols-1 gap-3 lg:grid-cols-2";
+  if (cols === 3) return "grid grid-cols-1 gap-3 lg:grid-cols-2 2xl:grid-cols-3";
+  return "grid grid-cols-1 gap-3 md:grid-cols-2 2xl:grid-cols-3 min-[2100px]:grid-cols-4";
+}
+
 const WINDOWS: { label: string; secs: number }[] = [
   { label: "1h", secs: 3600 },
   { label: "6h", secs: 6 * 3600 },
@@ -81,6 +121,12 @@ export function Servers() {
   const [msg, setMsg] = useState("");
   const [busy, setBusy] = useState(false);
   const [loaded, setLoaded] = useState(false);
+  // Drawer target is stored as "provider:id" rather than the object so the row keeps
+  // pointing at the freshly-polled server after each 60s refresh replaces the array.
+  const [openKey, setOpenKey] = useState<string | null>(null);
+  const [density, setDensity] = useState<Density>(() => loadPref<Density>(DENSITY_KEY, "comfortable"));
+  const [cols, setCols] = useState<ColsPref>(() => loadPref<ColsPref>(COLS_KEY, "auto"));
+  const [query, setQuery] = useState("");
 
   const refresh = useCallback(async () => {
     try {
@@ -143,8 +189,21 @@ export function Servers() {
 
   const noTokens = cfg && !cfg.linodeEnabled && !cfg.hetznerEnabled;
 
+  const q = query.trim().toLowerCase();
+  const shown = q
+    ? servers.filter(
+        (s) =>
+          s.label.toLowerCase().includes(q) ||
+          (s.ipv4 ?? "").includes(q) ||
+          s.region.toLowerCase().includes(q) ||
+          s.provider.toLowerCase().includes(q) ||
+          s.roles.some((r) => r.toLowerCase().includes(q)),
+      )
+    : servers;
+  const openServer = openKey ? servers.find((s) => `${s.provider}:${s.id}` === openKey) ?? null : null;
+
   return (
-    <div className="mx-auto max-w-4xl px-8 py-8">
+    <div className="mx-auto max-w-[1800px] px-6 py-8 xl:px-8">
       <SectionTitle hint="Linode · Hetzner Cloud">Servers</SectionTitle>
 
       {noTokens && (
@@ -176,12 +235,63 @@ export function Servers() {
                   <span className="mono text-[var(--text-primary)]">{v.monthly.toFixed(2)}</span>/mo ({v.count}× {cur})
                 </span>
               ))}
-              <button
-                onClick={() => void refresh()}
-                className="ml-auto inline-flex items-center gap-1 text-[var(--accent)] hover:underline"
-              >
-                <RefreshCw size={12} /> Refresh
-              </button>
+              <div className="ml-auto flex items-center gap-3">
+                {servers.length > 3 && (
+                  <input
+                    value={query}
+                    onChange={(e) => setQuery(e.target.value)}
+                    placeholder="Filter…"
+                    aria-label="Filter servers"
+                    className={`${inputCls} !h-7 !w-36 !py-0 text-xs`}
+                  />
+                )}
+                {/* Layout controls: the window is the same width for everyone, but how
+                    many servers fit comfortably is a taste call — so it's a preference. */}
+                <div className="flex items-center gap-1" role="group" aria-label="Card density">
+                  {(["comfortable", "compact"] as Density[]).map((d) => (
+                    <button
+                      key={d}
+                      onClick={() => {
+                        setDensity(d);
+                        savePref(DENSITY_KEY, d);
+                      }}
+                      aria-pressed={density === d}
+                      className={`rounded px-1.5 py-0.5 text-[11px] ${
+                        density === d
+                          ? "bg-[var(--accent)]/15 text-[var(--accent)]"
+                          : "text-[var(--text-muted)] hover:text-[var(--text-primary)]"
+                      }`}
+                    >
+                      {d === "comfortable" ? "Roomy" : "Dense"}
+                    </button>
+                  ))}
+                </div>
+                <div className="flex items-center gap-1" role="group" aria-label="Columns">
+                  {(["auto", 1, 2, 3] as ColsPref[]).map((c) => (
+                    <button
+                      key={String(c)}
+                      onClick={() => {
+                        setCols(c);
+                        savePref(COLS_KEY, c);
+                      }}
+                      aria-pressed={cols === c}
+                      className={`rounded px-1.5 py-0.5 text-[11px] ${
+                        cols === c
+                          ? "bg-[var(--accent)]/15 text-[var(--accent)]"
+                          : "text-[var(--text-muted)] hover:text-[var(--text-primary)]"
+                      }`}
+                    >
+                      {c === "auto" ? "Auto" : c}
+                    </button>
+                  ))}
+                </div>
+                <button
+                  onClick={() => void refresh()}
+                  className="inline-flex items-center gap-1 text-[var(--accent)] hover:underline"
+                >
+                  <RefreshCw size={12} /> Refresh
+                </button>
+              </div>
             </div>
           </Card>
 
@@ -193,9 +303,24 @@ export function Servers() {
             </Card>
           ))}
 
-          {servers.map((s) => (
-            <ServerRow key={`${s.provider}:${s.id}`} s={s} busy={busy} onAct={act} />
-          ))}
+          <div className={gridCls(cols)}>
+            {shown.map((s) => (
+              <ServerCard
+                key={`${s.provider}:${s.id}`}
+                s={s}
+                busy={busy}
+                density={density}
+                onAct={act}
+                onOpen={() => setOpenKey(`${s.provider}:${s.id}`)}
+              />
+            ))}
+          </div>
+
+          {shown.length === 0 && servers.length > 0 && (
+            <Card>
+              <p className="text-xs text-[var(--text-muted)]">No server matches “{query}”.</p>
+            </Card>
+          )}
 
           {servers.length === 0 && provErrors.length === 0 && (
             <Card>
@@ -203,13 +328,117 @@ export function Servers() {
             </Card>
           )}
 
-          <WatchdogCard />
-          <AlertFeed />
+          {/* Fleet-wide panels sit below the grid, side by side on wide windows. */}
+          <div className="mt-4 grid grid-cols-1 gap-3 2xl:grid-cols-2">
+            <WatchdogCard />
+            <AlertFeed />
+          </div>
         </>
       )}
 
       {msg && <p className="mt-3 text-xs text-[var(--text-muted)]">{msg}</p>}
+
+      {openServer && <ServerDrawer s={openServer} busy={busy} onAct={act} onClose={() => setOpenKey(null)} />}
     </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Slide-over drawer: everything that used to expand inline (provider charts,
+// Netdata, and the whole lifecycle/"Manage server" panel) now lives here, so a
+// server's detail never pushes its neighbours off the screen.
+// ---------------------------------------------------------------------------
+type DrawerTab = "overview" | "monitoring" | "manage" | "access";
+
+function ServerDrawer({
+  s,
+  busy,
+  onAct,
+  onClose,
+}: {
+  s: ManagedServer;
+  busy: boolean;
+  onAct: (s: ManagedServer, action: "start" | "stop" | "reboot") => Promise<void>;
+  onClose: () => void;
+}) {
+  const [tab, setTab] = useState<DrawerTab>("overview");
+
+  // Esc closes, matching every other dismissible surface in the app.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") onClose();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose]);
+
+  const TABS: { id: DrawerTab; label: string }[] = [
+    { id: "overview", label: "Overview" },
+    { id: "monitoring", label: "Monitoring" },
+    { id: "manage", label: "Manage" },
+    { id: "access", label: "Access" },
+  ];
+
+  return (
+    <div className="fixed inset-0 z-40 flex justify-end">
+      <button
+        aria-label="Close"
+        onClick={onClose}
+        className="absolute inset-0 bg-black/50 backdrop-blur-[1px]"
+      />
+      <aside
+        role="dialog"
+        aria-label={`${s.label} details`}
+        className="relative flex h-full w-full max-w-[900px] flex-col overflow-hidden border-l border-[var(--border)] bg-[var(--bg-primary)] shadow-2xl"
+      >
+        <header className="shrink-0 border-b border-[var(--border)] px-5 py-3">
+          <div className="flex items-center gap-2">
+            <span className="truncate text-sm font-medium">{s.label}</span>
+            <Badge tone={s.provider === "hetzner" ? "danger" : "accent"}>
+              {s.provider === "hetzner" ? "Hetzner" : "Linode"}
+            </Badge>
+            <Badge tone={stateTone(s.state)}>{s.state}</Badge>
+            <button
+              onClick={onClose}
+              className="ml-auto text-xs text-[var(--text-muted)] hover:text-[var(--text-primary)]"
+            >
+              Close ✕
+            </button>
+          </div>
+          <div className="mt-2 flex gap-1">
+            {TABS.map((t) => (
+              <button
+                key={t.id}
+                onClick={() => setTab(t.id)}
+                aria-pressed={tab === t.id}
+                className={`rounded px-2.5 py-1 text-xs ${
+                  tab === t.id
+                    ? "bg-[var(--accent)]/15 text-[var(--accent)]"
+                    : "text-[var(--text-secondary)] hover:text-[var(--text-primary)]"
+                }`}
+              >
+                {t.label}
+              </button>
+            ))}
+          </div>
+        </header>
+
+        <div className="min-h-0 flex-1 overflow-y-auto px-5 py-4">
+          {tab === "overview" && <DrawerOverview s={s} busy={busy} onAct={onAct} />}
+          {tab === "monitoring" && (s.ipv4 ? <NetdataPanel s={s} /> : <NoIp />)}
+          {tab === "manage" && <ServerLifecycle s={s} />}
+          {tab === "access" && (s.ipv4 ? <AccessTab s={s} /> : <NoIp />)}
+        </div>
+      </aside>
+    </div>
+  );
+}
+
+function NoIp() {
+  return (
+    <p className="text-xs text-[var(--text-muted)]">
+      This server has no public IPv4 address, so the app can’t reach it directly.
+    </p>
   );
 }
 
@@ -225,17 +454,26 @@ function stateTone(state: string): "ok" | "neutral" | "accent" | "danger" {
   return "accent";
 }
 
-function ServerRow({
+/**
+ * One tile in the server grid. Deliberately fixed-height and self-contained: it
+ * shows identity, health at a glance and the power controls, and defers every
+ * heavy panel to the drawer. Nothing here expands, so cards stay aligned.
+ */
+function ServerCard({
   s,
   busy,
+  density,
   onAct,
+  onOpen,
 }: {
   s: ManagedServer;
   busy: boolean;
+  density: Density;
   onAct: (s: ManagedServer, action: "start" | "stop" | "reboot") => Promise<void>;
+  onOpen: () => void;
 }) {
-  const [open, setOpen] = useState(false);
   const [copied, setCopied] = useState(false);
+  const roomy = density === "comfortable";
 
   const copyIp = async () => {
     if (!s.ipv4) return;
@@ -245,21 +483,21 @@ function ServerRow({
   };
 
   return (
-    <Card className="mb-3 !p-4">
-      <div className="flex items-center gap-3">
-        <button
-          onClick={() => setOpen((v) => !v)}
-          className="text-[var(--text-muted)] hover:text-[var(--accent)]"
-          aria-label={open ? "Collapse" : "Expand"}
-        >
-          {open ? <ChevronDown size={16} /> : <ChevronRight size={16} />}
-        </button>
+    <Card className={roomy ? "!p-4" : "!p-3"}>
+      <div className="flex items-start gap-2">
         <div className="min-w-0 flex-1">
-          <div className="flex flex-wrap items-center gap-2">
-            <span className="truncate text-sm font-medium">{s.label}</span>
+          <div className="flex flex-wrap items-center gap-1.5">
+            <button
+              onClick={onOpen}
+              className="truncate text-sm font-medium hover:text-[var(--accent)]"
+              title="Open details"
+            >
+              {s.label}
+            </button>
             <Badge tone={s.provider === "hetzner" ? "danger" : "accent"}>
               {s.provider === "hetzner" ? "Hetzner" : "Linode"}
             </Badge>
+            <Badge tone={stateTone(s.state)}>{s.state}</Badge>
             {s.roles
               .filter((r) => r !== "external")
               .map((r) => (
@@ -267,45 +505,272 @@ function ServerRow({
                   {r}
                 </Badge>
               ))}
-            <Badge tone={stateTone(s.state)}>{s.state}</Badge>
           </div>
-          <div className="mt-0.5 flex flex-wrap items-center gap-x-3 gap-y-0.5 text-xs text-[var(--text-muted)]">
+          <div className="mt-1 flex flex-wrap items-center gap-x-2.5 gap-y-0.5 text-[11px] text-[var(--text-muted)]">
             <span className="mono">{s.region}</span>
-            <span className="mono">{s.instanceType}</span>
             {s.vcpus > 0 && (
               <span>
-                {s.vcpus} vCPU · {(s.memoryMb / 1024).toFixed(0)} GB · {s.diskGb} GB disk
+                {s.vcpus} vCPU · {(s.memoryMb / 1024).toFixed(0)} GB
               </span>
-            )}
-            {s.ipv4 && (
-              <button onClick={() => void copyIp()} className="mono inline-flex items-center gap-1 hover:text-[var(--accent)]">
-                {s.ipv4} <CopyIcon size={11} /> {copied && <span className="text-[var(--ok)]">copied</span>}
-              </button>
             )}
             <span>
               {s.currency === "EUR" ? "€" : "$"}
               {s.monthly.toFixed(2)}/mo
             </span>
           </div>
+          {s.ipv4 && (
+            <button
+              onClick={() => void copyIp()}
+              className="mono mt-0.5 inline-flex items-center gap-1 text-[11px] text-[var(--text-muted)] hover:text-[var(--accent)]"
+            >
+              {s.ipv4} <CopyIcon size={10} />
+              {copied && <span className="text-[var(--ok)]">copied</span>}
+            </button>
+          )}
         </div>
-        <div className="flex shrink-0 items-center gap-3 text-xs">
+      </div>
+
+      {roomy && s.ipv4 && <CardVitals s={s} />}
+
+      <div className="mt-3 flex items-center gap-3 border-t border-[var(--border)] pt-2 text-xs">
+        {s.state === "stopped" ? (
+          <button
+            disabled={busy}
+            onClick={() => void onAct(s, "start")}
+            className="text-[var(--ok)] hover:underline disabled:opacity-50"
+          >
+            Start
+          </button>
+        ) : (
+          <button
+            disabled={busy}
+            onClick={() => void onAct(s, "stop")}
+            className="text-[var(--text-secondary)] hover:underline disabled:opacity-50"
+          >
+            Stop
+          </button>
+        )}
+        <button
+          disabled={busy || s.state === "stopped"}
+          onClick={() => void onAct(s, "reboot")}
+          className="text-[var(--accent)] hover:underline disabled:opacity-50"
+        >
+          Reboot
+        </button>
+        <button onClick={onOpen} className="ml-auto text-[var(--accent)] hover:underline">
+          Details →
+        </button>
+      </div>
+    </Card>
+  );
+}
+
+/**
+ * At-a-glance CPU/RAM for a card. Reuses the existing Netdata metric command, so
+ * it only shows anything for servers whose agent is already reachable — a server
+ * that isn't set up simply shows nothing rather than an error, because the card
+ * is not where you'd fix that (the drawer's Monitoring tab is).
+ */
+function CardVitals({ s }: { s: ManagedServer }) {
+  const [cpu, setCpu] = useState<number | undefined>();
+  const [ram, setRam] = useState<number | undefined>();
+  const alive = useRef(true);
+
+  useEffect(() => {
+    alive.current = true;
+    const last = (pts: [number, number][]): number | undefined =>
+      pts.length ? pts[pts.length - 1][1] : undefined;
+    const load = async () => {
+      try {
+        const cfg = await netdataGet(s.provider, s.id);
+        if (!cfg.enabled || !s.ipv4) return;
+        // Two points over the last minute is the cheapest query that still yields a
+        // current reading; the drawer owns the real time-series views.
+        const [c, r] = await Promise.all([
+          netdataMetric(s.provider, s.id, s.ipv4, "cpu", 60, 2),
+          netdataMetric(s.provider, s.id, s.ipv4, "ram", 60, 2),
+        ]);
+        if (!alive.current) return;
+        setCpu(last(c));
+        setRam(last(r));
+      } catch {
+        /* card vitals are decorative — the Monitoring tab reports real errors */
+      }
+    };
+    void load();
+    const t = window.setInterval(() => void load(), METRICS_REFRESH_MS);
+    return () => {
+      alive.current = false;
+      window.clearInterval(t);
+    };
+  }, [s.provider, s.id, s.ipv4]);
+
+  if (cpu === undefined && ram === undefined) return null;
+  return (
+    <div className="mt-2 grid grid-cols-2 gap-2">
+      <MiniStat label="CPU" pct={cpu} />
+      <MiniStat label="RAM" pct={ram} />
+    </div>
+  );
+}
+
+function MiniStat({ label, pct }: { label: string; pct: number | undefined }) {
+  const v = pct ?? 0;
+  const tone = v >= 90 ? "var(--danger)" : v >= 70 ? "var(--warn)" : "var(--ok)";
+  return (
+    <div>
+      <div className="flex items-baseline justify-between text-[10px] text-[var(--text-muted)]">
+        <span>{label}</span>
+        <span className="mono" style={{ color: tone }}>
+          {pct === undefined ? "—" : `${v.toFixed(0)}%`}
+        </span>
+      </div>
+      <div className="mt-0.5 h-1 overflow-hidden rounded bg-[var(--bg-tertiary)]">
+        <div className="h-full rounded" style={{ width: `${Math.min(100, v)}%`, background: tone }} />
+      </div>
+    </div>
+  );
+}
+
+/** Drawer tab 1: provider-side charts + power, i.e. what the old inline expand showed first. */
+function DrawerOverview({
+  s,
+  busy,
+  onAct,
+}: {
+  s: ManagedServer;
+  busy: boolean;
+  onAct: (s: ManagedServer, action: "start" | "stop" | "reboot") => Promise<void>;
+}) {
+  return (
+    <>
+      <div className="mb-3 flex flex-wrap items-center gap-x-4 gap-y-1 text-[11px] text-[var(--text-muted)]">
+        <span className="mono">{s.instanceType}</span>
+        {s.vcpus > 0 && (
+          <span>
+            {s.vcpus} vCPU · {(s.memoryMb / 1024).toFixed(0)} GB RAM · {s.diskGb} GB disk
+          </span>
+        )}
+        <span className="mono">{s.region}</span>
+        <div className="ml-auto flex items-center gap-3 text-xs">
           {s.state === "stopped" ? (
-            <button disabled={busy} onClick={() => void onAct(s, "start")} className="text-[var(--ok)] hover:underline disabled:opacity-50">
+            <button
+              disabled={busy}
+              onClick={() => void onAct(s, "start")}
+              className="text-[var(--ok)] hover:underline disabled:opacity-50"
+            >
               Start
             </button>
           ) : (
-            <button disabled={busy} onClick={() => void onAct(s, "stop")} className="text-[var(--text-secondary)] hover:underline disabled:opacity-50">
+            <button
+              disabled={busy}
+              onClick={() => void onAct(s, "stop")}
+              className="text-[var(--text-secondary)] hover:underline disabled:opacity-50"
+            >
               Stop
             </button>
           )}
-          <button disabled={busy || s.state === "stopped"} onClick={() => void onAct(s, "reboot")} className="text-[var(--accent)] hover:underline disabled:opacity-50">
+          <button
+            disabled={busy || s.state === "stopped"}
+            onClick={() => void onAct(s, "reboot")}
+            className="text-[var(--accent)] hover:underline disabled:opacity-50"
+          >
             Reboot
           </button>
         </div>
       </div>
+      <ServerCharts s={s} />
+    </>
+  );
+}
 
-      {open && <ServerCharts s={s} />}
-    </Card>
+/**
+ * Drawer tab 4: reaching the box. The port checker exists because diagnosing
+ * "monitoring won't connect" previously meant SSH-ing in and running five
+ * commands; a host-side firewall (ufw) is invisible from the provider console,
+ * and a refused-vs-timeout distinction identifies it immediately.
+ */
+function AccessTab({ s }: { s: ManagedServer }) {
+  const host = s.ipv4 ?? "";
+  const [port, setPort] = useState(19999);
+  const [probing, setProbing] = useState(false);
+  const [result, setResult] = useState<{ ok: boolean; detail: string } | null>(null);
+
+  const COMMON: { port: number; what: string }[] = [
+    { port: 22, what: "SSH" },
+    { port: 80, what: "HTTP" },
+    { port: 443, what: "HTTPS" },
+    { port: 19999, what: "Netdata" },
+  ];
+
+  const check = async (p: number) => {
+    setPort(p);
+    setProbing(true);
+    setResult(null);
+    try {
+      const r = await serversPortCheck(host, p);
+      setResult({ ok: r.open, detail: r.detail });
+    } catch (e) {
+      setResult({ ok: false, detail: errMsg(e) });
+    }
+    setProbing(false);
+  };
+
+  return (
+    <div className="space-y-4">
+      <div>
+        <div className="mb-1 flex items-center gap-2 text-sm font-medium">
+          <TerminalSquare size={14} /> Open a terminal
+        </div>
+        <p className="mb-2 text-xs text-[var(--text-secondary)]">
+          Opens your system terminal already connected to this server.
+        </p>
+        <button className={btnCls} onClick={() => void serversOpenTerminal(host)}>
+          SSH to {host}
+        </button>
+        <div className="mt-2">
+          <CopyLine text={`ssh root@${host}`} />
+        </div>
+      </div>
+
+      <div className="border-t border-[var(--border)] pt-3">
+        <div className="mb-1 flex items-center gap-2 text-sm font-medium">
+          <ShieldCheck size={14} /> Can I reach a port?
+        </div>
+        <p className="mb-2 text-xs text-[var(--text-secondary)]">
+          Tests from this computer, so it sees exactly what the app sees — including any firewall
+          running <em>on</em> the server that your provider’s console doesn’t show.
+        </p>
+        <div className="flex flex-wrap items-center gap-2">
+          {COMMON.map((c) => (
+            <button key={c.port} className={btnCls} disabled={probing} onClick={() => void check(c.port)}>
+              {c.what} ({c.port})
+            </button>
+          ))}
+          <input
+            type="number"
+            value={port}
+            onChange={(e) => setPort(Number(e.target.value))}
+            aria-label="Port to test"
+            className={`${inputCls} !w-24`}
+          />
+          <button className={btnCls} disabled={probing} onClick={() => void check(port)}>
+            {probing ? "Testing…" : "Test"}
+          </button>
+        </div>
+        {result && (
+          <div
+            className={`mt-2 rounded-[10px] border p-2 text-xs ${
+              result.ok
+                ? "border-[var(--ok)]/40 bg-[var(--ok)]/10 text-[var(--ok)]"
+                : "border-[var(--warn)]/40 bg-[var(--warn)]/10 text-[var(--warn)]"
+            }`}
+          >
+            {result.detail}
+          </div>
+        )}
+      </div>
+    </div>
   );
 }
 

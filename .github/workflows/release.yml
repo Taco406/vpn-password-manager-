@@ -29,6 +29,14 @@ on:
 permissions:
   contents: write
 
+# One release at a time. Two overlapping dispatches would race on the shared latest.json
+# asset — the same last-writer-wins hazard that `max-parallel: 1` guards against within a
+# single run, but across runs where max-parallel can't see it.
+# NOT cancel-in-progress: killing a half-finished release mid-upload leaves a broken draft.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   # Releases must never ship untested code: deployed servers auto-pull the :latest image daily,
   # so a red build reaching ghcr would propagate to the whole fleet within a day. Everything
@@ -36,6 +44,7 @@ jobs:
   gate:
     name: Test gate (server + core + guards)
     runs-on: ubuntu-24.04
+    timeout-minutes: 25
     services:
       postgres:
         image: postgres:16
@@ -101,6 +110,7 @@ jobs:
     name: Publish sync-server image (ghcr)
     needs: gate
     runs-on: ubuntu-24.04
+    timeout-minutes: 30
     permissions:
       contents: read
       packages: write
@@ -122,7 +132,12 @@ jobs:
           push: true
           tags: ghcr.io/${{ steps.owner.outputs.name }}/sentinel-api:latest
           cache-from: type=gha
-          cache-to: type=gha,mode=max
+          # mode=min, not max: `max` pushes every intermediate layer into the 10 GB repo-wide
+          # Actions cache, which is LRU-evicted and shared with the (multi-GB) Rust caches for
+          # three platforms. Evicting those turns into cold release rebuilds on the slowest
+          # (macOS) leg — far more wall-clock than the few seconds mode=min costs here.
+          # (The 10 GB Actions cache limit applies to public repos too, so this one is real.)
+          cache-to: type=gha,mode=min
 
   release:
     needs: gate
@@ -143,6 +158,10 @@ jobs:
           - platform: windows-latest
             args: ""
     runs-on: ${{ matrix.platform }}
+    # Generous (a universal-macOS Tauri build plus Apple notarization polling is the long pole,
+    # observed ~6 min) but finite — notarization genuinely can hang, and a stuck leg would
+    # otherwise sit for the 360-minute default with the release left half-published.
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
 
@@ -320,6 +339,7 @@ jobs:
     name: Verify + publish release
     needs: release
     runs-on: ubuntu-24.04
+    timeout-minutes: 15
     permissions:
       contents: write
       actions: write # to chain the iOS TestFlight build after publishing

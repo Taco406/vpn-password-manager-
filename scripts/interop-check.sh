@@ -176,4 +176,18 @@ case "$ios_target" in
     *) echo "skip: iOS deployment target is '$ios_target' (guard covers 16.x)" ;;
 esac
 
+# 16. Every workflow job must set `timeout-minutes`. Without it a job inherits GitHub's
+#     360-minute default, so a hung job sits for six hours holding its concurrency group and
+#     delaying every later push. (Runners are free on this public repo — this is a hygiene
+#     tripwire, not a cost one.) It belongs with the other "can't regress silently" guards.
+missing_timeout=""
+for wf in .github/workflows/*.yml; do
+    # Job keys are exactly 2-space-indented under `jobs:`; timeout-minutes is 4-space-indented.
+    jobs_n=$(awk '/^jobs:/{f=1;next} f&&/^  [a-zA-Z0-9_-]+:/{c++} END{print c+0}' "$wf")
+    timeouts_n=$(grep -c '^    timeout-minutes:' "$wf" || true)
+    [ "$jobs_n" -eq "$timeouts_n" ] || missing_timeout="$missing_timeout $(basename "$wf")($timeouts_n/$jobs_n)"
+done
+[ -z "$missing_timeout" ] || fail "workflow job(s) without timeout-minutes:$missing_timeout"
+echo "ok: every workflow job sets timeout-minutes"
+
 echo "All interop checks passed."

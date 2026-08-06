@@ -16,6 +16,9 @@ jobs:
   check:
     name: Verify the certificate can sign
     runs-on: macos-latest
+    # ~30 seconds of `security` keychain probing. A hung keychain prompt would otherwise sit
+    # for the 360-minute default before GitHub kills it.
+    timeout-minutes: 10
     env:
       CERT: ${{ secrets.APPLE_CERTIFICATE }}
       CERT_PW: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}

@@ -387,6 +387,22 @@ export async function serversOpenTerminal(ip: string): Promise<void> {
   await inv("servers_open_terminal", { ip });
 }
 
+/** Whether a TCP port on a server accepts a connection from this computer. */
+export interface PortCheckOut {
+  open: boolean;
+  detail: string;
+}
+
+/**
+ * Test a TCP port on a server from this machine. Distinguishes "refused"
+ * (reachable host, nothing listening) from "timed out" (a firewall is dropping),
+ * which is the difference between a service problem and a firewall problem.
+ */
+export async function serversPortCheck(host: string, port: number): Promise<PortCheckOut> {
+  if (!inTauri()) throw new Error("Port testing is only available in the desktop app.");
+  return inv<PortCheckOut>("servers_port_check", { host, port });
+}
+
 // --- Server watchdog + Netdata (stage 2) -------------------------------------
 
 export interface WatchdogCfg {
