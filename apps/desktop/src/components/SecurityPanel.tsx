@@ -10,14 +10,22 @@ import {
   crowdsecStatus,
   crowdsecAlerts,
   crowdsecDecisions,
+  crowdsecBan,
+  crowdsecUnban,
+  crowdsecScenarios,
+  crowdsecPromote,
+  crowdsecDemote,
+  crowdsecAllowlistGet,
+  crowdsecAllowlistSet,
   type ManagedServer,
   type CrowdsecStatus,
   type CrowdsecAlert,
   type CrowdsecDecision,
+  type CrowdsecScenario,
 } from "../bridge";
-import { btnCls, errMsg } from "./kit";
+import { btnCls, inputCls, errMsg } from "./kit";
 import { Badge } from "./ui";
-import { toastError } from "./Toast";
+import { toastError, toastSuccess } from "./Toast";
 
 const POLL_MS = 30_000;
 
@@ -26,10 +34,15 @@ export function SecurityPanel({ s }: { s: ManagedServer }) {
   const [status, setStatus] = useState<CrowdsecStatus | null>(null);
   const [alerts, setAlerts] = useState<CrowdsecAlert[]>([]);
   const [bans, setBans] = useState<CrowdsecDecision[]>([]);
+  const [scenarios, setScenarios] = useState<CrowdsecScenario[]>([]);
+  const [allowlist, setAllowlist] = useState<string[]>([]);
   const [deploying, setDeploying] = useState(false);
   const [deployLog, setDeployLog] = useState("");
   const [loading, setLoading] = useState(false);
   const [err, setErr] = useState("");
+  const [busyIp, setBusyIp] = useState("");
+  const [banIp, setBanIp] = useState("");
+  const [newAllow, setNewAllow] = useState("");
   const alive = useRef(true);
 
   const refresh = useCallback(async () => {
@@ -41,13 +54,17 @@ export function SecurityPanel({ s }: { s: ManagedServer }) {
       if (!alive.current) return;
       setStatus(st);
       if (st.protected || st.agent === "active") {
-        const [a, d] = await Promise.all([
+        const [a, d, sc, al] = await Promise.all([
           crowdsecAlerts(s.provider, s.id, host, 50),
           crowdsecDecisions(s.provider, s.id, host),
+          crowdsecScenarios(s.provider, s.id, host).catch(() => [] as CrowdsecScenario[]),
+          crowdsecAllowlistGet(s.provider, s.id, host).catch(() => [] as string[]),
         ]);
         if (!alive.current) return;
         setAlerts(a);
         setBans(d);
+        setScenarios(sc);
+        setAllowlist(al);
       }
     } catch (e) {
       if (alive.current) setErr(errMsg(e));
@@ -81,6 +98,80 @@ export function SecurityPanel({ s }: { s: ManagedServer }) {
       setErr(errMsg(e));
     } finally {
       setDeploying(false);
+    }
+  };
+
+  const unban = async (ip: string) => {
+    setBusyIp(ip);
+    try {
+      await crowdsecUnban(s.provider, s.id, host, ip);
+      toastSuccess(`Unbanned ${ip}`);
+      await refresh();
+    } catch (e) {
+      toastError(errMsg(e));
+    } finally {
+      setBusyIp("");
+    }
+  };
+
+  const ban = async (perm: boolean) => {
+    const ip = banIp.trim();
+    if (!ip) return;
+    if (perm && !window.confirm(`Permanently ban ${ip}? It stays blocked until you unban it.`)) {
+      return;
+    }
+    setBusyIp(ip);
+    try {
+      await crowdsecBan(s.provider, s.id, host, ip, perm ? 0 : 240); // temp = 4h
+      toastSuccess(`${perm ? "Permanently banned" : "Banned"} ${ip}`);
+      setBanIp("");
+      await refresh();
+    } catch (e) {
+      toastError(errMsg(e));
+    } finally {
+      setBusyIp("");
+    }
+  };
+
+  const toggleScenario = async (sc: CrowdsecScenario) => {
+    // Promoting to enforced can start real bans — confirm for the web scenarios.
+    if (sc.simulated && !window.confirm(
+      `Enforce “${sc.name}”? It will start blocking IPs that trip it. ` +
+        `Make sure your allowlist covers anyone who must never be blocked.`,
+    )) {
+      return;
+    }
+    try {
+      if (sc.simulated) await crowdsecPromote(s.provider, s.id, host, sc.name);
+      else await crowdsecDemote(s.provider, s.id, host, sc.name);
+      await refresh();
+    } catch (e) {
+      toastError(errMsg(e));
+    }
+  };
+
+  const addAllow = async () => {
+    const ip = newAllow.trim();
+    if (!ip) return;
+    const next = Array.from(new Set([...allowlist, ip]));
+    try {
+      await crowdsecAllowlistSet(s.provider, s.id, host, next);
+      setAllowlist(next);
+      setNewAllow("");
+      toastSuccess("Allowlist updated");
+    } catch (e) {
+      toastError(errMsg(e));
+    }
+  };
+
+  const removeAllow = async (ip: string) => {
+    const next = allowlist.filter((x) => x !== ip);
+    try {
+      await crowdsecAllowlistSet(s.provider, s.id, host, next);
+      setAllowlist(next);
+      toastSuccess("Allowlist updated");
+    } catch (e) {
+      toastError(errMsg(e));
     }
   };
 
@@ -171,8 +262,15 @@ export function SecurityPanel({ s }: { s: ManagedServer }) {
                 >
                   <span className="mono text-[var(--text-primary)]">{b.sourceIp}</span>
                   <span className="text-[var(--text-muted)]">{b.scenario}</span>
-                  <span className="ml-auto text-[var(--text-muted)]">{b.duration}</span>
                   {b.origin === "cscli" && <Badge tone="accent">manual</Badge>}
+                  <span className="ml-auto text-[var(--text-muted)]">{b.duration}</span>
+                  <button
+                    disabled={busyIp === b.sourceIp}
+                    onClick={() => void unban(b.sourceIp)}
+                    className="text-[var(--accent)] hover:underline disabled:opacity-50"
+                  >
+                    {busyIp === b.sourceIp ? "…" : "unban"}
+                  </button>
                 </div>
               ))}
             </div>
@@ -205,6 +303,107 @@ export function SecurityPanel({ s }: { s: ManagedServer }) {
                     <Badge tone="danger">enforced</Badge>
                   )}
                 </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+      {/* Manual ban */}
+      {protectedOn && (
+        <div className="border-t border-[var(--border-subtle)] pt-3">
+          <div className="mb-1 text-xs font-medium">Block an IP yourself</div>
+          <div className="flex flex-wrap items-center gap-2">
+            <input
+              value={banIp}
+              onChange={(e) => setBanIp(e.target.value)}
+              placeholder="1.2.3.4"
+              aria-label="IP to ban"
+              className={`${inputCls} !w-40`}
+            />
+            <button className={btnCls} disabled={!banIp.trim() || busyIp === banIp.trim()} onClick={() => void ban(false)}>
+              Ban 4h
+            </button>
+            <button
+              className={btnCls}
+              disabled={!banIp.trim() || busyIp === banIp.trim()}
+              onClick={() => void ban(true)}
+            >
+              Ban permanently
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* Detection scenarios: training ↔ enforced */}
+      {protectedOn && scenarios.length > 0 && (
+        <div className="border-t border-[var(--border-subtle)] pt-3">
+          <div className="mb-1 text-xs font-medium">Detection rules</div>
+          <p className="mb-2 text-[11px] text-[var(--text-muted)]">
+            <strong>Training</strong> rules log but never block. Promote one to <strong>enforced</strong>
+            once you’ve confirmed it isn’t flagging real visitors. SSH stays enforced.
+          </p>
+          <div className="max-h-48 space-y-1 overflow-auto">
+            {scenarios.map((sc) => (
+              <div
+                key={sc.name}
+                className="flex flex-wrap items-center gap-x-2 gap-y-0.5 rounded px-2 py-1 text-[11px] hover:bg-[var(--bg-inset)]"
+              >
+                <span className="mono truncate text-[var(--text-secondary)]">{sc.name}</span>
+                {sc.simulated ? (
+                  <Badge tone="warn">training</Badge>
+                ) : (
+                  <Badge tone="ok">enforced</Badge>
+                )}
+                <button
+                  onClick={() => void toggleScenario(sc)}
+                  className="ml-auto text-[var(--accent)] hover:underline"
+                >
+                  {sc.simulated ? "enforce" : "back to training"}
+                </button>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* Allowlist */}
+      {protectedOn && (
+        <div className="border-t border-[var(--border-subtle)] pt-3">
+          <div className="mb-1 text-xs font-medium">Never-ban allowlist</div>
+          <p className="mb-2 text-[11px] text-[var(--text-muted)]">
+            These IPs (and private ranges) are never blocked — your own address, clients, uptime
+            monitors. Your current IP was added automatically when you protected the server.
+          </p>
+          <div className="mb-2 flex flex-wrap items-center gap-2">
+            <input
+              value={newAllow}
+              onChange={(e) => setNewAllow(e.target.value)}
+              placeholder="1.2.3.4 or 1.2.3.0/24"
+              aria-label="Allowlist entry"
+              className={`${inputCls} !w-48`}
+            />
+            <button className={btnCls} disabled={!newAllow.trim()} onClick={() => void addAllow()}>
+              Add
+            </button>
+          </div>
+          {allowlist.length === 0 ? (
+            <p className="text-[11px] text-[var(--text-muted)]">No operator IPs listed yet.</p>
+          ) : (
+            <div className="flex flex-wrap gap-1.5">
+              {allowlist.map((ip) => (
+                <span
+                  key={ip}
+                  className="mono inline-flex items-center gap-1 rounded bg-[var(--bg-inset)] px-2 py-0.5 text-[11px]"
+                >
+                  {ip}
+                  <button
+                    onClick={() => void removeAllow(ip)}
+                    className="text-[var(--text-muted)] hover:text-[var(--danger)]"
+                    aria-label={`Remove ${ip}`}
+                  >
+                    ✕
+                  </button>
+                </span>
               ))}
             </div>
           )}

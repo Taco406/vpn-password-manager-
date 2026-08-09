@@ -329,6 +329,258 @@ pub async fn crowdsec_decisions(
 }
 
 // ---------------------------------------------------------------------------
+// Phase B — control: ban/unban, promote/demote scenarios, allowlist.
+//
+// Every value that reaches a root `cscli` command is validated against a strict
+// charset FIRST (see `valid_ip_or_cidr` / `valid_scenario`). These run as root over
+// SSH, so an unvalidated string would be a command-injection hole — the validators are
+// the security boundary, not a nicety.
+// ---------------------------------------------------------------------------
+
+/// True only for a syntactically valid IPv4/IPv6 address or CIDR. Rejects anything with
+/// a character that isn't part of an address, closing off shell injection.
+pub fn valid_ip_or_cidr(s: &str) -> bool {
+    let s = s.trim();
+    if s.is_empty() || s.len() > 43 {
+        return false;
+    }
+    if !s
+        .chars()
+        .all(|c| c.is_ascii_hexdigit() || matches!(c, '.' | ':' | '/'))
+    {
+        return false;
+    }
+    if let Some((addr, bits)) = s.split_once('/') {
+        return addr.parse::<std::net::IpAddr>().is_ok()
+            && bits.parse::<u8>().is_ok_and(|b| b <= 128);
+    }
+    s.parse::<std::net::IpAddr>().is_ok()
+}
+
+/// True only for a CrowdSec scenario name like `crowdsecurity/http-probing`.
+pub fn valid_scenario(s: &str) -> bool {
+    let s = s.trim();
+    !s.is_empty()
+        && s.len() <= 128
+        && s.chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '/' | '-' | '_' | '.'))
+}
+
+/// A very long ban that stands in for "permanent" (cscli has no forever). ~100 years.
+const PERM_DURATION: &str = "876000h";
+
+/// Ban an IP. `minutes == 0` means permanent (requires an in-app confirmation on the UI
+/// side). Uses a manual `cscli` decision, which the allowlist still overrides — you can't
+/// accidentally ban an allowlisted address.
+#[tauri::command]
+pub async fn crowdsec_ban(
+    state: State<'_, AppState>,
+    provider: String,
+    id: String,
+    host: String,
+    ip: String,
+    minutes: u32,
+) -> Result<(), String> {
+    let (dir, locked) = ctx(&state);
+    if locked {
+        return Err("Unlock your vault first.".into());
+    }
+    if !valid_ip_or_cidr(&ip) {
+        return Err(format!("“{ip}” is not a valid IP address."));
+    }
+    let host = require_host(&host).await?;
+    let duration = if minutes == 0 {
+        PERM_DURATION.to_string()
+    } else {
+        format!("{minutes}m")
+    };
+    let cmd = format!(
+        "cscli decisions add --ip {ip} --duration {duration} --reason 'NorthKey manual' 2>&1"
+    );
+    let out = crate::ssh::exec(&dir, &provider, &id, &host, &cmd, QUERY_TIMEOUT_SECS).await?;
+    if out.code != 0 {
+        return Err(format!("Ban failed: {}", out.stdout.trim()));
+    }
+    Ok(())
+}
+
+/// Remove every ban on an IP (one-tap unban).
+#[tauri::command]
+pub async fn crowdsec_unban(
+    state: State<'_, AppState>,
+    provider: String,
+    id: String,
+    host: String,
+    ip: String,
+) -> Result<(), String> {
+    let (dir, locked) = ctx(&state);
+    if locked {
+        return Err("Unlock your vault first.".into());
+    }
+    if !valid_ip_or_cidr(&ip) {
+        return Err(format!("“{ip}” is not a valid IP address."));
+    }
+    let host = require_host(&host).await?;
+    let cmd = format!("cscli decisions delete --ip {ip} 2>&1");
+    let out = crate::ssh::exec(&dir, &provider, &id, &host, &cmd, QUERY_TIMEOUT_SECS).await?;
+    if out.code != 0 {
+        return Err(format!("Unban failed: {}", out.stdout.trim()));
+    }
+    Ok(())
+}
+
+/// A scenario and whether it's currently in training (simulation) mode.
+#[derive(Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct Scenario {
+    pub name: String,
+    /// True = training (alerts only); false = enforced (can ban).
+    pub simulated: bool,
+}
+
+/// List installed scenarios with their training/enforced state.
+#[tauri::command]
+pub async fn crowdsec_scenarios(
+    state: State<'_, AppState>,
+    provider: String,
+    id: String,
+    host: String,
+) -> Result<Vec<Scenario>, String> {
+    let (dir, locked) = ctx(&state);
+    if locked {
+        return Err("Unlock your vault first.".into());
+    }
+    let host = require_host(&host).await?;
+    // Names from the hub list; simulation.yaml tells us which are in training mode.
+    let cmd = "cscli scenarios list -o json 2>/dev/null || echo '{}'; \
+               echo '---NKSIM---'; cat /etc/crowdsec/simulation.yaml 2>/dev/null || true";
+    let out = crate::ssh::exec(&dir, &provider, &id, &host, cmd, QUERY_TIMEOUT_SECS).await?;
+    Ok(parse_scenarios(&out.stdout))
+}
+
+/// Promote a scenario training → enforced (`cscli simulation disable`).
+#[tauri::command]
+pub async fn crowdsec_promote(
+    state: State<'_, AppState>,
+    provider: String,
+    id: String,
+    host: String,
+    scenario: String,
+) -> Result<(), String> {
+    set_simulation(&state, &provider, &id, &host, &scenario, false).await
+}
+
+/// Demote a scenario enforced → training (`cscli simulation enable`).
+#[tauri::command]
+pub async fn crowdsec_demote(
+    state: State<'_, AppState>,
+    provider: String,
+    id: String,
+    host: String,
+    scenario: String,
+) -> Result<(), String> {
+    set_simulation(&state, &provider, &id, &host, &scenario, true).await
+}
+
+async fn set_simulation(
+    state: &State<'_, AppState>,
+    provider: &str,
+    id: &str,
+    host: &str,
+    scenario: &str,
+    training: bool,
+) -> Result<(), String> {
+    let (dir, locked) = ctx(state);
+    if locked {
+        return Err("Unlock your vault first.".into());
+    }
+    if !valid_scenario(scenario) {
+        return Err("Invalid scenario name.".into());
+    }
+    let host = require_host(host).await?;
+    let verb = if training { "enable" } else { "disable" };
+    let cmd = format!("cscli simulation {verb} {scenario} 2>&1 && systemctl reload crowdsec 2>/dev/null; echo done");
+    let out = crate::ssh::exec(&dir, provider, id, &host, &cmd, QUERY_TIMEOUT_SECS).await?;
+    if out.code != 0 {
+        return Err(format!(
+            "Could not change scenario mode: {}",
+            out.stdout.trim()
+        ));
+    }
+    Ok(())
+}
+
+/// Read the operator allowlist (the IPs NorthKey wrote to the never-ban parser).
+#[tauri::command]
+pub async fn crowdsec_allowlist_get(
+    state: State<'_, AppState>,
+    provider: String,
+    id: String,
+    host: String,
+) -> Result<Vec<String>, String> {
+    let (dir, locked) = ctx(&state);
+    if locked {
+        return Err("Unlock your vault first.".into());
+    }
+    let host = require_host(&host).await?;
+    let cmd = "cat /etc/crowdsec/parsers/s02-enrich/northkey-whitelist.yaml 2>/dev/null || true";
+    let out = crate::ssh::exec(&dir, &provider, &id, &host, cmd, QUERY_TIMEOUT_SECS).await?;
+    Ok(parse_allowlist(&out.stdout))
+}
+
+/// Replace the operator allowlist on a server (also mirrored to the synced settings so the
+/// list follows the user across devices — handled by the caller in the bridge).
+#[tauri::command]
+pub async fn crowdsec_allowlist_set(
+    state: State<'_, AppState>,
+    provider: String,
+    id: String,
+    host: String,
+    entries: Vec<String>,
+) -> Result<(), String> {
+    let (dir, locked) = ctx(&state);
+    if locked {
+        return Err("Unlock your vault first.".into());
+    }
+    // Validate every entry before it touches the server.
+    for e in &entries {
+        if !valid_ip_or_cidr(e) {
+            return Err(format!("“{e}” is not a valid IP or CIDR."));
+        }
+    }
+    let host = require_host(&host).await?;
+    // Always keep the private ranges; the operator list is the caller-supplied set.
+    let mut ip_lines = String::new();
+    for e in &entries {
+        ip_lines.push_str(&format!("    - \"{e}\"\n"));
+    }
+    // Heredoc written atomically; then reload so it takes effect without a restart.
+    let script = format!(
+        "cat > /etc/crowdsec/parsers/s02-enrich/northkey-whitelist.yaml <<'YAML'\n\
+         name: northkey/whitelist\n\
+         description: \"NorthKey never-ban allowlist\"\n\
+         whitelist:\n\
+         \x20\x20reason: \"NorthKey allowlist\"\n\
+         \x20\x20ip:\n{ip_lines}\
+         \x20\x20cidr:\n\
+         \x20\x20\x20\x20- \"127.0.0.0/8\"\n\
+         \x20\x20\x20\x20- \"10.0.0.0/8\"\n\
+         \x20\x20\x20\x20- \"172.16.0.0/12\"\n\
+         \x20\x20\x20\x20- \"192.168.0.0/16\"\n\
+         YAML\n\
+         systemctl reload crowdsec 2>/dev/null; echo done"
+    );
+    let out = crate::ssh::exec(&dir, &provider, &id, &host, &script, QUERY_TIMEOUT_SECS).await?;
+    if out.code != 0 {
+        return Err(format!(
+            "Could not update the allowlist: {}",
+            out.stdout.trim()
+        ));
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
 // Parsers (pure — unit-tested against captured fixtures)
 // ---------------------------------------------------------------------------
 
@@ -436,9 +688,128 @@ pub fn parse_decisions(json: &str) -> Vec<Decision> {
     out
 }
 
+/// Parse the combined `cscli scenarios list -o json` + `---NKSIM---` + simulation.yaml
+/// blob. A scenario is "simulated" (training) when its name appears in simulation.yaml —
+/// which is exactly how NorthKey enables training mode (`cscli simulation enable <name>`),
+/// with the global simulation flag left off.
+pub fn parse_scenarios(raw: &str) -> Vec<Scenario> {
+    let (json_part, sim_part) = match raw.split_once("---NKSIM---") {
+        Some((a, b)) => (a, b),
+        None => (raw, ""),
+    };
+    let mut names = Vec::new();
+    if let Ok(v) = serde_json::from_str::<serde_json::Value>(json_part.trim()) {
+        collect_scenario_names(&v, &mut names);
+    }
+    names.sort();
+    names.dedup();
+    names
+        .into_iter()
+        .map(|name| {
+            let simulated = sim_part.contains(&name);
+            Scenario { name, simulated }
+        })
+        .collect()
+}
+
+/// Recursively collect string values under a `"name"` key that look like scenario names
+/// (namespaced with a `/`), tolerating whatever container shape cscli emits.
+fn collect_scenario_names(v: &serde_json::Value, out: &mut Vec<String>) {
+    match v {
+        serde_json::Value::Object(map) => {
+            if let Some(serde_json::Value::String(n)) = map.get("name") {
+                if n.contains('/') {
+                    out.push(n.clone());
+                }
+            }
+            for (_, val) in map {
+                collect_scenario_names(val, out);
+            }
+        }
+        serde_json::Value::Array(arr) => {
+            for val in arr {
+                collect_scenario_names(val, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Extract the operator IP entries from the whitelist yaml (the `ip:` block), dropping the
+/// fixed private CIDRs that always follow. Line-based on purpose — no YAML dep, and the file
+/// is one NorthKey writes in a fixed shape.
+pub fn parse_allowlist(yaml: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut in_ip = false;
+    for line in yaml.lines() {
+        let t = line.trim();
+        if t.starts_with("ip:") {
+            in_ip = true;
+            continue;
+        }
+        if t.starts_with("cidr:") || (in_ip && !t.starts_with('-') && !t.is_empty()) {
+            in_ip = false;
+        }
+        if in_ip && t.starts_with('-') {
+            let val = t.trim_start_matches('-').trim().trim_matches('"').trim();
+            if !val.is_empty() {
+                out.push(val.to_string());
+            }
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn validates_ips_and_rejects_injection() {
+        assert!(valid_ip_or_cidr("1.2.3.4"));
+        assert!(valid_ip_or_cidr("2001:db8::1"));
+        assert!(valid_ip_or_cidr("10.0.0.0/8"));
+        assert!(!valid_ip_or_cidr("1.2.3.4; rm -rf /"));
+        assert!(!valid_ip_or_cidr("$(whoami)"));
+        assert!(!valid_ip_or_cidr("1.2.3.4 || reboot"));
+        assert!(!valid_ip_or_cidr(""));
+        assert!(!valid_ip_or_cidr("10.0.0.0/999"));
+        assert!(valid_scenario("crowdsecurity/http-probing"));
+        assert!(!valid_scenario("evil; cat /etc/shadow"));
+        assert!(!valid_scenario("a b"));
+    }
+
+    #[test]
+    fn parses_scenarios_with_training_state() {
+        let raw = r#"[{"name":"crowdsecurity/ssh-bf"},{"name":"crowdsecurity/http-probing"}]
+---NKSIM---
+simulation: false
+exclusions:
+  - crowdsecurity/http-probing
+"#;
+        let s = parse_scenarios(raw);
+        assert_eq!(s.len(), 2);
+        let http = s.iter().find(|x| x.name.contains("http")).unwrap();
+        let ssh = s.iter().find(|x| x.name.contains("ssh")).unwrap();
+        assert!(http.simulated); // in simulation.yaml → training
+        assert!(!ssh.simulated); // enforced
+    }
+
+    #[test]
+    fn parses_operator_allowlist_only() {
+        let yaml = r#"name: northkey/whitelist
+whitelist:
+  reason: "x"
+  ip:
+    - "5.6.7.8"
+    - "9.9.9.9"
+  cidr:
+    - "10.0.0.0/8"
+    - "192.168.0.0/16"
+"#;
+        let ips = parse_allowlist(yaml);
+        assert_eq!(ips, vec!["5.6.7.8", "9.9.9.9"]); // operator IPs, not the private CIDRs
+    }
 
     #[test]
     fn parses_alerts_and_skips_garbage() {
