@@ -504,6 +504,83 @@ export async function sshAuditClear(): Promise<void> {
   await inv("ssh_audit_clear");
 }
 
+// --- Attack monitor (CrowdSec, Phase A) --------------------------------------
+// NorthKey deploys CrowdSec to a server over SSH and reads its alerts/decisions with
+// `cscli … -o json`. SSH + honeypot are enforced; web scenarios run in training mode.
+
+export interface CrowdsecDeployOut {
+  ok: boolean;
+  log: string;
+  adminIp: string;
+}
+
+export interface CrowdsecStatus {
+  protected: boolean;
+  agent: string;
+  bouncer: string;
+  activeBans: number;
+}
+
+export interface CrowdsecAlert {
+  id: number;
+  sourceIp: string;
+  scenario: string;
+  message: string;
+  createdAt: string;
+  simulated: boolean;
+  country: string;
+}
+
+export interface CrowdsecDecision {
+  id: number;
+  sourceIp: string;
+  scenario: string;
+  action: string;
+  duration: string;
+  origin: string;
+}
+
+/** Install/repair CrowdSec on a server (idempotent). SSH+honeypot enforced, web in training. */
+export async function crowdsecDeploy(
+  provider: string,
+  id: string,
+  host: string,
+): Promise<CrowdsecDeployOut> {
+  if (!inTauri()) throw new Error("Server protection is only available in the desktop app.");
+  return inv<CrowdsecDeployOut>("crowdsec_deploy", { provider, id, host });
+}
+
+/** Agent/bouncer service state + active-ban count. */
+export async function crowdsecStatus(
+  provider: string,
+  id: string,
+  host: string,
+): Promise<CrowdsecStatus> {
+  if (!inTauri()) throw new Error("Server protection is only available in the desktop app.");
+  return inv<CrowdsecStatus>("crowdsec_status", { provider, id, host });
+}
+
+/** Recent detection events, newest first. */
+export async function crowdsecAlerts(
+  provider: string,
+  id: string,
+  host: string,
+  limit = 50,
+): Promise<CrowdsecAlert[]> {
+  if (!inTauri()) throw new Error("Server protection is only available in the desktop app.");
+  return inv<CrowdsecAlert[]>("crowdsec_alerts", { provider, id, host, limit });
+}
+
+/** Currently-active bans. */
+export async function crowdsecDecisions(
+  provider: string,
+  id: string,
+  host: string,
+): Promise<CrowdsecDecision[]> {
+  if (!inTauri()) throw new Error("Server protection is only available in the desktop app.");
+  return inv<CrowdsecDecision[]>("crowdsec_decisions", { provider, id, host });
+}
+
 // --- Server watchdog + Netdata (stage 2) -------------------------------------
 
 export interface WatchdogCfg {

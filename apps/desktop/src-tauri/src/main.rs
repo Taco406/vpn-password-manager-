@@ -8,6 +8,7 @@
 mod applock;
 mod applog;
 mod commands;
+mod crowdsec;
 mod hello;
 mod net;
 mod nmhost;
@@ -201,6 +202,10 @@ fn main() {
             ssh::ssh_close,
             ssh::ssh_audit_read,
             ssh::ssh_audit_clear,
+            crowdsec::crowdsec_deploy,
+            crowdsec::crowdsec_status,
+            crowdsec::crowdsec_alerts,
+            crowdsec::crowdsec_decisions,
             servers::servers_watchdog_get,
             servers::servers_watchdog_set,
             servers::netdata_get,

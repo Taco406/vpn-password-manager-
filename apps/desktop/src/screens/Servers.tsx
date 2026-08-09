@@ -64,6 +64,7 @@ import { Card, SectionTitle, Badge } from "../components/ui";
 import { errMsg, inputCls, btnCls, Toggle } from "../components/kit";
 import { toastError } from "../components/Toast";
 import { SshTerminal } from "../components/SshTerminal";
+import { SecurityPanel } from "../components/SecurityPanel";
 import { TimeSeriesChart, type TimeSeries } from "../components/charts/TimeSeriesChart";
 import { ThroughputChart } from "../components/charts/ThroughputChart";
 
@@ -349,7 +350,7 @@ export function Servers() {
 // Netdata, and the whole lifecycle/"Manage server" panel) now lives here, so a
 // server's detail never pushes its neighbours off the screen.
 // ---------------------------------------------------------------------------
-type DrawerTab = "overview" | "monitoring" | "manage" | "access";
+type DrawerTab = "overview" | "monitoring" | "security" | "manage" | "access";
 
 function ServerDrawer({
   s,
@@ -376,6 +377,7 @@ function ServerDrawer({
   const TABS: { id: DrawerTab; label: string }[] = [
     { id: "overview", label: "Overview" },
     { id: "monitoring", label: "Monitoring" },
+    { id: "security", label: "Security" },
     { id: "manage", label: "Manage" },
     { id: "access", label: "Access" },
   ];
@@ -427,6 +429,7 @@ function ServerDrawer({
         <div className="min-h-0 flex-1 overflow-y-auto px-5 py-4">
           {tab === "overview" && <DrawerOverview s={s} busy={busy} onAct={onAct} />}
           {tab === "monitoring" && (s.ipv4 ? <NetdataPanel s={s} /> : <NoIp />)}
+          {tab === "security" && (s.ipv4 ? <SecurityPanel s={s} /> : <NoIp />)}
           {tab === "manage" && <ServerLifecycle s={s} />}
           {tab === "access" && (s.ipv4 ? <AccessTab s={s} /> : <NoIp />)}
         </div>
