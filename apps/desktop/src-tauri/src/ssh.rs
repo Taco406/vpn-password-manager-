@@ -251,6 +251,141 @@ pub fn close_all(state: &SshState) {
 }
 
 // ---------------------------------------------------------------------------
+// Shared connect + host-key-pin + authenticate. Used by both the interactive
+// terminal (`ssh_open`) and the non-interactive command runner (`exec`), so the
+// security-critical pin/auth logic lives in exactly one place.
+// ---------------------------------------------------------------------------
+
+async fn connect_authed(
+    data_dir: &std::path::Path,
+    provider: &str,
+    id: &str,
+    host: &str,
+) -> Result<(client::Handle<PinHandler>, String, bool), String> {
+    let key = load_or_create_key()?;
+    let pinned = crate::servers::ssh_hostkey_get(data_dir, provider, id);
+    let first_connect = pinned.trim().is_empty();
+    let captured = Arc::new(Mutex::new(String::new()));
+    let mismatch = Arc::new(Mutex::new(false));
+    let handler = PinHandler {
+        pinned,
+        captured: captured.clone(),
+        mismatch: mismatch.clone(),
+    };
+
+    // Disable russh's idle-drop; the caller bounds the session (vault-lock kill for
+    // the terminal, an explicit timeout for one-shot commands).
+    let config = Arc::new(client::Config {
+        inactivity_timeout: None,
+        ..Default::default()
+    });
+
+    let connect = client::connect(config, (host, SSH_PORT), handler);
+    let mut handle = match tokio::time::timeout(std::time::Duration::from_secs(15), connect).await {
+        Err(_) => {
+            return Err(format!(
+                "Timed out connecting to {host} on port {SSH_PORT}."
+            ))
+        }
+        Ok(Ok(h)) => h,
+        Ok(Err(e)) => {
+            if *mismatch.lock().unwrap() {
+                let now = captured.lock().unwrap().clone();
+                return Err(format!(
+                    "HOST KEY CHANGED for {host}.\r\n\r\nThe server is presenting a different SSH \
+                     key ({now}) than the one NorthKey pinned. If you rebuilt this server this is \
+                     expected — reset the pinned key in the Access tab, then reconnect. If you did \
+                     NOT rebuild it, something may be intercepting the connection; do not proceed."
+                ));
+            }
+            return Err(format!("Could not connect to {host}: {e}"));
+        }
+    };
+
+    // Authenticate with the NorthKey key (ed25519 → no RSA hash alg).
+    let auth = handle
+        .authenticate_publickey(SSH_USER, PrivateKeyWithHashAlg::new(Arc::new(key), None))
+        .await
+        .map_err(|e| format!("SSH authentication error: {e}"))?;
+    if !auth.success() {
+        return Err(
+            "The server rejected NorthKey's key. Open the Access tab, copy the one-line install \
+             command onto this server, then reconnect."
+                .into(),
+        );
+    }
+
+    // Trust-on-first-use: persist the fingerprint we just captured.
+    let fingerprint = captured.lock().unwrap().clone();
+    if first_connect && !fingerprint.is_empty() {
+        crate::servers::ssh_hostkey_set(data_dir, provider, id, &fingerprint)?;
+    }
+    Ok((handle, fingerprint, first_connect))
+}
+
+/// Result of a one-shot remote command.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExecOut {
+    pub stdout: String,
+    pub stderr: String,
+    pub code: i32,
+}
+
+/// Run a single command on a server over SSH and collect its output. Non-interactive
+/// (no PTY, no per-call biometric prompt) — this is the plumbing the attack-monitor
+/// uses to deploy and query CrowdSec. Host-key pinning still applies, and the command
+/// runs as root, so callers must already hold an unlocked vault. `timeout_secs` bounds
+/// the whole run (a stuck install can't hang the app).
+pub(crate) async fn exec(
+    data_dir: &std::path::Path,
+    provider: &str,
+    id: &str,
+    host: &str,
+    command: &str,
+    timeout_secs: u64,
+) -> Result<ExecOut, String> {
+    let host = host.trim();
+    if host.is_empty() {
+        return Err("No server address.".into());
+    }
+    let (handle, _fp, _first) = connect_authed(data_dir, provider, id, host).await?;
+    let run = async {
+        let mut channel = handle
+            .channel_open_session()
+            .await
+            .map_err(|e| format!("open SSH channel: {e}"))?;
+        channel
+            .exec(true, command)
+            .await
+            .map_err(|e| format!("exec: {e}"))?;
+        let mut stdout: Vec<u8> = Vec::new();
+        let mut stderr: Vec<u8> = Vec::new();
+        let mut code: i32 = -1;
+        loop {
+            match channel.wait().await {
+                Some(ChannelMsg::Data { data }) => stdout.extend_from_slice(&data),
+                Some(ChannelMsg::ExtendedData { data, .. }) => stderr.extend_from_slice(&data),
+                Some(ChannelMsg::ExitStatus { exit_status }) => code = exit_status as i32,
+                Some(ChannelMsg::Eof) | Some(ChannelMsg::Close) | None => break,
+                _ => {}
+            }
+        }
+        Ok::<ExecOut, String>(ExecOut {
+            stdout: String::from_utf8_lossy(&stdout).into_owned(),
+            stderr: String::from_utf8_lossy(&stderr).into_owned(),
+            code,
+        })
+    };
+    match tokio::time::timeout(std::time::Duration::from_secs(timeout_secs), run).await {
+        Ok(r) => r,
+        Err(_) => Err(format!(
+            "Command timed out after {timeout_secs}s on {host}."
+        )),
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Open / write / resize / close.
 // ---------------------------------------------------------------------------
 
@@ -305,63 +440,8 @@ pub async fn ssh_open(
         }
     }
 
-    let key = load_or_create_key()?;
-    let pinned = crate::servers::ssh_hostkey_get(&data_dir, &provider, &id);
-    let first_connect = pinned.trim().is_empty();
-    let captured = Arc::new(Mutex::new(String::new()));
-    let mismatch = Arc::new(Mutex::new(false));
-    let handler = PinHandler {
-        pinned,
-        captured: captured.clone(),
-        mismatch: mismatch.clone(),
-    };
-
-    // Disable russh's idle-drop; the vault-lock kill is the real session bound.
-    let config = Arc::new(client::Config {
-        inactivity_timeout: None,
-        ..Default::default()
-    });
-
-    let connect = client::connect(config, (host.as_str(), SSH_PORT), handler);
-    let mut handle = match tokio::time::timeout(std::time::Duration::from_secs(15), connect).await {
-        Err(_) => {
-            return Err(format!(
-                "Timed out connecting to {host} on port {SSH_PORT}."
-            ))
-        }
-        Ok(Ok(h)) => h,
-        Ok(Err(e)) => {
-            if *mismatch.lock().unwrap() {
-                let now = captured.lock().unwrap().clone();
-                return Err(format!(
-                    "HOST KEY CHANGED for {host}.\r\n\r\nThe server is presenting a different SSH \
-                     key ({now}) than the one NorthKey pinned. If you rebuilt this server this is \
-                     expected — reset the pinned key in the Access tab, then reconnect. If you did \
-                     NOT rebuild it, something may be intercepting the connection; do not proceed."
-                ));
-            }
-            return Err(format!("Could not connect to {host}: {e}"));
-        }
-    };
-
-    // Authenticate with the NorthKey key (ed25519 → no RSA hash alg).
-    let auth = handle
-        .authenticate_publickey(SSH_USER, PrivateKeyWithHashAlg::new(Arc::new(key), None))
-        .await
-        .map_err(|e| format!("SSH authentication error: {e}"))?;
-    if !auth.success() {
-        return Err(
-            "The server rejected NorthKey's key. Open the Access tab, copy the one-line install \
-             command onto this server, then reconnect."
-                .into(),
-        );
-    }
-
-    // Trust-on-first-use: persist the fingerprint we just captured.
-    let fingerprint = captured.lock().unwrap().clone();
-    if first_connect && !fingerprint.is_empty() {
-        crate::servers::ssh_hostkey_set(&data_dir, &provider, &id, &fingerprint)?;
-    }
+    let (handle, fingerprint, first_connect) =
+        connect_authed(&data_dir, &provider, &id, &host).await?;
 
     // Open the PTY + shell.
     let mut channel = handle

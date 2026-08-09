@@ -512,6 +512,17 @@ struct ServersFileCfg {
     /// `"provider:id"`. Added in v0.1.64.
     #[serde(default)]
     ssh: BTreeMap<String, SshServerCfg>,
+    /// Per-server attack-monitor (CrowdSec) state, keyed by `"provider:id"`.
+    #[serde(default)]
+    crowdsec: BTreeMap<String, CrowdsecServerCfg>,
+}
+
+/// Per-server CrowdSec state. Grows in later phases (enforced scenarios, etc.).
+#[derive(Serialize, Deserialize, Clone, Default)]
+#[serde(rename_all = "camelCase", default)]
+pub struct CrowdsecServerCfg {
+    /// Whether NorthKey has successfully deployed CrowdSec here.
+    pub protected: bool,
 }
 
 /// Per-server SSH state for the embedded terminal. The host-key fingerprint is
@@ -624,6 +635,25 @@ pub(crate) fn ssh_pins_apply(dir: &Path, json: &str) {
     if changed {
         let _ = save_cfg(dir, &cfg);
     }
+}
+
+/// Whether NorthKey has deployed CrowdSec to a server.
+pub(crate) fn crowdsec_is_protected(dir: &Path, provider: &str, id: &str) -> bool {
+    load_cfg(dir)
+        .crowdsec
+        .get(&netdata_key(provider, id))
+        .map(|c| c.protected)
+        .unwrap_or(false)
+}
+
+/// Record (or clear) that a server is CrowdSec-protected.
+pub(crate) fn crowdsec_set_protected(dir: &Path, provider: &str, id: &str, on: bool) {
+    let mut cfg = load_cfg(dir);
+    cfg.crowdsec
+        .entry(netdata_key(provider, id))
+        .or_default()
+        .protected = on;
+    let _ = save_cfg(dir, &cfg);
 }
 
 #[derive(Serialize)]
