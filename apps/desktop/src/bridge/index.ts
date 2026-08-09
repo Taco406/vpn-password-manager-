@@ -581,6 +581,87 @@ export async function crowdsecDecisions(
   return inv<CrowdsecDecision[]>("crowdsec_decisions", { provider, id, host });
 }
 
+export interface CrowdsecScenario {
+  name: string;
+  simulated: boolean;
+}
+
+/** Ban an IP. minutes=0 means permanent (confirm in the UI first). */
+export async function crowdsecBan(
+  provider: string,
+  id: string,
+  host: string,
+  ip: string,
+  minutes: number,
+): Promise<void> {
+  if (!inTauri()) throw new Error("Server protection is only available in the desktop app.");
+  await inv("crowdsec_ban", { provider, id, host, ip, minutes });
+}
+
+/** Remove all bans on an IP. */
+export async function crowdsecUnban(
+  provider: string,
+  id: string,
+  host: string,
+  ip: string,
+): Promise<void> {
+  if (!inTauri()) throw new Error("Server protection is only available in the desktop app.");
+  await inv("crowdsec_unban", { provider, id, host, ip });
+}
+
+/** Installed scenarios + whether each is in training (simulation) mode. */
+export async function crowdsecScenarios(
+  provider: string,
+  id: string,
+  host: string,
+): Promise<CrowdsecScenario[]> {
+  if (!inTauri()) throw new Error("Server protection is only available in the desktop app.");
+  return inv<CrowdsecScenario[]>("crowdsec_scenarios", { provider, id, host });
+}
+
+/** Promote a scenario training → enforced. */
+export async function crowdsecPromote(
+  provider: string,
+  id: string,
+  host: string,
+  scenario: string,
+): Promise<void> {
+  if (!inTauri()) throw new Error("Server protection is only available in the desktop app.");
+  await inv("crowdsec_promote", { provider, id, host, scenario });
+}
+
+/** Demote a scenario enforced → training. */
+export async function crowdsecDemote(
+  provider: string,
+  id: string,
+  host: string,
+  scenario: string,
+): Promise<void> {
+  if (!inTauri()) throw new Error("Server protection is only available in the desktop app.");
+  await inv("crowdsec_demote", { provider, id, host, scenario });
+}
+
+/** The operator allowlist (never-ban IPs) on a server. */
+export async function crowdsecAllowlistGet(
+  provider: string,
+  id: string,
+  host: string,
+): Promise<string[]> {
+  if (!inTauri()) throw new Error("Server protection is only available in the desktop app.");
+  return inv<string[]>("crowdsec_allowlist_get", { provider, id, host });
+}
+
+/** Replace the operator allowlist on a server. */
+export async function crowdsecAllowlistSet(
+  provider: string,
+  id: string,
+  host: string,
+  entries: string[],
+): Promise<void> {
+  if (!inTauri()) throw new Error("Server protection is only available in the desktop app.");
+  await inv("crowdsec_allowlist_set", { provider, id, host, entries });
+}
+
 // --- Server watchdog + Netdata (stage 2) -------------------------------------
 
 export interface WatchdogCfg {
