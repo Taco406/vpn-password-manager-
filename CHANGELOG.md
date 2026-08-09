@@ -8,6 +8,25 @@ The format follows [Keep a Changelog](https://keepachangelog.com/). Versions are
 [semantic](https://semver.org/). **Add a new `## [x.y.z]` section at the top in the same PR
 that bumps the app version** — that's how "the changelog updates on every merge."
 
+## [0.1.66] — 2026-08-09
+
+### Added
+- **Protect your servers from attacks — a new Security tab on every server.** NorthKey can now
+  install CrowdSec (a well-known open-source intrusion blocker) onto a server over SSH and become
+  the dashboard for it. You see **who attacked, from where, and what they tried**, the IPs it’s
+  currently blocking, and your worst offenders — and it blocks the attackers for you.
+  - **Built so it won’t block your real visitors or clients.** SSH break-in attempts and a
+    honeypot (a fake service no real person touches) are blocked immediately, but **all
+    website-attack rules start in “training” mode — they watch and log but block nothing** until
+    you’ve seen real traffic and switch them on yourself, one at a time. Your own IP is added to a
+    never-ban list automatically the moment you protect a server, so you can’t get locked out.
+  - **You’re in control.** Block or unban any IP with one tap; permanent bans ask you to confirm.
+    Manage the never-ban allowlist (your address, clients, uptime checkers). Optionally get a
+    desktop/Windows alert when a new attacker is blocked (turn on “Alert me about attacks” under
+    the Watchdog).
+  - Set it up: open a server → **Security** → **Protect this server**. Full walkthrough in
+    `docs/attack-monitor.md`. Try it on a non-client box first.
+
 ## [0.1.65] — 2026-08-09
 
 ### Added

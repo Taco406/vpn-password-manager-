@@ -132,3 +132,40 @@ against captured fixtures; a golden test asserts the install script keeps web in
 
 Deploy first to a **non-client box** (`serverdedi` or a throwaway) to build confidence, then
 `coolify`. Web stays in simulation on every box until the user has reviewed a week of real alerts.
+
+---
+
+## How to use it (click-path)
+
+Everything lives under a server's **Security** tab (Servers → click a server → **Security**).
+
+1. **Set up SSH first.** The monitor deploys over SSH, so the server must already trust
+   NorthKey's key: server → **Access** → **Set up access**, paste the one line onto the box.
+   (One key covers all your computers — v0.1.65.)
+2. **Protect the server.** Security tab → **Protect this server**. It installs CrowdSec + a
+   firewall bouncer over SSH (a couple of minutes). Your current IP is added to the never-ban
+   allowlist automatically, so the SSH block can't lock you out.
+3. **Watch, don't block (for the web).** SSH brute-force and the honeypot are enforced from the
+   start. Every web/http rule is in **training** — it logs attacks but blocks nothing. Leave it
+   like that for a week and read the **Top attackers** + **Recent detections**.
+4. **Promote when you trust it.** Security tab → **Detection rules** → a training rule →
+   **enforce** (it warns you and reminds you to check the allowlist). Demote any time.
+5. **Manual control.** Block an IP yourself (4 h or permanent — permanent asks to confirm), and
+   **unban** with one tap. Manage the **allowlist** (your IP, clients, uptime monitors) — the
+   private ranges are always kept.
+6. **Alerts while the app is closed** (optional). Servers screen → Watchdog card → turn on
+   **“Alert me about attacks.”** It checks each protected server for new blocks in the background
+   (this makes a background SSH connection per server) and toasts you.
+
+**Order:** protect `serverdedi` first, watch it, then `coolify`. Never promote a web rule the
+same day you protect a busy client site — give it real traffic to prove it's clean.
+
+## Not yet (honest follow-ups)
+
+- **iPhone parity.** The phone can't SSH, so a phone Security tab needs the desktop to sync a
+  security summary through the encrypted vault and the phone to queue ban-approvals back. That's a
+  new sync contract plus Swift that only compiles in the TestFlight job — deferred rather than
+  shipped unverified.
+- **cloud-init for new NorthKey nodes.** New VPN/sync nodes NorthKey provisions aren't
+  auto-protected yet; protect them from the Security tab like any other box for now.
+- **Weekly digest** and the **CrowdSec community blocklist** (observe-only) — planned, not built.
