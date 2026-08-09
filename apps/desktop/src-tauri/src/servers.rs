@@ -468,6 +468,10 @@ pub struct WatchdogFileCfg {
     pub cpu_pct: f64,
     pub cpu_sustain_ticks: u32,
     pub disk_pct: f64,
+    /// When on, the watchdog also polls CrowdSec-protected servers for new *enforced*
+    /// bans and fires an alert/toast for each. Opt-in because it makes a background SSH
+    /// connection to each protected server every tick. Added in Phase C.
+    pub security_alerts: bool,
 }
 
 impl Default for WatchdogFileCfg {
@@ -478,6 +482,7 @@ impl Default for WatchdogFileCfg {
             cpu_pct: 90.0,
             cpu_sustain_ticks: 3,
             disk_pct: 90.0,
+            security_alerts: false,
         }
     }
 }
@@ -1337,6 +1342,30 @@ pub async fn servers_firewall_allow_port(
 // ---------------------------------------------------------------------------
 
 /// One watchdog tick: list fleets, sample Netdata where enabled, evaluate, alert.
+/// Decision IDs already seen per server key, so a CrowdSec ban is announced once. First
+/// sight of a server seeds silently (no alert for the pre-existing backlog); later ticks
+/// alert only on genuinely new bans.
+static CROWDSEC_SEEN: std::sync::LazyLock<
+    std::sync::Mutex<BTreeMap<String, std::collections::HashSet<i64>>>,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(BTreeMap::new()));
+
+fn crowdsec_seen_new(key: &str, current: &[(i64, String, String)]) -> Vec<(String, String)> {
+    let mut guard = CROWDSEC_SEEN.lock().unwrap();
+    let first = !guard.contains_key(key);
+    let ids: std::collections::HashSet<i64> = current.iter().map(|(id, _, _)| *id).collect();
+    let mut fresh = Vec::new();
+    if !first {
+        let seen = guard.get(key).cloned().unwrap_or_default();
+        for (id, ip, scenario) in current {
+            if !seen.contains(id) {
+                fresh.push((ip.clone(), scenario.clone()));
+            }
+        }
+    }
+    guard.insert(key.to_string(), ids);
+    fresh
+}
+
 async fn watchdog_tick(
     app: &AppHandle,
     dir: &Path,
@@ -1430,6 +1459,50 @@ async fn watchdog_tick(
             .title("NorthKey — server alert")
             .body(&message)
             .show();
+    }
+
+    // Phase C — CrowdSec new-ban notifications (opt-in; makes a background SSH connection
+    // to each protected server, so it's gated behind `security_alerts`). Best-effort: a
+    // server that's unreachable or not yet CrowdSec-protected is skipped silently.
+    if file.watchdog.security_alerts {
+        for (provider, list) in &fleets {
+            for info in list {
+                if !crowdsec_is_protected(dir, provider, &info.id) {
+                    continue;
+                }
+                let host = match &info.ipv4 {
+                    Some(h) => h.clone(),
+                    None => continue,
+                };
+                let bans = match crate::crowdsec::active_bans(dir, provider, &info.id, &host).await
+                {
+                    Ok(b) => b,
+                    Err(_) => continue,
+                };
+                let key = netdata_key(provider, &info.id);
+                for (ip, scenario) in crowdsec_seen_new(&key, &bans) {
+                    let message = format!("{}: blocked {ip} ({scenario})", info.label);
+                    crate::applog::info("servers.security", &message);
+                    let _ = app.emit(
+                        "servers:alert",
+                        serde_json::json!({
+                            "kind": "security",
+                            "key": key,
+                            "label": info.label,
+                            "message": message,
+                            "ts": time::OffsetDateTime::now_utc().unix_timestamp(),
+                        }),
+                    );
+                    use tauri_plugin_notification::NotificationExt;
+                    let _ = app
+                        .notification()
+                        .builder()
+                        .title("NorthKey — attack blocked")
+                        .body(&message)
+                        .show();
+                }
+            }
+        }
     }
 }
 

@@ -670,6 +670,8 @@ export interface WatchdogCfg {
   cpuPct: number;
   cpuSustainTicks: number;
   diskPct: number;
+  /** Also alert on new CrowdSec bans on protected servers (opt-in; adds background SSH). */
+  securityAlerts: boolean;
 }
 
 export interface NetdataCfg {
@@ -698,7 +700,14 @@ export interface ServerAlert {
 
 export async function serversWatchdogGet(): Promise<WatchdogCfg> {
   if (!inTauri())
-    return { enabled: false, intervalSecs: 120, cpuPct: 90, cpuSustainTicks: 3, diskPct: 90 };
+    return {
+      enabled: false,
+      intervalSecs: 120,
+      cpuPct: 90,
+      cpuSustainTicks: 3,
+      diskPct: 90,
+      securityAlerts: false,
+    };
   return inv<WatchdogCfg>("servers_watchdog_get");
 }
 

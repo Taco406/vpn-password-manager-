@@ -2034,6 +2034,19 @@ function WatchdogCard() {
       </p>
       <Toggle label="Watch my servers in the background" checked={cfg.enabled} onChange={(v) => patch({ enabled: v })} />
       {cfg.enabled && (
+        <div className="mt-2">
+          <Toggle
+            label="Alert me about attacks (new blocks on protected servers)"
+            checked={cfg.securityAlerts}
+            onChange={(v) => patch({ securityAlerts: v })}
+          />
+          <p className="mt-0.5 text-[11px] text-[var(--text-muted)]">
+            Checks each CrowdSec-protected server for new bans each round (makes a background SSH
+            connection). Set up protection from a server’s Security tab first.
+          </p>
+        </div>
+      )}
+      {cfg.enabled && (
         <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-2 text-xs text-[var(--text-muted)]">
           <label className="flex items-center gap-1.5">
             check every
