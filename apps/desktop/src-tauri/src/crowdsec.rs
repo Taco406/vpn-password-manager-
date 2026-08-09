@@ -328,6 +328,23 @@ pub async fn crowdsec_decisions(
     Ok(parse_decisions(&out.stdout))
 }
 
+/// Active bans on a server as (decision_id, ip, scenario). Used by the watchdog for
+/// new-ban notifications (Phase C). Best-effort; the caller ignores errors. All active
+/// decisions are real bans — scenarios in simulation never produce one.
+pub(crate) async fn active_bans(
+    dir: &std::path::Path,
+    provider: &str,
+    id: &str,
+    host: &str,
+) -> Result<Vec<(i64, String, String)>, String> {
+    let cmd = "cscli decisions list -o json 2>/dev/null || echo '[]'";
+    let out = crate::ssh::exec(dir, provider, id, host, cmd, QUERY_TIMEOUT_SECS).await?;
+    Ok(parse_decisions(&out.stdout)
+        .into_iter()
+        .map(|d| (d.id, d.source_ip, d.scenario))
+        .collect())
+}
+
 // ---------------------------------------------------------------------------
 // Phase B — control: ban/unban, promote/demote scenarios, allowlist.
 //

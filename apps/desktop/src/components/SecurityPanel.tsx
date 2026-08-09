@@ -114,8 +114,8 @@ export function SecurityPanel({ s }: { s: ManagedServer }) {
     }
   };
 
-  const ban = async (perm: boolean) => {
-    const ip = banIp.trim();
+  const ban = async (perm: boolean, ipOverride?: string) => {
+    const ip = (ipOverride ?? banIp).trim();
     if (!ip) return;
     if (perm && !window.confirm(`Permanently ban ${ip}? It stays blocked until you unban it.`)) {
       return;
@@ -278,6 +278,41 @@ export function SecurityPanel({ s }: { s: ManagedServer }) {
         </div>
       )}
 
+      {/* Top attackers — who's been hitting this server, worst first */}
+      {protectedOn && alerts.length > 0 && (
+        <div>
+          <div className="mb-1 text-xs font-medium">Top attackers</div>
+          <div className="space-y-1">
+            {topAttackers(alerts)
+              .slice(0, 8)
+              .map((at) => (
+                <div
+                  key={at.ip}
+                  className="flex flex-wrap items-center gap-x-2 gap-y-0.5 rounded bg-[var(--bg-inset)] px-2 py-1 text-[11px]"
+                >
+                  <span className="mono text-[var(--text-primary)]">{at.ip}</span>
+                  {at.country && <Badge tone="neutral">{at.country}</Badge>}
+                  <span className="text-[var(--text-muted)]">×{at.count}</span>
+                  <span className="truncate text-[var(--text-secondary)]">
+                    {at.scenarios.slice(0, 2).join(", ")}
+                    {at.scenarios.length > 2 ? ` +${at.scenarios.length - 2}` : ""}
+                  </span>
+                  <span className="ml-auto text-[var(--text-muted)]">
+                    last {fmtTime(at.lastSeen)}
+                  </span>
+                  <button
+                    disabled={busyIp === at.ip}
+                    onClick={() => void ban(false, at.ip)}
+                    className="text-[var(--warn)] hover:underline disabled:opacity-50"
+                  >
+                    ban
+                  </button>
+                </div>
+              ))}
+          </div>
+        </div>
+      )}
+
       {/* Recent detections */}
       {protectedOn && (
         <div>
@@ -411,6 +446,41 @@ export function SecurityPanel({ s }: { s: ManagedServer }) {
       )}
     </div>
   );
+}
+
+interface Attacker {
+  ip: string;
+  country: string;
+  count: number;
+  firstSeen: string;
+  lastSeen: string;
+  scenarios: string[];
+}
+
+/** Aggregate the raw alert feed by source IP → one card per attacker, worst first. */
+function topAttackers(alerts: CrowdsecAlert[]): Attacker[] {
+  const by = new Map<string, Attacker>();
+  for (const a of alerts) {
+    if (!a.sourceIp) continue;
+    const cur = by.get(a.sourceIp);
+    if (cur) {
+      cur.count += 1;
+      if (a.country && !cur.country) cur.country = a.country;
+      if (a.scenario && !cur.scenarios.includes(a.scenario)) cur.scenarios.push(a.scenario);
+      if (a.createdAt < cur.firstSeen) cur.firstSeen = a.createdAt;
+      if (a.createdAt > cur.lastSeen) cur.lastSeen = a.createdAt;
+    } else {
+      by.set(a.sourceIp, {
+        ip: a.sourceIp,
+        country: a.country,
+        count: 1,
+        firstSeen: a.createdAt,
+        lastSeen: a.createdAt,
+        scenarios: a.scenario ? [a.scenario] : [],
+      });
+    }
+  }
+  return [...by.values()].sort((x, y) => y.count - x.count);
 }
 
 function fmtTime(iso: string): string {
