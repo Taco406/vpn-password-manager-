@@ -585,6 +585,47 @@ pub(crate) fn ssh_hostkey_set(
     save_cfg(dir, &cfg)
 }
 
+/// Export every pinned host key + install flag as JSON, for the encrypted settings
+/// item (v0.1.65 — so a server you've already trusted on one computer is trusted on
+/// the others without re-confirming). Empty string when nothing is pinned yet, so it
+/// doesn't seed an empty field. Fingerprints are public data, but they ride the same
+/// end-to-end-encrypted item as the SSH key — the sync server only sees ciphertext.
+pub(crate) fn ssh_pins_export(dir: &Path) -> String {
+    let ssh = load_cfg(dir).ssh;
+    if ssh.is_empty() {
+        return String::new();
+    }
+    serde_json::to_string(&ssh).unwrap_or_default()
+}
+
+/// Merge synced host-key pins into this device's config. ADDITIVE and pin-preserving:
+/// a server this device has NOT pinned adopts the synced fingerprint; a server it HAS
+/// pinned keeps its own (a differing fingerprint is a MITM/rebuild signal, so sync must
+/// never silently overwrite a local pin). The `installed` hint ORs across devices.
+pub(crate) fn ssh_pins_apply(dir: &Path, json: &str) {
+    let incoming: BTreeMap<String, SshServerCfg> = match serde_json::from_str(json) {
+        Ok(m) => m,
+        Err(_) => return,
+    };
+    let mut cfg = load_cfg(dir);
+    let mut changed = false;
+    for (k, v) in incoming {
+        let entry = cfg.ssh.entry(k).or_default();
+        if entry.host_key_fingerprint.trim().is_empty() && !v.host_key_fingerprint.trim().is_empty()
+        {
+            entry.host_key_fingerprint = v.host_key_fingerprint;
+            changed = true;
+        }
+        if v.installed && !entry.installed {
+            entry.installed = true;
+            changed = true;
+        }
+    }
+    if changed {
+        let _ = save_cfg(dir, &cfg);
+    }
+}
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SshStatusOut {

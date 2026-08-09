@@ -1944,6 +1944,13 @@ const SET_PREFS: &str = "app_prefs";
 const SET_WATCHDOG: &str = "watchdog_cfg";
 const SET_NDAUTH: &str = "netdata_auth";
 const SET_AOVPN: &str = "always_on_vpn";
+// v0.1.65 — the SSH terminal's identity, so "set it up once, works on all my computers"
+// is literally true. SET_SSH_KEY carries the ed25519 PRIVATE key (OpenSSH PEM); it rides
+// the same end-to-end-encrypted item as the API-token secrets above (server sees ciphertext
+// only). SET_SSH_PINS carries the host-key fingerprints (public, but synced so a server
+// trusted on one computer is trusted on the others). The phone ignores both (no SSH on iOS).
+const SET_SSH_KEY: &str = "ssh_terminal_key";
+const SET_SSH_PINS: &str = "ssh_hostkey_pins";
 
 fn settings_item_id() -> uuid::Uuid {
     uuid::Uuid::parse_str(SETTINGS_ITEM_ID).expect("const uuid")
@@ -1971,6 +1978,8 @@ fn local_settings(state: &State<'_, AppState>) -> Vec<(&'static str, String)> {
         (SET_WATCHDOG, crate::servers::watchdog_config_json(&dir)),
         (SET_NDAUTH, crate::servers::netdata_auth_json(&dir)),
         (SET_AOVPN, crate::vpn::persistent_sync_export(&dir)),
+        (SET_SSH_KEY, crate::ssh::key_pem_export()),
+        (SET_SSH_PINS, crate::servers::ssh_pins_export(&dir)),
     ]
 }
 
@@ -2064,6 +2073,14 @@ pub(crate) fn sync_device_settings(state: &State<'_, AppState>) -> bool {
                         }
                         SET_AOVPN => {
                             crate::vpn::persistent_sync_import(&data_dir(state), v);
+                        }
+                        SET_SSH_KEY => {
+                            if let Err(e) = crate::ssh::key_pem_adopt(v) {
+                                note("SSH terminal key", e);
+                            }
+                        }
+                        SET_SSH_PINS => {
+                            crate::servers::ssh_pins_apply(&data_dir(state), v);
                         }
                         _ => {}
                     }

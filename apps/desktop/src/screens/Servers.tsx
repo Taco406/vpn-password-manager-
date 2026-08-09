@@ -390,9 +390,9 @@ function ServerDrawer({
       <aside
         role="dialog"
         aria-label={`${s.label} details`}
-        className="relative flex h-full w-full max-w-[900px] flex-col overflow-hidden border-l border-[var(--border)] bg-[var(--bg-primary)] shadow-2xl"
+        className="relative flex h-full w-full max-w-[900px] flex-col overflow-hidden border-l border-[var(--border-subtle)] bg-[var(--bg-base)] shadow-2xl"
       >
-        <header className="shrink-0 border-b border-[var(--border)] px-5 py-3">
+        <header className="shrink-0 border-b border-[var(--border-subtle)] px-5 py-3">
           <div className="flex items-center gap-2">
             <span className="truncate text-sm font-medium">{s.label}</span>
             <Badge tone={s.provider === "hetzner" ? "danger" : "accent"}>
@@ -533,7 +533,7 @@ function ServerCard({
 
       {roomy && s.ipv4 && <CardVitals s={s} />}
 
-      <div className="mt-3 flex items-center gap-3 border-t border-[var(--border)] pt-2 text-xs">
+      <div className="mt-3 flex items-center gap-3 border-t border-[var(--border-subtle)] pt-2 text-xs">
         {s.state === "stopped" ? (
           <button
             disabled={busy}
@@ -626,7 +626,7 @@ function MiniStat({ label, pct }: { label: string; pct: number | undefined }) {
           {pct === undefined ? "—" : `${v.toFixed(0)}%`}
         </span>
       </div>
-      <div className="mt-0.5 h-1 overflow-hidden rounded bg-[var(--bg-tertiary)]">
+      <div className="mt-0.5 h-1 overflow-hidden rounded bg-[var(--bg-inset)]">
         <div className="h-full rounded" style={{ width: `${Math.min(100, v)}%`, background: tone }} />
       </div>
     </div>
@@ -721,7 +721,7 @@ function AccessTab({ s }: { s: ManagedServer }) {
     <div className="space-y-4">
       <SshTerminal s={s} />
 
-      <div className="border-t border-[var(--border)] pt-3">
+      <div className="border-t border-[var(--border-subtle)] pt-3">
         <div className="mb-1 flex items-center gap-2 text-sm font-medium">
           <TerminalSquare size={14} /> Open a separate terminal
         </div>
@@ -736,7 +736,7 @@ function AccessTab({ s }: { s: ManagedServer }) {
         </div>
       </div>
 
-      <div className="border-t border-[var(--border)] pt-3">
+      <div className="border-t border-[var(--border-subtle)] pt-3">
         <div className="mb-1 flex items-center gap-2 text-sm font-medium">
           <ShieldCheck size={14} /> Can I reach a port?
         </div>
