@@ -22,6 +22,7 @@ import {
   serversSshHostkeyReset,
   sshAuditRead,
   sshAuditClear,
+  settingsSyncWrite,
   type ManagedServer,
 } from "../bridge";
 import { btnCls, errMsg } from "./kit";
@@ -118,6 +119,10 @@ export function SshTerminal({ s }: { s: ManagedServer }) {
   const loadPubkey = useCallback(async () => {
     try {
       setPubkey(await sshPubkey());
+      // sshPubkey() generates the key on its first-ever call. Push it into the encrypted
+      // settings item now so your other computers adopt the same key (and you only install
+      // one public key per server). No-op when sync isn't configured.
+      void settingsSyncWrite();
     } catch (e) {
       toastError(errMsg(e));
     }
@@ -139,6 +144,9 @@ export function SshTerminal({ s }: { s: ManagedServer }) {
       sessionRef.current = out.sessionId;
       setFingerprint(out.fingerprint);
       setJustPinned(out.firstConnect);
+      // A first connect just pinned this server's host key. Push it so the other computers
+      // trust the same server without re-confirming the fingerprint themselves.
+      if (out.firstConnect) void settingsSyncWrite();
 
       const term = new Terminal({
         fontSize: 13,
@@ -225,7 +233,7 @@ export function SshTerminal({ s }: { s: ManagedServer }) {
       </p>
 
       {/* First-time setup: install NorthKey's public key. */}
-      <div className="rounded-[10px] border border-[var(--border)]">
+      <div className="rounded-[10px] border border-[var(--border-subtle)]">
         <button
           className="flex w-full items-center gap-2 px-3 py-2 text-xs font-medium"
           onClick={() => {
@@ -237,12 +245,14 @@ export function SshTerminal({ s }: { s: ManagedServer }) {
           <KeyRound size={13} /> Set up access {installed && <span className="text-[var(--ok)]">· done</span>}
         </button>
         {showSetup && (
-          <div className="space-y-2 border-t border-[var(--border)] p-3 text-xs">
+          <div className="space-y-2 border-t border-[var(--border-subtle)] p-3 text-xs">
             <p className="text-[var(--text-secondary)]">
               Run this once on the server (it adds NorthKey's key so it can sign in without a
-              password). You can paste it into the pop-out terminal above.
+              password). You can paste it into the pop-out terminal above. All your computers
+              share this one key, so you only install it once per server — set it up here and
+              the terminal works on your other PCs too.
             </p>
-            <pre className="mono max-h-24 overflow-auto rounded bg-[var(--bg-tertiary)] p-2 text-[11px]">
+            <pre className="mono max-h-24 overflow-auto rounded bg-[var(--bg-inset)] p-2 text-[11px]">
               {installCmd || "…"}
             </pre>
             <div className="flex items-center gap-2">
@@ -270,7 +280,7 @@ export function SshTerminal({ s }: { s: ManagedServer }) {
           className={`rounded-[10px] border p-2 text-[11px] ${
             justPinned
               ? "border-[var(--accent)]/40 bg-[var(--accent)]/10"
-              : "border-[var(--border)] text-[var(--text-muted)]"
+              : "border-[var(--border-subtle)] text-[var(--text-muted)]"
           }`}
         >
           <div className="flex items-center gap-1">
@@ -313,13 +323,13 @@ export function SshTerminal({ s }: { s: ManagedServer }) {
           against a laid-out element, hidden only when fully disconnected. */}
       <div
         ref={mountRef}
-        className={`overflow-hidden rounded-[10px] border border-[var(--border)] bg-[#0b0f17] ${
+        className={`overflow-hidden rounded-[10px] border border-[var(--border-subtle)] bg-[#0b0f17] ${
           connecting || connected ? "h-80 p-1" : "hidden"
         }`}
       />
 
       {/* Advanced: reset pinned key + audit log. */}
-      <div className="rounded-[10px] border border-[var(--border)]">
+      <div className="rounded-[10px] border border-[var(--border-subtle)]">
         <button
           className="flex w-full items-center gap-2 px-3 py-2 text-xs font-medium"
           onClick={() => {
@@ -330,7 +340,7 @@ export function SshTerminal({ s }: { s: ManagedServer }) {
           {showAdvanced ? <ChevronDown size={14} /> : <ChevronRight size={14} />} Advanced
         </button>
         {showAdvanced && (
-          <div className="space-y-3 border-t border-[var(--border)] p-3 text-xs">
+          <div className="space-y-3 border-t border-[var(--border-subtle)] p-3 text-xs">
             <div>
               <p className="mb-1 text-[var(--text-secondary)]">
                 Rebuilt this server? Reset its pinned key so the next connection trusts the new one.
@@ -365,7 +375,7 @@ export function SshTerminal({ s }: { s: ManagedServer }) {
                   Clear
                 </button>
               </div>
-              <pre className="max-h-40 overflow-auto rounded bg-[var(--bg-tertiary)] p-2 text-[10px] text-[var(--text-muted)]">
+              <pre className="max-h-40 overflow-auto rounded bg-[var(--bg-inset)] p-2 text-[10px] text-[var(--text-muted)]">
                 {audit.trim() || "No sessions recorded yet."}
               </pre>
             </div>

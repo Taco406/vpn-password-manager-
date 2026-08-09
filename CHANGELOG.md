@@ -8,6 +8,25 @@ The format follows [Keep a Changelog](https://keepachangelog.com/). Versions are
 [semantic](https://semver.org/). **Add a new `## [x.y.z]` section at the top in the same PR
 that bumps the app version** — that's how "the changelog updates on every merge."
 
+## [0.1.65] — 2026-08-09
+
+### Added
+- **Set up the server terminal once — it works on all your computers.** The terminal's
+  sign-in key now travels with your other encrypted settings (the same private,
+  server-can't-read-it channel as your API tokens). Generate it on one PC, paste the one
+  install line onto a server, and your other PCs sign in with the same key — no second key,
+  no second setup. Servers you've already trusted (the fingerprint check on first connect)
+  are trusted on your other computers automatically.
+
+### Fixed
+- **The server side-panel is no longer see-through.** The panel that slides in when you open
+  a server (Overview / Monitoring / Manage / Access) was painting with an undefined colour, so
+  the list behind it and the toolbar showed through. It now has a solid background, and the
+  same fix restores the missing borders inside it and in the terminal panel.
+- **The embedded root terminal now actually reaches you.** The 0.1.63→0.1.64 update that added
+  the in-app SSH terminal never finished publishing (a transient build-service failure), so it
+  never arrived. It ships here.
+
 ## [0.1.64] — 2026-08-06
 
 ### Added

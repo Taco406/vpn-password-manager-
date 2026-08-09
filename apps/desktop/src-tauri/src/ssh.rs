@@ -100,6 +100,37 @@ fn load_or_create_key() -> Result<PrivateKey, String> {
     Ok(key)
 }
 
+/// The current keychain private key in OpenSSH PEM form, or "" if none exists yet.
+///
+/// Deliberately does NOT generate a key — only the terminal path (`load_or_create_key`)
+/// creates one. This is what the encrypted settings item reads so the key rides sync to
+/// the user's other computers (v0.1.65): generate once on any PC, install ONE public key
+/// per server, and every PC connects with it. Zero-knowledge is preserved — the key sits
+/// in the same end-to-end-encrypted item as the API tokens; the sync server sees only
+/// ciphertext. (The phone ignores this field — there's no SSH on iOS.)
+pub fn key_pem_export() -> String {
+    kc_get(KC_SSH_KEY).unwrap_or_default()
+}
+
+/// Adopt a synced private key from the settings item. The vault copy is authoritative
+/// (as with every synced field), so this converges all computers onto one key: if the
+/// incoming PEM is a valid key and differs from what's stored, it replaces it. Invalid
+/// input is ignored rather than clobbering a working key. Returns Err only on a keychain
+/// write failure, so the caller can record it (a silent failure here is the bug class the
+/// settings-apply error log exists to catch).
+pub fn key_pem_adopt(pem: &str) -> Result<(), String> {
+    let pem = pem.trim();
+    if pem.is_empty() {
+        return Ok(());
+    }
+    // Reject anything that isn't a decodable OpenSSH private key before touching the store.
+    decode_secret_key(pem, None).map_err(|e| format!("synced SSH key is unreadable: {e}"))?;
+    if kc_get(KC_SSH_KEY).as_deref() == Some(pem) {
+        return Ok(());
+    }
+    kc_set(KC_SSH_KEY, pem)
+}
+
 /// The `ssh-ed25519 AAAA… northkey` line to install in a server's
 /// `~/.ssh/authorized_keys`.
 fn public_line(key: &PrivateKey) -> Result<String, String> {
