@@ -8,6 +8,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com/). Versions are
 [semantic](https://semver.org/). **Add a new `## [x.y.z]` section at the top in the same PR
 that bumps the app version** — that's how "the changelog updates on every merge."
 
+## [0.1.67] — 2026-08-09
+
+### Fixed
+- **Protecting a server no longer fails when the server is mid-update.** The one-click
+  “Protect this server” could stop with *“Could not get lock /var/lib/dpkg/lock-frontend”*
+  when the server happened to be running its own background updates. The installer now waits
+  for that to finish instead of giving up. (If you hit this on 0.1.66, just click Protect
+  again — it picks up where it left off.)
+
 ## [0.1.66] — 2026-08-09
 
 ### Added

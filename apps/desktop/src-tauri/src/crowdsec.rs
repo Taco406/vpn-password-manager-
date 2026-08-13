@@ -35,6 +35,14 @@ ADMIN_IP="$(printf '%s' "${SSH_CONNECTION:-}" | awk '{print $1}')"
 
 echo "== NorthKey CrowdSec deploy =="
 
+# 0) Make every apt/apt-get call WAIT for the dpkg lock instead of failing. On a real server
+#    `unattended-upgrades` (or another apt run) frequently holds the lock, which aborted the
+#    install with "Could not get lock /var/lib/dpkg/lock-frontend". This config is read by every
+#    apt invocation — including CrowdSec's own installer, which shells out to apt-get — so all of
+#    them retry for up to 5 minutes rather than bail.
+mkdir -p /etc/apt/apt.conf.d
+echo 'DPKG::Lock::Timeout "300";' > /etc/apt/apt.conf.d/99northkey-lock
+
 # 1) Install CrowdSec + a firewall bouncer, only if absent.
 if ! command -v cscli >/dev/null 2>&1; then
   echo "-- installing crowdsec"
