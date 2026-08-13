@@ -43,10 +43,30 @@ echo "== NorthKey CrowdSec deploy =="
 mkdir -p /etc/apt/apt.conf.d
 echo 'DPKG::Lock::Timeout "300";' > /etc/apt/apt.conf.d/99northkey-lock
 
-# 1) Install CrowdSec + a firewall bouncer, only if absent.
+# 0b) If the server is busy running its OWN package updates (unattended-upgrades), the
+#     package manager is locked. Wait a short while for it to finish; if it's still busy,
+#     bail immediately with a clear marker instead of hanging until the deploy times out.
+apt_locked() {
+  fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1 \
+    || fuser /var/lib/dpkg/lock >/dev/null 2>&1 \
+    || pgrep -x unattended-upgr >/dev/null 2>&1
+}
+tries=0
+while apt_locked; do
+  tries=$((tries + 1))
+  if [ "$tries" -gt 24 ]; then
+    echo "NORTHKEY_APT_BUSY"
+    exit 0
+  fi
+  echo "-- the server is installing its own updates; waiting ($tries)…"
+  sleep 5
+done
+
+# 1) Install CrowdSec + a firewall bouncer, only if absent. The crowdsec installer is wrapped
+#    in a timeout so a stalled network can't hang the whole deploy.
 if ! command -v cscli >/dev/null 2>&1; then
   echo "-- installing crowdsec"
-  curl -s https://install.crowdsec.net | sh
+  timeout 420 sh -c 'curl -s https://install.crowdsec.net | sh' || true
   apt-get install -y crowdsec
 fi
 if ! dpkg -l 2>/dev/null | grep -q 'crowdsec-firewall-bouncer'; then
@@ -169,6 +189,16 @@ pub async fn crowdsec_deploy(
     )
     .await?;
     let combined = format!("{}\n{}", out.stdout, out.stderr);
+    // The server was busy with its own package updates and stayed locked. Report it as the
+    // clear, actionable thing it is rather than a generic failure/timeout.
+    if combined.contains("NORTHKEY_APT_BUSY") {
+        return Err(
+            "This server is busy installing its own system updates, so its package manager is \
+             locked. That usually finishes within a few minutes — wait a little and click \
+             Protect this server again."
+                .into(),
+        );
+    }
     let ok = out.code == 0 && combined.contains("NORTHKEY_CROWDSEC_OK");
     if ok {
         crate::servers::crowdsec_set_protected(&dir, &provider, &id, true);

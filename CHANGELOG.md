@@ -8,6 +8,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/). Versions are
 [semantic](https://semver.org/). **Add a new `## [x.y.z]` section at the top in the same PR
 that bumps the app version** — that's how "the changelog updates on every merge."
 
+## [0.1.68] — 2026-08-13
+
+### Fixed
+- **“Protect this server” no longer hangs when the server is busy updating itself.** If the
+  server is running its own system updates, NorthKey now waits briefly and then, if it’s still
+  busy, tells you plainly — *“This server is busy installing its own system updates… wait a
+  little and click Protect this server again”* — instead of spinning until it times out.
+
 ## [0.1.67] — 2026-08-09
 
 ### Fixed
