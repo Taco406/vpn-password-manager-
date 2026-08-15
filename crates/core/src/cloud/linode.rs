@@ -552,6 +552,9 @@ impl ServerManager for LinodeClient {
             PowerAction::Boot => "boot",
             PowerAction::Shutdown => "shutdown",
             PowerAction::Reboot => "reboot",
+            // Linode has no separate hard-reset API; its host-side reboot force-completes
+            // after a shutdown timeout, so Reset maps to the same call.
+            PowerAction::Reset => "reboot",
         };
         LinodeClient::power(self, id, name).await
     }

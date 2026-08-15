@@ -341,6 +341,7 @@ pub async fn servers_power(
         "start" => PowerAction::Boot,
         "stop" => PowerAction::Shutdown,
         "reboot" => PowerAction::Reboot,
+        "reset" => PowerAction::Reset,
         a => return Err(format!("unknown action: {a}")),
     };
     let mgr = manager_for(&provider)?;

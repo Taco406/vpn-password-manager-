@@ -160,6 +160,29 @@ Everything lives under a server's **Security** tab (Servers → click a server �
 **Order:** protect `serverdedi` first, watch it, then `coolify`. Never promote a web rule the
 same day you protect a busy client site — give it real traffic to prove it's clean.
 
+## Incident log — the port-8080 collision (2026-08-15)
+
+The first fleet deploy surfaced a serious latent bug: CrowdSec's Local API defaults to
+`127.0.0.1:8080`, Coolify's Traefik proxy publishes `0.0.0.0:8080`, and crowdsec (systemd)
+starts before Docker after a reboot — so on the first reboot after protecting a Coolify
+server, crowdsec won the port, `coolify-proxy` exited with code 128, and **every hosted
+site went dark** until the LAPI was moved to 8081. Fixed in v0.1.70 at three layers, per
+the field-verified write-up:
+1. **Prevention** — the installer moves the LAPI to the first free port ≥8081 (checking
+   both live listeners and Docker port mappings, since a stopped container still owns its
+   mapping) before anything restarts.
+2. **Heal** — the same installer step runs on "Re-run setup", so already-protected servers
+   get the port move + their blocked proxy started (only `coolify-proxy`, by name — never a
+   blanket `docker start`).
+3. **Self-heal** — a systemd oneshot + timer (`coolify-proxy-selfheal`) on every protected
+   server: ~90 s after each boot and every 5 min, it restarts a stopped proxy and applies
+   the port move itself if crowdsec ever holds 8080 again. It never touches app containers
+   or a running proxy.
+
+Lesson recorded: a "localhost-only, no security impact" default can still be an
+availability landmine — check the *port*, not just the bind address, before installing
+anything next to a reverse proxy.
+
 ## Not yet (honest follow-ups)
 
 - **iPhone parity.** The phone can't SSH, so a phone Security tab needs the desktop to sync a

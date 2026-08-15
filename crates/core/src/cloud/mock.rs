@@ -288,7 +288,7 @@ impl ServerManager for MockServerManager {
             .get_mut(id)
             .ok_or(CoreError::Network("no such server".into()))?;
         *st = match action {
-            PowerAction::Boot | PowerAction::Reboot => InstanceState::Running,
+            PowerAction::Boot | PowerAction::Reboot | PowerAction::Reset => InstanceState::Running,
             PowerAction::Shutdown => InstanceState::Stopped,
         };
         Ok(())

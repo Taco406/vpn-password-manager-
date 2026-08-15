@@ -87,6 +87,31 @@ cscli collections install crowdsecurity/sshd crowdsecurity/linux \
 [ -d /var/log/nginx ] && cscli collections install crowdsecurity/nginx 2>/dev/null || true
 [ -d /var/log/apache2 ] && cscli collections install crowdsecurity/apache2 2>/dev/null || true
 
+# 2b) Move CrowdSec's Local API off port 8080. Its default (127.0.0.1:8080) collides
+#     with Coolify's Traefik proxy (and code-server, and countless dashboards) which
+#     publish 0.0.0.0:8080 — a wildcard bind fails if ANY address holds the port. And
+#     because crowdsec (systemd) starts before Docker containers, the collision stays
+#     latent until the first reboot, when crowdsec wins the port, the proxy exits 128,
+#     and EVERY hosted site goes dark. Verified live 2026-08-15 (full-site outage).
+#     Pick the first port from 8081 up that is neither listening nor mapped by any
+#     container (a stopped container still owns its mapping). Idempotent.
+if grep -q '127\.0\.0\.1:8080' /etc/crowdsec/config.yaml 2>/dev/null; then
+  NEWPORT=""
+  for p in 8081 8082 8083 8084 8085; do
+    if ! ss -ltn "( sport = :$p )" 2>/dev/null | grep -q LISTEN; then
+      if ! docker ps -a --format '{{.Ports}}' 2>/dev/null | grep -q ":$p->"; then
+        NEWPORT=$p
+        break
+      fi
+    fi
+  done
+  if [ -z "$NEWPORT" ]; then NEWPORT=8091; fi
+  sed -i "s/127\.0\.0\.1:8080/127.0.0.1:${NEWPORT}/" \
+    /etc/crowdsec/config.yaml /etc/crowdsec/local_api_credentials.yaml 2>/dev/null || true
+  grep -rl ':8080' /etc/crowdsec/bouncers/ 2>/dev/null | xargs -r sed -i "s/:8080/:${NEWPORT}/"
+  echo "-- moved crowdsec LAPI 8080 -> ${NEWPORT} (8080 is commonly a web proxy's port)"
+fi
+
 # 3) Allowlist (never-ban): the operator IP + private ranges. Written as a parser so it
 #    short-circuits BEFORE any scenario can produce a decision.
 mkdir -p /etc/crowdsec/parsers/s02-enrich
@@ -131,6 +156,91 @@ fi
 systemctl enable crowdsec crowdsec-firewall-bouncer 2>/dev/null || true
 systemctl restart crowdsec 2>/dev/null || true
 systemctl restart crowdsec-firewall-bouncer 2>/dev/null || true
+
+# 7) Coolify self-heal (field-verified during the 2026-08-15 outage): a boot + 5-min
+#    timer that restarts a stopped coolify-proxy, and if the start fails specifically
+#    because crowdsec holds 8080, applies the port move itself and retries. It never
+#    touches app containers or a RUNNING proxy; on servers without a coolify-proxy
+#    container it exits silently. Installed everywhere because it's a no-op elsewhere.
+cat > /usr/local/bin/coolify-proxy-selfheal.sh <<'SH'
+#!/usr/bin/env bash
+# Self-heal for coolify-proxy: recovers the crowdsec:8080 collision and
+# restarts a stopped proxy. Safe to run any time; does nothing when healthy.
+set -u
+log() { logger -t proxy-selfheal "$*"; echo "$*"; }
+
+systemctl is-active --quiet docker || { systemctl start docker; sleep 5; }
+
+state=$(docker inspect -f '{{.State.Running}}' coolify-proxy 2>/dev/null || echo missing)
+[ "$state" = "true" ] && exit 0
+if [ "$state" = "missing" ]; then
+  log "coolify-proxy container does not exist; Coolify must (re)create it - not touching anything"
+  exit 0
+fi
+
+if docker start coolify-proxy >/dev/null 2>&1; then
+  log "coolify-proxy was down; started it"
+  exit 0
+fi
+
+if ss -ltnp 2>/dev/null | grep ':8080 ' | grep -q crowdsec; then
+  log "crowdsec holds 8080 - moving its LAPI to 8081"
+  sed -i 's/127\.0\.0\.1:8080/127.0.0.1:8081/' \
+    /etc/crowdsec/config.yaml /etc/crowdsec/local_api_credentials.yaml 2>/dev/null
+  grep -rl ':8080' /etc/crowdsec/bouncers/ 2>/dev/null | xargs -r sed -i 's/:8080/:8081/'
+  systemctl restart crowdsec 2>/dev/null
+  systemctl restart crowdsec-firewall-bouncer 2>/dev/null || true
+  sleep 3
+fi
+
+if docker start coolify-proxy >/dev/null 2>&1; then
+  log "coolify-proxy started after remediation"
+  docker update --restart always coolify-proxy >/dev/null 2>&1
+  exit 0
+fi
+
+log "FAILED to start coolify-proxy - manual attention needed: $(docker start coolify-proxy 2>&1 | tail -1)"
+exit 1
+SH
+chmod +x /usr/local/bin/coolify-proxy-selfheal.sh
+
+cat > /etc/systemd/system/coolify-proxy-selfheal.service <<'UNITA'
+[Unit]
+Description=Self-heal coolify-proxy (crowdsec 8080 collision + stopped proxy)
+After=docker.service network-online.target
+Wants=docker.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/coolify-proxy-selfheal.sh
+UNITA
+
+cat > /etc/systemd/system/coolify-proxy-selfheal.timer <<'UNITB'
+[Unit]
+Description=Run coolify-proxy self-heal shortly after boot, then every 5 minutes
+
+[Timer]
+OnBootSec=90s
+OnUnitActiveSec=5min
+Unit=coolify-proxy-selfheal.service
+
+[Install]
+WantedBy=timers.target
+UNITB
+
+systemctl daemon-reload
+systemctl enable --now coolify-proxy-selfheal.timer 2>/dev/null || true
+
+# 8) If a coolify-proxy exists and is down RIGHT NOW (the collision's victim), bring it
+#    back immediately and pin it to always restart. Only the proxy, by name — never a
+#    blanket docker-start (stopped app containers may be stopped on purpose).
+if docker inspect coolify-proxy >/dev/null 2>&1; then
+  if [ "$(docker inspect -f '{{.State.Running}}' coolify-proxy 2>/dev/null)" != "true" ]; then
+    docker start coolify-proxy >/dev/null 2>&1 || true
+    docker update --restart always coolify-proxy >/dev/null 2>&1 || true
+    echo "-- started coolify-proxy (it was down)"
+  fi
+fi
 
 echo "NORTHKEY_CROWDSEC_OK admin_ip=${ADMIN_IP}"
 "#;
