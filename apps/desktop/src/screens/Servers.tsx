@@ -30,6 +30,9 @@ import {
   serversSetProtection,
   serversOpenTerminal,
   serversPortCheck,
+  serversUpdatesCheck,
+  serversUpdatesApply,
+  type ServerUpdates,
   serversWatchdogGet,
   serversWatchdogSet,
   netdataGet,
@@ -430,7 +433,12 @@ function ServerDrawer({
           {tab === "overview" && <DrawerOverview s={s} busy={busy} onAct={onAct} />}
           {tab === "monitoring" && (s.ipv4 ? <NetdataPanel s={s} /> : <NoIp />)}
           {tab === "security" && (s.ipv4 ? <SecurityPanel s={s} /> : <NoIp />)}
-          {tab === "manage" && <ServerLifecycle s={s} />}
+          {tab === "manage" && (
+            <>
+              {s.ipv4 && <UpdatesCard s={s} />}
+              <ServerLifecycle s={s} />
+            </>
+          )}
           {tab === "access" && (s.ipv4 ? <AccessTab s={s} /> : <NoIp />)}
         </div>
       </aside>
@@ -443,6 +451,116 @@ function NoIp() {
     <p className="text-xs text-[var(--text-muted)]">
       This server has no public IPv4 address, so the app can’t reach it directly.
     </p>
+  );
+}
+
+/**
+ * System updates over SSH (v0.1.69): what's pending, whether the package manager is
+ * genuinely busy right now, whether a restart is needed — and one click to install.
+ * Built after the attack-monitor deploy kept guessing at "busy": this shows the truth.
+ */
+function UpdatesCard({ s }: { s: ManagedServer }) {
+  const host = s.ipv4 ?? "";
+  const [info, setInfo] = useState<ServerUpdates | null>(null);
+  const [checking, setChecking] = useState(false);
+  const [applying, setApplying] = useState(false);
+  const [log, setLog] = useState("");
+  const [err, setErr] = useState("");
+
+  const check = useCallback(async () => {
+    if (!host) return;
+    setChecking(true);
+    setErr("");
+    try {
+      setInfo(await serversUpdatesCheck(s.provider, s.id, host));
+    } catch (e) {
+      setErr(errMsg(e));
+    } finally {
+      setChecking(false);
+    }
+  }, [s.provider, s.id, host]);
+
+  useEffect(() => {
+    void check();
+  }, [check]);
+
+  const apply = async () => {
+    if (
+      !window.confirm(
+        "Install system updates on this server now? Services on it may restart briefly.",
+      )
+    ) {
+      return;
+    }
+    setApplying(true);
+    setErr("");
+    setLog("");
+    try {
+      const r = await serversUpdatesApply(s.provider, s.id, host);
+      setLog(r.log);
+      if (!r.ok) setErr("The update didn’t finish cleanly — see the log below.");
+      await check();
+    } catch (e) {
+      setErr(errMsg(e));
+    } finally {
+      setApplying(false);
+    }
+  };
+
+  return (
+    <div className="mb-4 rounded-[10px] border border-[var(--border-subtle)] p-3">
+      <div className="mb-1 flex items-center gap-2 text-sm font-medium">
+        System updates
+        <button
+          onClick={() => void check()}
+          className="ml-auto inline-flex items-center gap-1 text-xs text-[var(--accent)] hover:underline"
+        >
+          <RefreshCw size={12} /> {checking ? "Checking…" : "Check again"}
+        </button>
+      </div>
+
+      {!info && checking && (
+        <p className="text-[11px] text-[var(--text-muted)]">Asking the server…</p>
+      )}
+      {!info && err && <p className="text-[11px] text-[var(--warn)]">{err}</p>}
+
+      {info && (
+        <>
+          <div className="flex flex-wrap items-center gap-2 text-xs">
+            {info.locked && <Badge tone="warn">package manager busy right now</Badge>}
+            <Badge tone={info.pending > 0 ? "warn" : "ok"}>
+              {info.pending === 0 ? "up to date" : `${info.pending} updates available`}
+            </Badge>
+            {info.security > 0 && <Badge tone="danger">{info.security} security</Badge>}
+            {info.rebootRequired && <Badge tone="warn">restart needed to finish</Badge>}
+          </div>
+          {info.packages.length > 0 && (
+            <p className="mono mt-1 truncate text-[11px] text-[var(--text-muted)]">
+              {info.packages.slice(0, 8).join(", ")}
+              {info.pending > 8 ? ` +${info.pending - 8} more` : ""}
+            </p>
+          )}
+          <div className="mt-2 flex items-center gap-3">
+            {info.pending > 0 && (
+              <button className={btnCls} disabled={applying || info.locked} onClick={() => void apply()}>
+                {applying ? "Installing… (this can take several minutes)" : `Install ${info.pending} updates`}
+              </button>
+            )}
+            {info.rebootRequired && (
+              <span className="text-[11px] text-[var(--text-muted)]">
+                Use the Reboot button on the server card when convenient.
+              </span>
+            )}
+          </div>
+          {err && info && <p className="mt-2 text-[11px] text-[var(--warn)]">{err}</p>}
+          {log && (
+            <pre className="mono mt-2 max-h-40 overflow-auto rounded bg-[var(--bg-inset)] p-2 text-[10px] text-[var(--text-muted)]">
+              {log}
+            </pre>
+          )}
+        </>
+      )}
+    </div>
   );
 }
 
