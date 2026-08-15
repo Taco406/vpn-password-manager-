@@ -8,6 +8,23 @@ The format follows [Keep a Changelog](https://keepachangelog.com/). Versions are
 [semantic](https://semver.org/). **Add a new `## [x.y.z]` section at the top in the same PR
 that bumps the app version** — that's how "the changelog updates on every merge."
 
+## [0.1.71] — 2026-08-15
+
+### Fixed
+- **Buttons that asked “are you sure?” actually work now.** The app’s confirmation popups
+  never appeared (the desktop shell silently swallows them), so every button behind one
+  quietly did nothing: **Install updates**, **Ban permanently**, **enforce** (promoting a
+  detection rule), Reboot/Stop, Destroy sync server, Destroy VPN node, and more. They now
+  use NorthKey’s own confirmation dialog and work everywhere.
+- **The active-ban count is right.** The Security tab could say “4 active bans” while
+  listing 2 — it was double-counting. It now counts actual bans.
+- **Detection rules show their true state.** `ssh-bf` (the rule that catches SSH
+  break-in attempts) could show as “training” while it was actively banning attackers —
+  the app was misreading a commented-out example in CrowdSec’s stock config. Rule states
+  are now read accurately.
+- The never-ban allowlist now says when it **couldn’t be read** from the server instead
+  of showing an empty list, and “Ban 4h” with no IP entered tells you to enter one.
+
 ## [0.1.70] — 2026-08-15
 
 ### Fixed

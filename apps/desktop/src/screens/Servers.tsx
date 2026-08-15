@@ -3,6 +3,7 @@
 // power actions and real utilization graphs from the provider metrics APIs.
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import { askConfirm } from "../components/Confirm";
 import {
   Server,
   RefreshCw,
@@ -170,7 +171,7 @@ export function Servers() {
         : action === "reset"
           ? `Force restart "${s.label}"? This is like pressing the reset button — the system won't shut down cleanly. Use it when a normal reboot does nothing.`
           : `${action === "start" ? "Start" : "Reboot"} "${s.label}"?`;
-    if (!window.confirm(warn)) return;
+    if (!(await askConfirm(warn))) return;
     setBusy(true);
     setMsg("");
     try {
@@ -488,9 +489,9 @@ function UpdatesCard({ s }: { s: ManagedServer }) {
 
   const apply = async () => {
     if (
-      !window.confirm(
+      !(await askConfirm(
         "Install system updates on this server now? Services on it may restart briefly.",
-      )
+      ))
     ) {
       return;
     }
@@ -1062,11 +1063,11 @@ function ServerLifecycle({ s }: { s: ManagedServer }) {
 
   const doProtection = async (on: boolean) => {
     if (
-      !window.confirm(
+      !(await askConfirm(
         on
           ? `Turn ON delete/rebuild protection for "${s.label}"? The provider will refuse to destroy or rebuild it until you turn this off.`
           : `Turn OFF delete/rebuild protection for "${s.label}"?`,
-      )
+      ))
     )
       return;
     setBusy(true);

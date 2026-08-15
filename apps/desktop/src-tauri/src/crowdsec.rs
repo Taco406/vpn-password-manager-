@@ -372,18 +372,22 @@ pub async fn crowdsec_status(
     }
     let protected = crate::servers::crowdsec_is_protected(&dir, &provider, &id);
     let host = require_host(&host).await?;
-    // One round-trip: report both services + the decision count.
+    // One round-trip: both service states, then the raw decisions JSON behind a marker.
+    // The count comes from the tested parser — an earlier `grep -c '"id"'` counted alert
+    // ids AND decision ids, showing "4 active bans" for 2 (seen live).
     let cmd = "systemctl is-active crowdsec 2>/dev/null || echo not-installed; \
                systemctl is-active crowdsec-firewall-bouncer 2>/dev/null || echo not-installed; \
-               cscli decisions list -o json 2>/dev/null | grep -c '\"id\"' || echo 0";
+               echo NK_DECISIONS; \
+               cscli decisions list -o json 2>/dev/null || echo '[]'";
     let out = crate::ssh::exec(&dir, &provider, &id, &host, cmd, QUERY_TIMEOUT_SECS).await?;
-    let mut lines = out.stdout.lines();
+    let (head, decisions_json) = out
+        .stdout
+        .split_once("NK_DECISIONS")
+        .unwrap_or((out.stdout.as_str(), "[]"));
+    let mut lines = head.lines();
     let agent = lines.next().unwrap_or("unknown").trim().to_string();
     let bouncer = lines.next().unwrap_or("unknown").trim().to_string();
-    let active_bans = lines
-        .next()
-        .and_then(|l| l.trim().parse::<u32>().ok())
-        .unwrap_or(0);
+    let active_bans = parse_decisions(decisions_json).len() as u32;
     Ok(StatusOut {
         protected,
         agent,
@@ -857,9 +861,16 @@ pub fn parse_decisions(json: &str) -> Vec<Decision> {
 }
 
 /// Parse the combined `cscli scenarios list -o json` + `---NKSIM---` + simulation.yaml
-/// blob. A scenario is "simulated" (training) when its name appears in simulation.yaml —
-/// which is exactly how NorthKey enables training mode (`cscli simulation enable <name>`),
-/// with the global simulation flag left off.
+/// blob. A scenario is in training when simulation.yaml says so: with the global flag
+/// off, the `exclusions` list IS the simulated set (`cscli simulation enable <name>`
+/// appends there); with the global flag on, everything is simulated EXCEPT that list.
+///
+/// The yaml must be parsed comment-aware: CrowdSec's STOCK simulation.yaml ships with a
+/// commented example — `#  - crowdsecurity/ssh-bf` — and a naive substring check read
+/// that comment as "ssh-bf is in training", displaying an enforced, actively-banning
+/// scenario as harmless (seen live: two ssh-bf bans active while the rule showed
+/// "training"). Comments and trailing comments are stripped before matching, and names
+/// are matched exactly.
 pub fn parse_scenarios(raw: &str) -> Vec<Scenario> {
     let (json_part, sim_part) = match raw.split_once("---NKSIM---") {
         Some((a, b)) => (a, b),
@@ -871,10 +882,31 @@ pub fn parse_scenarios(raw: &str) -> Vec<Scenario> {
     }
     names.sort();
     names.dedup();
+
+    let mut global_sim = false;
+    let mut listed: Vec<String> = Vec::new();
+    for line in sim_part.lines() {
+        let t = line.trim();
+        if t.starts_with('#') {
+            continue;
+        }
+        // Strip a trailing comment, then classify the line.
+        let t = t.split('#').next().unwrap_or("").trim();
+        if let Some(v) = t.strip_prefix("simulation:") {
+            global_sim = matches!(v.trim(), "true" | "on" | "yes");
+        } else if let Some(v) = t.strip_prefix('-') {
+            let v = v.trim().trim_matches('"').trim_matches('\'');
+            if !v.is_empty() {
+                listed.push(v.to_string());
+            }
+        }
+    }
+
     names
         .into_iter()
         .map(|name| {
-            let simulated = sim_part.contains(&name);
+            let in_list = listed.iter().any(|e| e == &name);
+            let simulated = if global_sim { !in_list } else { in_list };
             Scenario { name, simulated }
         })
         .collect()
@@ -961,6 +993,35 @@ exclusions:
         let ssh = s.iter().find(|x| x.name.contains("ssh")).unwrap();
         assert!(http.simulated); // in simulation.yaml → training
         assert!(!ssh.simulated); // enforced
+    }
+
+    #[test]
+    fn stock_commented_example_is_not_training() {
+        // CrowdSec's stock simulation.yaml — the commented ssh-bf example must NOT
+        // display an enforced, actively-banning scenario as "training" (seen live).
+        let raw = r#"[{"name":"crowdsecurity/ssh-bf"},{"name":"crowdsecurity/ssh-slow-bf"}]
+---NKSIM---
+simulation: false
+# exclusions:
+#  - crowdsecurity/ssh-bf
+"#;
+        let s = parse_scenarios(raw);
+        assert!(s.iter().all(|x| !x.simulated));
+    }
+
+    #[test]
+    fn global_simulation_inverts_the_list() {
+        let raw = r#"[{"name":"crowdsecurity/a"},{"name":"crowdsecurity/b"}]
+---NKSIM---
+simulation: true
+exclusions:
+  - crowdsecurity/a
+"#;
+        let s = parse_scenarios(raw);
+        let a = s.iter().find(|x| x.name.ends_with("/a")).unwrap();
+        let b = s.iter().find(|x| x.name.ends_with("/b")).unwrap();
+        assert!(!a.simulated); // excluded from global simulation → enforced
+        assert!(b.simulated);
     }
 
     #[test]

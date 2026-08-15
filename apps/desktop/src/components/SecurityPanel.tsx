@@ -4,6 +4,7 @@
 // in training mode (detect + alert, no bans) until promoted in a later phase.
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import { askConfirm } from "./Confirm";
 import { ShieldCheck, ShieldAlert, RefreshCw, Ban } from "lucide-react";
 import {
   crowdsecDeploy,
@@ -35,7 +36,8 @@ export function SecurityPanel({ s }: { s: ManagedServer }) {
   const [alerts, setAlerts] = useState<CrowdsecAlert[]>([]);
   const [bans, setBans] = useState<CrowdsecDecision[]>([]);
   const [scenarios, setScenarios] = useState<CrowdsecScenario[]>([]);
-  const [allowlist, setAllowlist] = useState<string[]>([]);
+  // null = could not read it from the server (distinct from "empty on purpose").
+  const [allowlist, setAllowlist] = useState<string[] | null>([]);
   const [deploying, setDeploying] = useState(false);
   const [deployLog, setDeployLog] = useState("");
   const [loading, setLoading] = useState(false);
@@ -58,7 +60,7 @@ export function SecurityPanel({ s }: { s: ManagedServer }) {
           crowdsecAlerts(s.provider, s.id, host, 50),
           crowdsecDecisions(s.provider, s.id, host),
           crowdsecScenarios(s.provider, s.id, host).catch(() => [] as CrowdsecScenario[]),
-          crowdsecAllowlistGet(s.provider, s.id, host).catch(() => [] as string[]),
+          crowdsecAllowlistGet(s.provider, s.id, host).catch(() => null),
         ]);
         if (!alive.current) return;
         setAlerts(a);
@@ -116,8 +118,11 @@ export function SecurityPanel({ s }: { s: ManagedServer }) {
 
   const ban = async (perm: boolean, ipOverride?: string) => {
     const ip = (ipOverride ?? banIp).trim();
-    if (!ip) return;
-    if (perm && !window.confirm(`Permanently ban ${ip}? It stays blocked until you unban it.`)) {
+    if (!ip) {
+      toastError("Enter an IP address to ban first.");
+      return;
+    }
+    if (perm && !(await askConfirm(`Permanently ban ${ip}? It stays blocked until you unban it.`))) {
       return;
     }
     setBusyIp(ip);
@@ -135,10 +140,10 @@ export function SecurityPanel({ s }: { s: ManagedServer }) {
 
   const toggleScenario = async (sc: CrowdsecScenario) => {
     // Promoting to enforced can start real bans — confirm for the web scenarios.
-    if (sc.simulated && !window.confirm(
+    if (sc.simulated && !(await askConfirm(
       `Enforce “${sc.name}”? It will start blocking IPs that trip it. ` +
         `Make sure your allowlist covers anyone who must never be blocked.`,
-    )) {
+    ))) {
       return;
     }
     try {
@@ -153,7 +158,7 @@ export function SecurityPanel({ s }: { s: ManagedServer }) {
   const addAllow = async () => {
     const ip = newAllow.trim();
     if (!ip) return;
-    const next = Array.from(new Set([...allowlist, ip]));
+    const next = Array.from(new Set([...(allowlist ?? []), ip]));
     try {
       await crowdsecAllowlistSet(s.provider, s.id, host, next);
       setAllowlist(next);
@@ -165,7 +170,7 @@ export function SecurityPanel({ s }: { s: ManagedServer }) {
   };
 
   const removeAllow = async (ip: string) => {
-    const next = allowlist.filter((x) => x !== ip);
+    const next = (allowlist ?? []).filter((x) => x !== ip);
     try {
       await crowdsecAllowlistSet(s.provider, s.id, host, next);
       setAllowlist(next);
@@ -421,7 +426,12 @@ export function SecurityPanel({ s }: { s: ManagedServer }) {
               Add
             </button>
           </div>
-          {allowlist.length === 0 ? (
+          {allowlist === null ? (
+            <p className="text-[11px] text-[var(--warn)]">
+              Couldn’t read the allowlist from the server — hit Refresh, and if it stays like
+              this use “Re-run setup” to rewrite it (it re-adds your current IP).
+            </p>
+          ) : allowlist.length === 0 ? (
             <p className="text-[11px] text-[var(--text-muted)]">No operator IPs listed yet.</p>
           ) : (
             <div className="flex flex-wrap gap-1.5">

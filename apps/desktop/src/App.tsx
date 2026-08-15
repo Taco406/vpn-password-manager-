@@ -1,4 +1,5 @@
 import { useEffect } from "react";
+import { ConfirmHost } from "./components/Confirm";
 import { HashRouter, Routes, Route, Navigate } from "react-router-dom";
 import { useApp } from "./stores/app";
 import { useAutoLock } from "./hooks/useAutoLock";
@@ -60,6 +61,7 @@ export function App() {
     <HashRouter>
       <CommandPalette />
       <Toaster />
+      <ConfirmHost />
       <ErrorBoundary>
       <Routes>
         <Route path="/unlock" element={<Unlock />} />
