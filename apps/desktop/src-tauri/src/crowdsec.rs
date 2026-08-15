@@ -315,6 +315,12 @@ pub async fn crowdsec_deploy(
     let ok = out.code == 0 && combined.contains("NORTHKEY_CROWDSEC_OK");
     if ok {
         crate::servers::crowdsec_set_protected(&dir, &provider, &id, true);
+        // Fleet ban pool: a freshly protected server receives the whole pool right away
+        // (only when the user has sharing turned on). Best-effort.
+        if crate::servers::watchdog_ban_sync_enabled(&dir) {
+            let fleet = protected_fleet(&dir).await;
+            let _ = fleet_sync_given(&dir, &fleet).await;
+        }
     }
     let admin_ip = combined
         .lines()
@@ -357,6 +363,10 @@ pub struct StatusOut {
     pub bouncer: String,
     /// Count of currently-active ban decisions.
     pub active_bans: u32,
+    /// Community-blocklist decisions (origin CAPI) active on this server — IPs flagged
+    /// as malicious across the internet, pre-blocked before they ever touch you.
+    /// CrowdSec enables this by default; shown for visibility.
+    pub community_bans: u32,
 }
 
 #[tauri::command]
@@ -378,21 +388,29 @@ pub async fn crowdsec_status(
     let cmd = "systemctl is-active crowdsec 2>/dev/null || echo not-installed; \
                systemctl is-active crowdsec-firewall-bouncer 2>/dev/null || echo not-installed; \
                echo NK_DECISIONS; \
-               cscli decisions list -o json 2>/dev/null || echo '[]'";
+               cscli decisions list -o json 2>/dev/null || echo '[]'; \
+               echo NK_CAPI; \
+               cscli decisions list -a -o json 2>/dev/null || echo '[]'";
     let out = crate::ssh::exec(&dir, &provider, &id, &host, cmd, QUERY_TIMEOUT_SECS).await?;
-    let (head, decisions_json) = out
+    let (head, rest) = out
         .stdout
         .split_once("NK_DECISIONS")
         .unwrap_or((out.stdout.as_str(), "[]"));
+    let (decisions_json, all_json) = rest.split_once("NK_CAPI").unwrap_or((rest, "[]"));
     let mut lines = head.lines();
     let agent = lines.next().unwrap_or("unknown").trim().to_string();
     let bouncer = lines.next().unwrap_or("unknown").trim().to_string();
     let active_bans = parse_decisions(decisions_json).len() as u32;
+    let community_bans = parse_decisions(all_json)
+        .iter()
+        .filter(|d| d.origin == "CAPI")
+        .count() as u32;
     Ok(StatusOut {
         protected,
         agent,
         bouncer,
         active_bans,
+        community_bans,
     })
 }
 
@@ -753,6 +771,264 @@ pub async fn crowdsec_allowlist_set(
 }
 
 // ---------------------------------------------------------------------------
+// Fleet ban pool (v0.1.72): "one server bans it, they all do." NorthKey is the
+// sync hub — it already reaches every server over pinned SSH, so no server ever
+// needs to talk to another (no new ports, no shared credentials; the 8080
+// incident is the cautionary tale). Union of local bans, pushed to whoever's
+// missing them. Community (CAPI) decisions are excluded — CrowdSec distributes
+// those to every agent itself.
+// ---------------------------------------------------------------------------
+
+/// Parse a cscli remaining-duration like "3h58m54s" into minutes, flagging the
+/// very-long ones as permanent. None for unparseable/expired.
+pub fn parse_duration_mins(s: &str) -> Option<(u32, bool)> {
+    let s = s.trim();
+    if s.is_empty() || s.starts_with('-') {
+        return None;
+    }
+    let mut total_secs: f64 = 0.0;
+    let mut num = String::new();
+    for c in s.chars() {
+        if c.is_ascii_digit() || c == '.' {
+            num.push(c);
+        } else {
+            let v: f64 = num.parse().ok()?;
+            num.clear();
+            total_secs += match c {
+                'h' => v * 3600.0,
+                'm' => v * 60.0,
+                's' => v,
+                _ => return None,
+            };
+        }
+    }
+    if total_secs <= 0.0 {
+        return None;
+    }
+    let mins = (total_secs / 60.0).ceil() as u32;
+    // Anything in the ~100-year range is our PERM_DURATION (or another "forever").
+    let perm = mins >= 100_000 * 60;
+    Some((mins.max(5), perm))
+}
+
+/// One server's active local bans, as (ip, minutes_remaining, permanent).
+pub type ServerBans = Vec<(String, u32, bool)>;
+
+/// Pure sync planner: given each server's bans, return what each server is
+/// missing from the fleet union. Union keeps the LONGEST remaining duration per
+/// IP (perm wins). Present-by-IP check makes repeated runs no-ops.
+pub fn plan_fleet_additions(per_server: &[(String, ServerBans)]) -> Vec<(String, ServerBans)> {
+    use std::collections::{HashMap, HashSet};
+    let mut union: HashMap<String, (u32, bool)> = HashMap::new();
+    for (_, bans) in per_server {
+        for (ip, mins, perm) in bans {
+            let e = union.entry(ip.clone()).or_insert((0, false));
+            e.0 = e.0.max(*mins);
+            e.1 = e.1 || *perm;
+        }
+    }
+    per_server
+        .iter()
+        .map(|(key, bans)| {
+            let have: HashSet<&String> = bans.iter().map(|(ip, _, _)| ip).collect();
+            let mut missing: ServerBans = union
+                .iter()
+                .filter(|(ip, _)| !have.contains(ip))
+                .map(|(ip, (m, p))| (ip.clone(), *m, *p))
+                .collect();
+            missing.sort();
+            missing.truncate(100); // bound one run; the next pass picks up the rest
+            (key.clone(), missing)
+        })
+        .collect()
+}
+
+/// Every CrowdSec-protected server with a public IP: (provider, id, host, label).
+pub(crate) async fn protected_fleet(
+    dir: &std::path::Path,
+) -> Vec<(String, String, String, String)> {
+    use sentinel_core::cloud::{HetznerClient, LinodeClient, ServerManager};
+    let mut out = Vec::new();
+    if let Some(token) = crate::vpn::get_token() {
+        if let Ok(list) = ServerManager::list_all(&LinodeClient::new(token)).await {
+            for info in list {
+                out.push(("linode".to_string(), info.id, info.ipv4, info.label));
+            }
+        }
+    }
+    if let Some(token) = crate::servers::hetzner_get_token() {
+        if let Ok(list) = HetznerClient::new(token).list_all().await {
+            for info in list {
+                out.push(("hetzner".to_string(), info.id, info.ipv4, info.label));
+            }
+        }
+    }
+    out.into_iter()
+        .filter_map(|(p, id, ipv4, label)| {
+            let host = ipv4?;
+            crate::servers::crowdsec_is_protected(dir, &p, &id).then_some((p, id, host, label))
+        })
+        .collect()
+}
+
+#[derive(Serialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct FleetSyncOut {
+    /// Protected servers reached.
+    pub servers: u32,
+    /// Bans pushed to servers that were missing them.
+    pub propagated: u32,
+    pub log: String,
+}
+
+/// Run one fleet-sync pass over the given servers. Best-effort per server — an
+/// unreachable box is skipped and the rest still sync.
+pub(crate) async fn fleet_sync_given(
+    dir: &std::path::Path,
+    fleet: &[(String, String, String, String)],
+) -> FleetSyncOut {
+    let mut per_server: Vec<(String, ServerBans)> = Vec::new();
+    let mut log = String::new();
+    for (provider, id, host, label) in fleet {
+        let cmd = "cscli decisions list -o json 2>/dev/null || echo '[]'";
+        match crate::ssh::exec(dir, provider, id, host, cmd, QUERY_TIMEOUT_SECS).await {
+            Ok(out) => {
+                let bans: ServerBans = parse_decisions(&out.stdout)
+                    .into_iter()
+                    .filter(|d| d.origin != "CAPI" && d.action == "ban")
+                    .filter(|d| valid_ip_or_cidr(&d.source_ip))
+                    .filter_map(|d| {
+                        parse_duration_mins(&d.duration).map(|(m, p)| (d.source_ip, m, p))
+                    })
+                    .collect();
+                per_server.push((format!("{provider}:{id}"), bans));
+            }
+            Err(e) => log.push_str(&format!("{label}: unreachable ({e})\n")),
+        }
+    }
+
+    let plan: std::collections::HashMap<String, ServerBans> =
+        plan_fleet_additions(&per_server).into_iter().collect();
+    let mut propagated = 0u32;
+    for (provider, id, host, label) in fleet {
+        let missing = match plan.get(&format!("{provider}:{id}")) {
+            Some(m) if !m.is_empty() => m,
+            _ => continue,
+        };
+        let mut cmd = String::new();
+        for (ip, mins, perm) in missing {
+            let duration = if *perm {
+                PERM_DURATION.to_string()
+            } else {
+                format!("{mins}m")
+            };
+            cmd.push_str(&format!(
+                "cscli decisions add --ip {ip} --duration {duration} --reason 'NorthKey fleet sync' 2>&1\n"
+            ));
+        }
+        match crate::ssh::exec(dir, provider, id, host, &cmd, QUERY_TIMEOUT_SECS).await {
+            Ok(_) => {
+                propagated += missing.len() as u32;
+                log.push_str(&format!("{label}: added {} shared bans\n", missing.len()));
+            }
+            Err(e) => log.push_str(&format!("{label}: push failed ({e})\n")),
+        }
+    }
+    if propagated > 0 {
+        crate::applog::info(
+            "servers.security",
+            &format!("fleet ban sync: propagated {propagated} bans"),
+        );
+    }
+    FleetSyncOut {
+        servers: per_server.len() as u32,
+        propagated,
+        log,
+    }
+}
+
+/// Cheap, local: which servers are protected ("provider:id" keys). No SSH.
+#[tauri::command]
+pub fn crowdsec_protected_list(state: State<'_, AppState>) -> Vec<String> {
+    let (dir, _) = ctx(&state);
+    crate::servers::crowdsec_protected_keys(&dir)
+}
+
+/// Manual "sync bans now" across every protected server.
+#[tauri::command]
+pub async fn crowdsec_fleet_sync(state: State<'_, AppState>) -> Result<FleetSyncOut, String> {
+    let (dir, locked) = ctx(&state);
+    if locked {
+        return Err("Unlock your vault first.".into());
+    }
+    let fleet = protected_fleet(&dir).await;
+    if fleet.is_empty() {
+        return Err("No protected servers yet — protect one from its Security tab first.".into());
+    }
+    Ok(fleet_sync_given(&dir, &fleet).await)
+}
+
+/// Ban an IP on EVERY protected server (minutes; 0 = permanent).
+#[tauri::command]
+pub async fn crowdsec_fleet_ban(
+    state: State<'_, AppState>,
+    ip: String,
+    minutes: u32,
+) -> Result<u32, String> {
+    let (dir, locked) = ctx(&state);
+    if locked {
+        return Err("Unlock your vault first.".into());
+    }
+    if !valid_ip_or_cidr(&ip) {
+        return Err(format!("“{ip}” is not a valid IP address."));
+    }
+    let duration = if minutes == 0 {
+        PERM_DURATION.to_string()
+    } else {
+        format!("{minutes}m")
+    };
+    let cmd = format!(
+        "cscli decisions add --ip {ip} --duration {duration} --reason 'NorthKey manual' 2>&1"
+    );
+    let mut done = 0u32;
+    for (provider, id, host, _) in protected_fleet(&dir).await {
+        if crate::ssh::exec(&dir, &provider, &id, &host, &cmd, QUERY_TIMEOUT_SECS)
+            .await
+            .map(|o| o.code == 0)
+            .unwrap_or(false)
+        {
+            done += 1;
+        }
+    }
+    Ok(done)
+}
+
+/// Remove an IP's bans on EVERY protected server — so an unban sticks even with
+/// fleet sync on (otherwise the next pass would faithfully re-propagate it).
+#[tauri::command]
+pub async fn crowdsec_fleet_unban(state: State<'_, AppState>, ip: String) -> Result<u32, String> {
+    let (dir, locked) = ctx(&state);
+    if locked {
+        return Err("Unlock your vault first.".into());
+    }
+    if !valid_ip_or_cidr(&ip) {
+        return Err(format!("“{ip}” is not a valid IP address."));
+    }
+    let cmd = format!("cscli decisions delete --ip {ip} 2>&1");
+    let mut done = 0u32;
+    for (provider, id, host, _) in protected_fleet(&dir).await {
+        if crate::ssh::exec(&dir, &provider, &id, &host, &cmd, QUERY_TIMEOUT_SECS)
+            .await
+            .map(|o| o.code == 0)
+            .unwrap_or(false)
+        {
+            done += 1;
+        }
+    }
+    Ok(done)
+}
+
+// ---------------------------------------------------------------------------
 // Parsers (pure — unit-tested against captured fixtures)
 // ---------------------------------------------------------------------------
 
@@ -1022,6 +1298,49 @@ exclusions:
         let b = s.iter().find(|x| x.name.ends_with("/b")).unwrap();
         assert!(!a.simulated); // excluded from global simulation → enforced
         assert!(b.simulated);
+    }
+
+    #[test]
+    fn duration_parse_and_perm() {
+        assert_eq!(parse_duration_mins("3h58m54s"), Some((239, false)));
+        assert_eq!(parse_duration_mins("45s"), Some((5, false))); // clamped to 5m
+        assert_eq!(parse_duration_mins("875999h59m58s"), Some((52560000, true)));
+        assert_eq!(parse_duration_mins("-12m"), None); // expired
+        assert_eq!(parse_duration_mins("garbage"), None);
+    }
+
+    #[test]
+    fn fleet_plan_unions_and_skips_present() {
+        let a = ("a".to_string(), vec![("1.2.3.4".to_string(), 200, false)]);
+        let b = ("b".to_string(), vec![("5.6.7.8".to_string(), 0, true)]);
+        let c = ("c".to_string(), vec![]);
+        let plan = plan_fleet_additions(&[a, b, c]);
+        let get = |k: &str| plan.iter().find(|(x, _)| x == k).unwrap().1.clone();
+        assert_eq!(get("a"), vec![("5.6.7.8".to_string(), 0, true)]);
+        assert_eq!(get("b"), vec![("1.2.3.4".to_string(), 200, false)]);
+        let mut c_add = get("c");
+        c_add.sort();
+        assert_eq!(c_add.len(), 2); // empty server receives the whole pool
+                                    // Re-running on the synced state is a no-op.
+        let synced = vec![
+            (
+                "a".to_string(),
+                vec![
+                    ("1.2.3.4".to_string(), 200, false),
+                    ("5.6.7.8".to_string(), 0, true),
+                ],
+            ),
+            (
+                "b".to_string(),
+                vec![
+                    ("1.2.3.4".to_string(), 200, false),
+                    ("5.6.7.8".to_string(), 0, true),
+                ],
+            ),
+        ];
+        assert!(plan_fleet_additions(&synced)
+            .iter()
+            .all(|(_, m)| m.is_empty()));
     }
 
     #[test]

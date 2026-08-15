@@ -519,6 +519,8 @@ export interface CrowdsecStatus {
   agent: string;
   bouncer: string;
   activeBans: number;
+  /** Community-blocklist decisions (CrowdSec CAPI) active on this server. */
+  communityBans: number;
 }
 
 export interface CrowdsecAlert {
@@ -662,6 +664,38 @@ export async function crowdsecAllowlistSet(
   await inv("crowdsec_allowlist_set", { provider, id, host, entries });
 }
 
+// --- Fleet ban pool (v0.1.72) -------------------------------------------------
+
+export interface FleetSyncOut {
+  servers: number;
+  propagated: number;
+  log: string;
+}
+
+/** Protected server keys ("provider:id"), read locally — no SSH. */
+export async function crowdsecProtectedList(): Promise<string[]> {
+  if (!inTauri()) return [];
+  return inv<string[]>("crowdsec_protected_list");
+}
+
+/** Push the union of every server's bans to whoever's missing them. */
+export async function crowdsecFleetSync(): Promise<FleetSyncOut> {
+  if (!inTauri()) throw new Error("Server protection is only available in the desktop app.");
+  return inv<FleetSyncOut>("crowdsec_fleet_sync");
+}
+
+/** Ban an IP on EVERY protected server (minutes; 0 = permanent). Returns servers reached. */
+export async function crowdsecFleetBan(ip: string, minutes: number): Promise<number> {
+  if (!inTauri()) throw new Error("Server protection is only available in the desktop app.");
+  return inv<number>("crowdsec_fleet_ban", { ip, minutes });
+}
+
+/** Unban an IP on EVERY protected server, so an unban sticks with fleet sync on. */
+export async function crowdsecFleetUnban(ip: string): Promise<number> {
+  if (!inTauri()) throw new Error("Server protection is only available in the desktop app.");
+  return inv<number>("crowdsec_fleet_unban", { ip });
+}
+
 // --- System updates over SSH (v0.1.69) ---------------------------------------
 
 export interface ServerUpdates {
@@ -709,6 +743,8 @@ export interface WatchdogCfg {
   diskPct: number;
   /** Also alert on new CrowdSec bans on protected servers (opt-in; adds background SSH). */
   securityAlerts: boolean;
+  /** Fleet ban pool: keep every protected server's bans in sync (opt-in). */
+  banSync: boolean;
 }
 
 export interface NetdataCfg {
@@ -744,6 +780,7 @@ export async function serversWatchdogGet(): Promise<WatchdogCfg> {
       cpuSustainTicks: 3,
       diskPct: 90,
       securityAlerts: false,
+      banSync: false,
     };
   return inv<WatchdogCfg>("servers_watchdog_get");
 }
