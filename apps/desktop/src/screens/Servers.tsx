@@ -69,6 +69,7 @@ import { errMsg, inputCls, btnCls, Toggle } from "../components/kit";
 import { toastError } from "../components/Toast";
 import { SshTerminal } from "../components/SshTerminal";
 import { SecurityPanel } from "../components/SecurityPanel";
+import { FleetSecurityCard } from "../components/FleetSecurityCard";
 import { TimeSeriesChart, type TimeSeries } from "../components/charts/TimeSeriesChart";
 import { ThroughputChart } from "../components/charts/ThroughputChart";
 
@@ -337,7 +338,10 @@ export function Servers() {
           )}
 
           {/* Fleet-wide panels sit below the grid, side by side on wide windows. */}
-          <div className="mt-4 grid grid-cols-1 gap-3 2xl:grid-cols-2">
+          <div className="mt-4">
+            <FleetSecurityCard servers={servers} />
+          </div>
+          <div className="grid grid-cols-1 gap-3 2xl:grid-cols-2">
             <WatchdogCard />
             <AlertFeed />
           </div>
@@ -2174,6 +2178,18 @@ function WatchdogCard() {
             Checks each CrowdSec-protected server for new bans each round (makes a background SSH
             connection). Set up protection from a server’s Security tab first.
           </p>
+          <div className="mt-2">
+            <Toggle
+              label="Share bans across my servers (one blocks it, they all do)"
+              checked={cfg.banSync}
+              onChange={(v) => patch({ banSync: v })}
+            />
+            <p className="mt-0.5 text-[11px] text-[var(--text-muted)]">
+              Each round, every protected server’s bans are pushed to the others, and a newly
+              protected server receives the whole pool. Syncs while NorthKey is running; each
+              server still blocks its own attackers instantly either way.
+            </p>
+          </div>
         </div>
       )}
       {cfg.enabled && (

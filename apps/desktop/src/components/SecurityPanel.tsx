@@ -12,7 +12,7 @@ import {
   crowdsecAlerts,
   crowdsecDecisions,
   crowdsecBan,
-  crowdsecUnban,
+  crowdsecFleetUnban,
   crowdsecScenarios,
   crowdsecPromote,
   crowdsecDemote,
@@ -106,8 +106,11 @@ export function SecurityPanel({ s }: { s: ManagedServer }) {
   const unban = async (ip: string) => {
     setBusyIp(ip);
     try {
-      await crowdsecUnban(s.provider, s.id, host, ip);
-      toastSuccess(`Unbanned ${ip}`);
+      // Fleet-wide on purpose: with ban sharing on, a single-server unban would be
+      // faithfully re-propagated by the next sync pass. Harmless when only one server
+      // has the ban.
+      const n = await crowdsecFleetUnban(ip);
+      toastSuccess(n > 1 ? `Unbanned ${ip} on ${n} servers` : `Unbanned ${ip}`);
       await refresh();
     } catch (e) {
       toastError(errMsg(e));
@@ -226,6 +229,9 @@ export function SecurityPanel({ s }: { s: ManagedServer }) {
             <Badge tone={status && status.activeBans > 0 ? "danger" : "neutral"}>
               {status?.activeBans ?? 0} active {status?.activeBans === 1 ? "ban" : "bans"}
             </Badge>
+            {(status?.communityBans ?? 0) > 0 && (
+              <Badge tone="accent">{status?.communityBans} community-blocked</Badge>
+            )}
             <button className={`${btnCls} ml-auto`} disabled={deploying} onClick={() => void deploy()}>
               {deploying ? "Updating…" : "Re-run setup"}
             </button>

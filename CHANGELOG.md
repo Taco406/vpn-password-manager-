@@ -8,6 +8,22 @@ The format follows [Keep a Changelog](https://keepachangelog.com/). Versions are
 [semantic](https://semver.org/). **Add a new `## [x.y.z]` section at the top in the same PR
 that bumps the app version** — that's how "the changelog updates on every merge."
 
+## [0.1.72] — 2026-08-15
+
+### Added
+- **One server bans it, they all do.** Turn on “Share bans across my servers” (Watchdog card)
+  and every protected server’s blocks are pushed to the others each round — and a newly
+  protected server receives the whole ban pool automatically. There’s also a “Sync bans now”
+  button, a “ban everywhere” action on fleet attackers, and unban now removes an IP from
+  every server so it can’t sneak back via sync. Syncs while NorthKey is running; each server
+  still blocks its own attackers instantly either way.
+- **Fleet security at a glance.** A new card on the Servers screen totals active bans and
+  detections across all protected servers, charts **detections per day for the last week**
+  (is pressure rising?), and lists the fleet’s top attackers — no more opening three panels.
+- **Community blocklist visibility.** CrowdSec quietly pre-blocks IPs flagged as malicious
+  across the internet (on by default) — the app now shows you how many, per server and
+  fleet-wide, instead of hiding that protection.
+
 ## [0.1.71] — 2026-08-15
 
 ### Fixed

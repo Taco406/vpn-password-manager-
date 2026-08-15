@@ -473,6 +473,11 @@ pub struct WatchdogFileCfg {
     /// bans and fires an alert/toast for each. Opt-in because it makes a background SSH
     /// connection to each protected server every tick. Added in Phase C.
     pub security_alerts: bool,
+    /// Fleet ban pool: when on, each watchdog tick unions every protected server's
+    /// local bans and pushes missing ones to the others ("one bans it, they all do"),
+    /// and a freshly protected server receives the whole pool. Opt-in; syncs only
+    /// while NorthKey runs (stated in the UI). Added in v0.1.72.
+    pub ban_sync: bool,
 }
 
 impl Default for WatchdogFileCfg {
@@ -484,6 +489,7 @@ impl Default for WatchdogFileCfg {
             cpu_sustain_ticks: 3,
             disk_pct: 90.0,
             security_alerts: false,
+            ban_sync: false,
         }
     }
 }
@@ -650,6 +656,21 @@ pub(crate) fn crowdsec_is_protected(dir: &Path, provider: &str, id: &str) -> boo
         .get(&netdata_key(provider, id))
         .map(|c| c.protected)
         .unwrap_or(false)
+}
+
+/// Whether the fleet ban pool is enabled (read locally).
+pub(crate) fn watchdog_ban_sync_enabled(dir: &Path) -> bool {
+    load_cfg(dir).watchdog.ban_sync
+}
+
+/// All protected server keys ("provider:id"), read locally (no SSH).
+pub(crate) fn crowdsec_protected_keys(dir: &Path) -> Vec<String> {
+    load_cfg(dir)
+        .crowdsec
+        .iter()
+        .filter(|(_, c)| c.protected)
+        .map(|(k, _)| k.clone())
+        .collect()
 }
 
 /// Record (or clear) that a server is CrowdSec-protected.
@@ -1678,6 +1699,51 @@ async fn watchdog_tick(
                         .body(&message)
                         .show();
                 }
+            }
+        }
+    }
+
+    // v0.1.72 — fleet ban pool: union every protected server's bans and push the
+    // missing ones. Best-effort; a report toast/alert fires only when something moved.
+    if file.watchdog.ban_sync {
+        let fleet: Vec<(String, String, String, String)> = fleets
+            .iter()
+            .flat_map(|(provider, list)| {
+                list.iter().filter_map(|info| {
+                    let host = info.ipv4.clone()?;
+                    crowdsec_is_protected(dir, provider, &info.id).then(|| {
+                        (
+                            provider.to_string(),
+                            info.id.clone(),
+                            host,
+                            info.label.clone(),
+                        )
+                    })
+                })
+            })
+            .collect();
+        if !fleet.is_empty() {
+            let out = crate::crowdsec::fleet_sync_given(dir, &fleet).await;
+            if out.propagated > 0 {
+                let message = format!(
+                    "Shared {} ban(s) across your protected servers",
+                    out.propagated
+                );
+                let _ = app.emit(
+                    "servers:alert",
+                    serde_json::json!({
+                        "kind": "security", "key": "fleet", "label": "Fleet",
+                        "message": message,
+                        "ts": time::OffsetDateTime::now_utc().unix_timestamp(),
+                    }),
+                );
+                use tauri_plugin_notification::NotificationExt;
+                let _ = app
+                    .notification()
+                    .builder()
+                    .title("NorthKey — fleet ban sync")
+                    .body(&message)
+                    .show();
             }
         }
     }
