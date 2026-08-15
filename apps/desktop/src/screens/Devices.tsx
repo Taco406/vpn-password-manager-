@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState, type ReactNode } from "react";
+import { askConfirm } from "../components/Confirm";
 import {
   Cloud,
   LogIn,
@@ -612,7 +613,7 @@ function SyncServer({ sync, onSyncChange }: { sync: SyncStatusInfo | null; onSyn
   };
 
   const destroy = async () => {
-    if (!window.confirm("Destroy the sync server? This deletes the Linode and stops billing. Your local vault is untouched.")) return;
+    if (!(await askConfirm("Destroy the sync server? This deletes the Linode and stops billing. Your local vault is untouched."))) return;
     setBusy(true);
     setMsg("");
     try {
@@ -637,9 +638,9 @@ function SyncServer({ sync, onSyncChange }: { sync: SyncStatusInfo | null; onSyn
       return;
     }
     if (
-      !window.confirm(
+      !(await askConfirm(
         "Switch to Sign in with Google?\n\nThis destroys your current sync server and redeploys a fresh one with Google enabled. Your local vault is untouched and re-uploads after you sign in. Any other devices will need to re-join.",
-      )
+      ))
     )
       return;
     setBusy(true);
@@ -740,7 +741,7 @@ function SyncServer({ sync, onSyncChange }: { sync: SyncStatusInfo | null; onSyn
   };
 
   const updateServer = async () => {
-    if (!window.confirm("Update the sync server to the latest version? It restarts its app (~30 seconds); your data is untouched.")) return;
+    if (!(await askConfirm("Update the sync server to the latest version? It restarts its app (~30 seconds); your data is untouched."))) return;
     setBusy(true);
     setMsg("Asking the server to update itself…");
     try {
@@ -753,7 +754,7 @@ function SyncServer({ sync, onSyncChange }: { sync: SyncStatusInfo | null; onSyn
   };
 
   const forget = async () => {
-    if (!window.confirm("Forget this sync server on this device? Your local vault stays; the server keeps running. You can deploy or join again afterward.")) return;
+    if (!(await askConfirm("Forget this sync server on this device? Your local vault stays; the server keeps running. You can deploy or join again afterward."))) return;
     setBusy(true);
     setMsg("");
     try {

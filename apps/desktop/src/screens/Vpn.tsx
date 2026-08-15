@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { askConfirm } from "../components/Confirm";
 import { useNavigate } from "react-router-dom";
 import { motion } from "framer-motion";
 import { Power, Zap, Cpu, MemoryStick, Activity, DollarSign, Gauge, Cloud, FileText } from "lucide-react";
@@ -97,7 +98,7 @@ export function Vpn() {
     }
   };
   const doDestroyPersistent = async () => {
-    if (!window.confirm("Destroy the always-on VPN node? This deletes the server and stops billing.")) return;
+    if (!(await askConfirm("Destroy the always-on VPN node? This deletes the server and stops billing."))) return;
     try {
       await vpnPersistentDestroy(); // also drops the tunnel when connected to this node
     } catch (e) {
@@ -343,7 +344,7 @@ function AlwaysOnVpn({
     setBusy(false);
   };
   const destroy = async () => {
-    if (!window.confirm("Destroy the always-on VPN node? This deletes the server and stops billing.")) return;
+    if (!(await askConfirm("Destroy the always-on VPN node? This deletes the server and stops billing."))) return;
     setBusy(true);
     setMsg("");
     try {
