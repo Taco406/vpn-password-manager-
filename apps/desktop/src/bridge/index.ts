@@ -662,6 +662,43 @@ export async function crowdsecAllowlistSet(
   await inv("crowdsec_allowlist_set", { provider, id, host, entries });
 }
 
+// --- System updates over SSH (v0.1.69) ---------------------------------------
+
+export interface ServerUpdates {
+  /** The package manager is genuinely busy right now (lock held). */
+  locked: boolean;
+  pending: number;
+  security: number;
+  rebootRequired: boolean;
+  packages: string[];
+}
+
+export interface ServerUpdatesApply {
+  ok: boolean;
+  rebootRequired: boolean;
+  log: string;
+}
+
+/** What updates a server has pending (Debian/Ubuntu, over the pinned SSH channel). */
+export async function serversUpdatesCheck(
+  provider: string,
+  id: string,
+  host: string,
+): Promise<ServerUpdates> {
+  if (!inTauri()) throw new Error("Server updates are only available in the desktop app.");
+  return inv<ServerUpdates>("servers_updates_check", { provider, id, host });
+}
+
+/** Install all pending updates, non-interactively. */
+export async function serversUpdatesApply(
+  provider: string,
+  id: string,
+  host: string,
+): Promise<ServerUpdatesApply> {
+  if (!inTauri()) throw new Error("Server updates are only available in the desktop app.");
+  return inv<ServerUpdatesApply>("servers_updates_apply", { provider, id, host });
+}
+
 // --- Server watchdog + Netdata (stage 2) -------------------------------------
 
 export interface WatchdogCfg {

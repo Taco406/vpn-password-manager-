@@ -8,6 +8,21 @@ The format follows [Keep a Changelog](https://keepachangelog.com/). Versions are
 [semantic](https://semver.org/). **Add a new `## [x.y.z]` section at the top in the same PR
 that bumps the app version** — that's how "the changelog updates on every merge."
 
+## [0.1.69] — 2026-08-13
+
+### Fixed
+- **“Protect this server” no longer wrongly insists the server is busy updating.** On stock
+  Ubuntu servers a harmless background process *looks like* the system updater even when
+  nothing is happening, so the protect step could claim “busy installing updates” forever.
+  It now only says busy when something genuinely holds the package manager — if you kept
+  seeing that message on an idle server, this was why, and it’s fixed.
+
+### Added
+- **See and install server updates from the app.** Every server’s **Manage** tab now has a
+  System updates card: how many updates are pending (security ones called out), whether the
+  server genuinely has its package manager busy right now, whether it wants a restart — and
+  an **Install updates** button that runs the whole upgrade for you, safely non-interactive.
+
 ## [0.1.68] — 2026-08-13
 
 ### Fixed

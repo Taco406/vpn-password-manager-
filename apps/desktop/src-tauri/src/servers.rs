@@ -1341,7 +1341,182 @@ pub async fn servers_firewall_allow_port(
 // the watchdog poller
 // ---------------------------------------------------------------------------
 
-/// One watchdog tick: list fleets, sample Netdata where enabled, evaluate, alert.
+// ---------------------------------------------------------------------------
+// System updates over SSH (v0.1.69): see what a server has pending and install
+// it with one click. Both scripts are FIXED strings (no user input reaches the
+// root shell), run over the pinned SSH channel.
+// ---------------------------------------------------------------------------
+
+/// What a check found. `locked` is the honest "the package manager is genuinely
+/// busy right now" signal (dpkg lock files held) — shown instead of guessing.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdatesOut {
+    pub locked: bool,
+    pub pending: u32,
+    pub security: u32,
+    pub reboot_required: bool,
+    /// First package names, for display.
+    pub packages: Vec<String>,
+}
+
+/// `apt list --upgradable` is read-only (no lock needed), so this works — and tells
+/// the truth — even while the server is mid-update.
+const UPDATES_CHECK_SCRIPT: &str = r#"export DEBIAN_FRONTEND=noninteractive
+if fuser /var/lib/dpkg/lock-frontend /var/lib/dpkg/lock >/dev/null 2>&1; then echo NK_LOCKED; fi
+apt-get update -qq 2>/dev/null || true
+apt list --upgradable 2>/dev/null || true
+if [ -f /var/run/reboot-required ]; then echo NK_REBOOT_REQUIRED; fi
+"#;
+
+/// Non-interactive upgrade that can never hang on a config prompt (`--force-confold`
+/// keeps the existing config file) and waits for, rather than fails on, a held lock.
+const UPDATES_APPLY_SCRIPT: &str = r#"export DEBIAN_FRONTEND=noninteractive
+mkdir -p /etc/apt/apt.conf.d
+echo 'DPKG::Lock::Timeout "300";' > /etc/apt/apt.conf.d/99northkey-lock
+apt-get update -qq || true
+apt-get -y -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold upgrade
+rc=$?
+if [ -f /var/run/reboot-required ]; then echo NK_REBOOT_REQUIRED; fi
+if [ $rc -eq 0 ]; then echo NK_UPDATES_DONE; fi
+exit $rc
+"#;
+
+/// Parse the check script's combined output.
+pub fn parse_updates(out: &str) -> UpdatesOut {
+    let locked = out.contains("NK_LOCKED");
+    let reboot_required = out.contains("NK_REBOOT_REQUIRED");
+    let mut packages = Vec::new();
+    let mut security = 0u32;
+    for line in out.lines() {
+        // apt list format: "name/suite version arch [upgradable from: old]"
+        if line.contains("[upgradable from:") {
+            if line.contains("-security") {
+                security += 1;
+            }
+            if let Some(name) = line.split('/').next() {
+                if !name.trim().is_empty() && packages.len() < 30 {
+                    packages.push(name.trim().to_string());
+                }
+            }
+        }
+    }
+    let pending = out
+        .lines()
+        .filter(|l| l.contains("[upgradable from:"))
+        .count() as u32;
+    UpdatesOut {
+        locked,
+        pending,
+        security,
+        reboot_required,
+        packages,
+    }
+}
+
+/// What updates a server has pending (Debian/Ubuntu). Uses the pinned SSH channel;
+/// requires NorthKey's key to be installed (same as the terminal / Protect).
+#[tauri::command]
+pub async fn servers_updates_check(
+    state: State<'_, AppState>,
+    provider: String,
+    id: String,
+    host: String,
+) -> Result<UpdatesOut, String> {
+    let (dir, locked) = {
+        let g = state.inner.lock().unwrap();
+        (g.data_dir.clone(), g.session.is_locked())
+    };
+    if locked {
+        return Err("Unlock your vault first.".into());
+    }
+    let host = host.trim().to_string();
+    if host.is_empty() {
+        return Err("This server has no public IP address.".into());
+    }
+    let out = crate::ssh::exec(&dir, &provider, &id, &host, UPDATES_CHECK_SCRIPT, 180).await?;
+    Ok(parse_updates(&format!("{}\n{}", out.stdout, out.stderr)))
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdatesApplyOut {
+    pub ok: bool,
+    pub reboot_required: bool,
+    /// Tail of the upgrade transcript.
+    pub log: String,
+}
+
+/// Install all pending updates on a server, non-interactively.
+#[tauri::command]
+pub async fn servers_updates_apply(
+    state: State<'_, AppState>,
+    provider: String,
+    id: String,
+    host: String,
+) -> Result<UpdatesApplyOut, String> {
+    let (dir, locked) = {
+        let g = state.inner.lock().unwrap();
+        (g.data_dir.clone(), g.session.is_locked())
+    };
+    if locked {
+        return Err("Unlock your vault first.".into());
+    }
+    let host = host.trim().to_string();
+    if host.is_empty() {
+        return Err("This server has no public IP address.".into());
+    }
+    let out = crate::ssh::exec(&dir, &provider, &id, &host, UPDATES_APPLY_SCRIPT, 900).await?;
+    let combined = format!("{}\n{}", out.stdout, out.stderr);
+    let ok = combined.contains("NK_UPDATES_DONE");
+    let reboot_required = combined.contains("NK_REBOOT_REQUIRED");
+    let log = combined
+        .lines()
+        .rev()
+        .take(40)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect::<Vec<_>>()
+        .join("\n");
+    crate::applog::info(
+        "servers.updates",
+        &format!("{provider}/{id}: apply ok={ok} reboot={reboot_required}"),
+    );
+    Ok(UpdatesApplyOut {
+        ok,
+        reboot_required,
+        log,
+    })
+}
+
+#[cfg(test)]
+mod updates_tests {
+    use super::parse_updates;
+
+    #[test]
+    fn parses_apt_list_output() {
+        let out = "Listing...\n\
+                   openssl/jammy-security 3.0.2-0ubuntu1.18 amd64 [upgradable from: 3.0.2-0ubuntu1.17]\n\
+                   curl/jammy-updates 7.81.0-1ubuntu1.20 amd64 [upgradable from: 7.81.0-1ubuntu1.19]\n\
+                   NK_REBOOT_REQUIRED\n";
+        let u = parse_updates(out);
+        assert!(!u.locked);
+        assert_eq!(u.pending, 2);
+        assert_eq!(u.security, 1);
+        assert!(u.reboot_required);
+        assert_eq!(u.packages, vec!["openssl", "curl"]);
+    }
+
+    #[test]
+    fn reports_locked_and_empty() {
+        let u = parse_updates("NK_LOCKED\nListing...\n");
+        assert!(u.locked);
+        assert_eq!(u.pending, 0);
+        assert!(!u.reboot_required);
+    }
+}
+
 /// Decision IDs already seen per server key, so a CrowdSec ban is announced once. First
 /// sight of a server seeds silently (no alert for the pre-existing backlog); later ticks
 /// alert only on genuinely new bans.
@@ -1366,6 +1541,7 @@ fn crowdsec_seen_new(key: &str, current: &[(i64, String, String)]) -> Vec<(Strin
     fresh
 }
 
+/// One watchdog tick: list fleets, sample Netdata where enabled, evaluate, alert.
 async fn watchdog_tick(
     app: &AppHandle,
     dir: &Path,

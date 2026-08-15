@@ -213,6 +213,8 @@ fn main() {
             crowdsec::crowdsec_demote,
             crowdsec::crowdsec_allowlist_get,
             crowdsec::crowdsec_allowlist_set,
+            servers::servers_updates_check,
+            servers::servers_updates_apply,
             servers::servers_watchdog_get,
             servers::servers_watchdog_set,
             servers::netdata_get,

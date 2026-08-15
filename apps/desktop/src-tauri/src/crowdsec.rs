@@ -46,10 +46,13 @@ echo 'DPKG::Lock::Timeout "300";' > /etc/apt/apt.conf.d/99northkey-lock
 # 0b) If the server is busy running its OWN package updates (unattended-upgrades), the
 #     package manager is locked. Wait a short while for it to finish; if it's still busy,
 #     bail immediately with a clear marker instead of hanging until the deploy times out.
+# Lock-files ONLY. An earlier version also matched the process name
+# "unattended-upgr" — but Ubuntu's idle unattended-upgrade-shutdown monitor runs
+# at ALL times with exactly that (15-char-truncated) name, so that check reported
+# "busy updating" forever on every stock Ubuntu box. Holding the dpkg lock is the
+# only real signal; if fuser is missing, the apt lock-timeout above is the net.
 apt_locked() {
-  fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1 \
-    || fuser /var/lib/dpkg/lock >/dev/null 2>&1 \
-    || pgrep -x unattended-upgr >/dev/null 2>&1
+  fuser /var/lib/dpkg/lock-frontend /var/lib/dpkg/lock >/dev/null 2>&1
 }
 tries=0
 while apt_locked; do
