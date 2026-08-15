@@ -8,6 +8,23 @@ The format follows [Keep a Changelog](https://keepachangelog.com/). Versions are
 [semantic](https://semver.org/). **Add a new `## [x.y.z]` section at the top in the same PR
 that bumps the app version** — that's how "the changelog updates on every merge."
 
+## [0.1.70] — 2026-08-15
+
+### Fixed
+- **Protecting a server could take its websites down after the next restart — fixed, with
+  self-healing.** The protection tool’s internal service used port 8080, the same port
+  Coolify’s web proxy needs, and it grabbed it first after a reboot — so the proxy couldn’t
+  start and every hosted site went dark. Now: new installs put that service on a free port
+  from the start, **“Re-run setup” on an already-protected server applies the same fix and
+  restarts the blocked proxy for you**, and a small self-heal runs on the server after every
+  boot (and every 5 minutes) to catch it ever happening again.
+
+### Added
+- **Force restart** (server panel → Overview). The normal Reboot politely asks the server’s
+  operating system to restart — which it can ignore, making the button look broken. Force
+  restart is the hold-the-power-button version (same as your provider console’s power cycle)
+  and can’t be ignored.
+
 ## [0.1.69] — 2026-08-13
 
 ### Fixed

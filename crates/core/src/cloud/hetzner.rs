@@ -562,6 +562,9 @@ impl super::manager::ServerManager for HetznerClient {
             PowerAction::Boot => "poweron",
             PowerAction::Shutdown => "shutdown",
             PowerAction::Reboot => "reboot",
+            // Hard power-cycle — the console's "Power cycle" button. `reboot` above is
+            // only an ACPI request the guest may ignore.
+            PowerAction::Reset => "reset",
         };
         let resp = self
             .http

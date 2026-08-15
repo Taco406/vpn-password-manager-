@@ -31,6 +31,10 @@ pub enum PowerAction {
     Boot,
     Shutdown,
     Reboot,
+    /// Hard power-cycle (like pressing the reset button). Hetzner's plain `reboot`
+    /// is an ACPI *request* the guest OS can ignore — which looks to the user like
+    /// "the Reboot button does nothing". Reset is the guaranteed variant.
+    Reset,
 }
 
 /// One server, normalized across providers.

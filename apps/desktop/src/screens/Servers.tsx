@@ -163,11 +163,13 @@ export function Servers() {
     };
   }, [refresh]);
 
-  const act = async (s: ManagedServer, action: "start" | "stop" | "reboot") => {
+  const act = async (s: ManagedServer, action: "start" | "stop" | "reboot" | "reset") => {
     const warn =
       action === "stop"
         ? `Stop "${s.label}"? A stopped server usually still bills until destroyed.`
-        : `${action === "start" ? "Start" : "Reboot"} "${s.label}"?`;
+        : action === "reset"
+          ? `Force restart "${s.label}"? This is like pressing the reset button — the system won't shut down cleanly. Use it when a normal reboot does nothing.`
+          : `${action === "start" ? "Start" : "Reboot"} "${s.label}"?`;
     if (!window.confirm(warn)) return;
     setBusy(true);
     setMsg("");
@@ -363,7 +365,7 @@ function ServerDrawer({
 }: {
   s: ManagedServer;
   busy: boolean;
-  onAct: (s: ManagedServer, action: "start" | "stop" | "reboot") => Promise<void>;
+  onAct: (s: ManagedServer, action: "start" | "stop" | "reboot" | "reset") => Promise<void>;
   onClose: () => void;
 }) {
   const [tab, setTab] = useState<DrawerTab>("overview");
@@ -591,7 +593,7 @@ function ServerCard({
   s: ManagedServer;
   busy: boolean;
   density: Density;
-  onAct: (s: ManagedServer, action: "start" | "stop" | "reboot") => Promise<void>;
+  onAct: (s: ManagedServer, action: "start" | "stop" | "reboot" | "reset") => Promise<void>;
   onOpen: () => void;
 }) {
   const [copied, setCopied] = useState(false);
@@ -762,7 +764,7 @@ function DrawerOverview({
 }: {
   s: ManagedServer;
   busy: boolean;
-  onAct: (s: ManagedServer, action: "start" | "stop" | "reboot") => Promise<void>;
+  onAct: (s: ManagedServer, action: "start" | "stop" | "reboot" | "reset") => Promise<void>;
 }) {
   return (
     <>
@@ -798,6 +800,15 @@ function DrawerOverview({
             className="text-[var(--accent)] hover:underline disabled:opacity-50"
           >
             Reboot
+          </button>
+          <button
+            disabled={busy || s.state === "stopped"}
+            onClick={() => void onAct(s, "reset")}
+            title="Hard power-cycle, like the reset button. A normal Reboot politely asks the
+operating system, which can ignore it — this one can't be ignored."
+            className="text-[var(--warn)] hover:underline disabled:opacity-50"
+          >
+            Force restart
           </button>
         </div>
       </div>
